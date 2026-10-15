@@ -62,14 +62,45 @@ export const Config = z.object({
   headlessProfile: z.string().default('headless').extra('volatile', true),
   /** 给那一轮叠一份插件自己的 patch（把 B站 MCP 挂上）—— 用户 profile 一个字都不用改 */
   overlayMcp: z.boolean().default(true).extra('volatile', true),
-  /** 跑 headless 时的工作目录 */
-  workspace: z.string().default('').extra('volatile', true),
   /** 日报形态：full=完整（现状）· brief=每条一两行 · off=不写报告（只发评论） */
   reportLevel: z.string().default('full').extra('volatile', true),
   /** 回复评论：默认关。开了之后只回「直接回复到它那条评论下面的人」 */
   replyToComments: z.boolean().default(false).extra('volatile', true),
   /** 每轮最多回几条 */
   replyPerRound: z.number().default(1).extra('volatile', true),
+  /**
+   * ⭐ 人设（2026-10-15 改）：**不再从工作区的 AGENTS.md 取**。
+   *
+   * 为什么改：AGENTS.md 是 DSH 的**项目约定文件**，语义是"给 AI 看的项目说明"，
+   * 与"使用者的 B站 人格"是**两件事**。实测踩到：工作区里的 AGENTS.md 往往是
+   * 某个子项目的开发说明（例如插件仓库自带的那份"帮用户安装时按这个顺序"），
+   * 一旦被当人设喂进去，模型会去演一个"插件安装助手" ✗。
+   *
+   * 现在改为：人设正文存在**插件家目录**的 `persona.md`，由设置页的文本框读写。
+   * 为什么存家目录而不是插件包目录：包目录装进 node_modules 后可能只读，
+   * 且升级（pnpm 重装 / link 重新指向）会覆盖 ⇒ 与 config.json / 凭证 / 报告同处一地才安全。
+   * 而且大家对搞人设的热情应该挺高，做成方便随手改的样子更合适。
+   *
+   * ⚠️ 本字段只是"开关 + 上限"，**正文不在配置树里**（长文本不适合塞 volatile 字段）。
+   */
+  personaEnabled: z.boolean().default(true).extra('volatile', true),
+  /** 人设正文最多注入多少字符（防止人设写太长把提示词撑爆） */
+  personaMaxChars: z.natural().default(8000).extra('volatile', true),
+  /**
+   * ⭐ 跑那一轮用哪个模型（2026-10-15 加）。
+   *
+   * 为什么要它：那一轮是**另起一个 headless 会话**跑的，它用哪个模型由
+   * **headless profile 自己的配置**决定（`agent-default-model`）——
+   * 使用者在这个插件里压根改不到。所以加这两个字段：
+   * 插件生成 overlay 时把它们**覆盖**进那一轮的配置树。
+   *
+   * 留空 = 不动，用 headless profile 原来的默认（向后兼容）。
+   * provider 是路由 id（如 workbuddy），model 是模型 id。
+   */
+  llmProvider: z.string().default('').extra('volatile', true),
+  llmModel: z.string().default('').extra('volatile', true),
+  /** 思考档位（留空 = 不写这个键，用上游默认） */
+  llmReasoningEffort: z.string().default('').extra('volatile', true),
 })
 
 export function apply(ctx, config) {
@@ -126,7 +157,9 @@ export function apply(ctx, config) {
    */
   const DEFAULTS = {
     perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
-    keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1,
+    keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, reportLevel: 'full', replyToComments: false, replyPerRound: 1,
+    personaEnabled: true, personaMaxChars: 8000,
+    llmProvider: '', llmModel: '', llmReasoningEffort: '',
   }
   const normalize = (src, base) => {
     const out = { ...base }
@@ -142,6 +175,26 @@ export function apply(ctx, config) {
   }
   const cfg = normalize(readJson(cfgFile, {}), normalize(config, { ...DEFAULTS }))
   const saveCfg = (patch) => { Object.assign(cfg, normalize(patch, cfg)); writeJson(cfgFile, cfg) }
+
+  /* ─────────────── 人设（persona） ───────────────
+   * 人设正文落**插件家目录**的 `persona.md`：
+   *   ① 与 config.json / 凭证 / 报告同处一地（升级插件不会覆盖家目录 ✓）
+   *   ② 独立成文件而不是塞进 config.json —— 长文本、且用户可能想直接用编辑器改它
+   *   ③ 每一轮**现读**（见 promptFor）⇒ 改完立刻生效，不需要重启宿主、也不需要重跑定时器
+   *      —— 这正是"热加载"的落点：宿主侧的 apply() 只认路径，内容每轮重新读盘。
+   */
+  const personaFile = join(stateDir, 'persona.md')
+
+  const readPersona = () => {
+    try { return readFileSync(personaFile, 'utf8') } catch { return '' }
+  }
+  const writePersona = (text) => {
+    const s = String(text ?? '')
+    // 上限保护：人设是喂进提示词的，别让一次粘贴几百 KB 把每轮都撑爆
+    const capped = s.length > 200_000 ? s.slice(0, 200_000) : s
+    writeFileSync(personaFile, capped, 'utf8')
+    return capped
+  }
 
   ensureHomeFiles(pluginDir, stateDir, log)
 
@@ -433,23 +486,32 @@ export function apply(ctx, config) {
       if (existsSync(homeCopy) && statSync(homeCopy).mtimeMs > statSync(shipped).mtimeMs) duty = homeCopy
     } catch { /* 读不到就用 shipped 那份 */ }
     const kws = Array.isArray(cfg.keywords) ? cfg.keywords.filter(Boolean) : []
-    // ⭐ 开场先让它读**工作区**的 AGENTS.md —— 这一轮的工作目录就是使用者的工作区，
-    //    AGENTS.md 本来就会自动注入；这里再点一句，保证它真按使用者的设定来（别人的设定同理）。
-    // ⭐ 那一轮的工作目录是**插件家**（沙箱只让它写自己工作目录里的东西 ✗），
-    //    所以"使用者的设定"由**我们自己读进来**喂给它 —— 它在宿主进程里跑，没有沙箱限制 ✓
+    // ⭐ 人设：从**插件家目录**的 persona.md 现读（2026-10-15 改）
+    //
+    // 改之前是读「工作区的 AGENTS.md」—— 那个做法已被废除，两个原因：
+    //   ① AGENTS.md 是 DSH 的**项目说明约定**，语义 ≠ "使用者人格"；
+    //      工作区里那份常常是某个子项目的开发文档（实测：插件仓库自带的
+    //      "帮用户安装时按这个顺序"），喂进去会让模型去演一个安装助手 ✗
+    //   ② 那一轮 headless 会话的 cwd 是**插件家**（沙箱只让它写自己工作目录 ✓），
+    //      并不等于"使用者的工作区"，所以"读工作目录里的 AGENTS.md"本身就是错位的
+    //
+    // 现在是：人设正文由设置页写进 persona.md，这里**每轮现读** ⇒ 改完即时生效（热加载 ✓）。
     let ownerDoc = ''
-    try {
-      const wsDir = String(cfg.workspace || '').trim() || process.cwd()
-      const agents = join(wsDir, 'AGENTS.md')
-      if (existsSync(agents)) {
-        const text = readFileSync(agents, 'utf8')
-        ownerDoc = '\n\n===== 使用者的 AGENTS.md（他写给自己 AI 的人设与准则，**按这个来**）=====\n'
-          + text.slice(0, 6000)
-          + '\n===== 设定结束 =====\n'
-      }
-    } catch { /* 读不到就算了，别因此跑不成 */ }
+    if (cfg.personaEnabled !== false) {
+      try {
+        const text = readPersona()
+        if (text.trim()) {
+          const cap = Math.max(500, Math.min(Number(cfg.personaMaxChars) || 8000, 100000))
+          ownerDoc = `\n\n===== 使用者的设定（人设与准则，**按这个来**；由使用者在插件设置页里写的）=====\n`
+            + text.slice(0, cap)
+            + `\n===== 设定结束 =====\n`
+        }
+      } catch { /* 读不到就算了，别因此跑不成 */ }
+    }
     return `你是这个账号的 B站 助手。`
-      + `下面是使用者的设定（如果有）—— **按它来**，别用你默认那套人格。`
+      + (ownerDoc
+        ? `下面是使用者的设定 —— **按它来**，别用你默认那套人格。`
+        : `使用者还没写人设 —— 那就中性一点，别擅自扮演任何人格。`)
       + ownerDoc
       + `然后读章程 ${duty}，按里面的要求刷一轮 B站，`
       + (cfg.reportLevel === 'brief'
@@ -469,29 +531,54 @@ export function apply(ctx, config) {
   }
 
   /**
-   * 给 headless 那一轮写一份 overlay —— 把 B站 MCP 挂上去。
-   * 🔴 为什么需要它：**某个 profile 能拿到什么工具，取决于它自己那层的 patch**
+   * 给 headless 那一轮写一份 overlay —— 做两件事：
+   *   ① 把 B站 MCP 挂上去（原来就有的）
+   *   ② ⭐ 把使用者在设置页选的**模型**覆盖进那一轮的配置树（2026-10-15 加）
+   *
+   * 🔴 为什么需要它：**某个 profile 能拿到什么工具、用哪个模型，取决于它自己那层的 patch**
    *    （headless 里那两条 B站 MCP 就是当初手写进去的）。分发给别人时不能要求人家改 profile，
    *    所以插件自己生成一份、跑的时候 `--patch` 带上（dsh 支持可重复的 `--patch`）。
+   *
+   * ⚠️ 模型那一段的写法要点：`agent-default-model` 是 **profile 里已存在的条目**
+   *    ⇒ 这里**只给 config、不写 name**（按 id 匹配覆盖；写 name 反而可能变成重复条目）。
+   *    这与既有做法一致：profile 自己的 cordis.patch.yml 里就是 `- id: agent-default-model` + `config:`。
    */
   const ensureOverlay = () => {
-    if (!cfg.overlayMcp) return null
+    const lines = []
+
+    // ① B站 MCP（受 overlayMcp 开关控制）
+    if (cfg.overlayMcp) {
+      const script = join(stateDir, 'mcp_server.py')
+      const posix = (p) => String(p).replace(/\\/g, '/')
+      lines.push(
+        '- insert:',
+        '    - id: mcp-bili-duty',
+        "      name: '@deepseek-ai/dsh-mcp-client'",
+        '      config:',
+        '        serverName: bili-duty',
+        '        transport: stdio',
+        `        command: '${posix(cfg.pythonPath || 'python')}'`,
+        '        args:',
+        `          - '${posix(script)}'`,
+        '',
+      )
+    }
+
+    // ② 模型覆盖（只在使用者真的选了 model 时才写）
+    if (String(cfg.llmModel || '').trim()) {
+      lines.push('- id: agent-default-model')
+      lines.push('  config:')
+      if (String(cfg.llmProvider || '').trim()) lines.push(`    provider: '${String(cfg.llmProvider).trim()}'`)
+      lines.push(`    model: '${String(cfg.llmModel).trim()}'`)
+      if (String(cfg.llmReasoningEffort || '').trim()) {
+        lines.push(`    reasoningEffort: '${String(cfg.llmReasoningEffort).trim()}'`)
+      }
+      lines.push('')
+    }
+
+    if (!lines.length) return null
     const file = join(stateDir, 'headless-overlay.yml')
-    const script = join(stateDir, 'mcp_server.py')
-    const posix = (p) => String(p).replace(/\\/g, '/')
-    const yml = [
-      '- insert:',
-      '    - id: mcp-bili-duty',
-      "      name: '@deepseek-ai/dsh-mcp-client'",
-      '      config:',
-      '        serverName: bili-duty',
-      '        transport: stdio',
-      `        command: '${posix(cfg.pythonPath || 'python')}'`,
-      '        args:',
-      `          - '${posix(script)}'`,
-      '',
-    ].join('\n')
-    try { writeFileSync(file, yml, 'utf8'); return file } catch (e) { log(`写 overlay 失败：${e?.message ?? e}`); return null }
+    try { writeFileSync(file, lines.join('\n'), 'utf8'); return file } catch (e) { log(`写 overlay 失败：${e?.message ?? e}`); return null }
   }
 
   const runDuty = (why = 'window') => {
@@ -501,11 +588,11 @@ export function apply(ctx, config) {
     const args = [...dsh.args, '--profile', cfg.headlessProfile || 'headless']
     if (overlay) args.push('--patch', overlay)
     args.push(promptFor())
-    // ⭐ 这一轮的工作目录 = 使用者（或别的用户）的**工作区** —— 只有这样它的 `AGENTS.md` 才会自动加载。
-    // ⭐ 工作目录 = **插件家**：那一轮**被沙箱关着**，只写得了自己工作目录里的东西 ✗
-    //    （2026-10-14 教训：为了让它读工作区里的 AGENTS.md 把 cwd 改成工作区 ⇒
-    //      它写不了家目录里的 out/ 报告、整轮卡在"我是被沙箱关着的"上面打转 ✗；
-    //      现在改成"设定由插件读进来、内联进提示词" ✓，cwd 回到插件家 ✓）
+    // ⭐ 工作目录 = **插件家**（不是使用者的工作区）。
+    //    原因（2026-10-14 教训）：那一轮**被沙箱关着**，只写得了自己工作目录里的东西 ——
+    //    曾经为了让它读工作区里的 AGENTS.md 而把 cwd 改成工作区 ⇒
+    //    它写不了家目录里的 out/ 报告、整轮卡在"我是被沙箱关着的"上面打转 ✗。
+    //    ⇒ 现在的做法：cwd 留在家目录，**人设由插件读出来内联进提示词**（见 promptFor）✓
     const cwd = stateDir
     log(`刷B站开跑（${why}）：${dsh.command} ${args.slice(0, 3).join(' ')} …  cwd=${cwd}`)
     const child = spawn(dsh.command, args, {
@@ -814,16 +901,74 @@ export function apply(ctx, config) {
       const patch = {}
       for (const k of ['perDay', 'peakValley', 'noon', 'night', 'autoComment', 'transcribe', 'asrModel',
         'commentPerRound', 'mentionName',
-        'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound']) {
+        'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'reportLevel', 'replyToComments', 'replyPerRound',
+        'personaEnabled', 'personaMaxChars',
+        'llmProvider', 'llmModel', 'llmReasoningEffort']) {
         if (k in body) patch[k] = body[k]
       }
       if ('perDay' in patch) patch.perDay = Math.max(0, Math.min(Number(patch.perDay) || 0, 50))
       if ('reportLevel' in patch) patch.reportLevel = ['full', 'brief', 'off'].includes(String(patch.reportLevel)) ? String(patch.reportLevel) : 'full'
       if ('replyToComments' in patch) patch.replyToComments = Boolean(patch.replyToComments)
       if ('replyPerRound' in patch) patch.replyPerRound = Math.max(1, Math.min(Number(patch.replyPerRound) || 1, 10))
+      if ('personaMaxChars' in patch) patch.personaMaxChars = Math.max(500, Math.min(Number(patch.personaMaxChars) || 8000, 100000))
       saveCfg(patch)
       log(`设置已更新：${JSON.stringify(patch)}`)
       return sendJson(res, 200, { ok: true, config: cfg })
+    }
+
+    /* ── 可用模型清单：给设置页的下拉框铺选项 ──
+     * 数据源是 DSH 自己的 llm 服务（**不是**插件硬编码一张表）：
+     *   llm.listProviders() → [{ id, name }]
+     *   llm.listModels(providerId) → [{ id, name }]
+     *
+     * ⚠️ 两个坑（都踩过 / 库里记过）：
+     *   ① 必须 `ctx.get('llm')`，**不能** `ctx.llm` —— 后者类型检查过、运行时是 undefined
+     *      （dsh-llm 用声明合并加了 Context.llm，但服务只能用 ctx.get 取）
+     *   ② listModels 是 async，要 await；且**单个 provider 失败不能拖垮整张表**（逐个 try）
+     */
+    if (req.method === 'GET' && path === '/api/bili-duty/models') {
+      try {
+        const llm = ctx.get('llm')
+        if (!llm) return sendJson(res, 200, { ok: true, providers: [], note: '拿不到 llm 服务（ctx.get("llm") 是 undefined）' })
+        const providers = llm.listProviders?.() ?? []
+        const out = []
+        for (const p of providers) {
+          let models = []
+          try {
+            models = (await llm.listModels?.(p.id) ?? []).map((m) => ({ id: String(m.id), name: String(m.name ?? m.id) }))
+          } catch { /* 这个 provider 取不到就跳过，别拖垮整张表 */ }
+          out.push({ id: String(p.id), name: String(p.name ?? p.id), models })
+        }
+        return sendJson(res, 200, {
+          ok: true,
+          providers: out,
+          current: { provider: cfg.llmProvider || '', model: cfg.llmModel || '', reasoningEffort: cfg.llmReasoningEffort || '' },
+        })
+      } catch (e) {
+        return sendJson(res, 200, { ok: false, providers: [], error: String(e?.message ?? e) })
+      }
+    }
+
+    /* ── 人设（persona）：设置页的文本框 ⇄ 家目录里的 persona.md ──
+     * 读：GET  /api/bili-duty/persona   ⇒ { ok, text, file, enabled, maxChars }
+     * 写：POST /api/bili-duty/persona   { text }  ⇒ 落盘 persona.md
+     * ⭐ 不需要重启、也不需要重挂：promptFor() 每一轮**现读**这个文件 ⇒ 写完即时生效
+     */
+    if (req.method === 'GET' && path === '/api/bili-duty/persona') {
+      const text = readPersona()
+      return sendJson(res, 200, {
+        ok: true, text, file: personaFile,
+        enabled: cfg.personaEnabled !== false,
+        maxChars: cfg.personaMaxChars,
+        chars: text.length,
+      })
+    }
+
+    if (req.method === 'POST' && path === '/api/bili-duty/persona') {
+      const body = await readBody(req)
+      const text = writePersona(body?.text)
+      log(`人设已更新（${text.length} 字符）→ ${personaFile}`)
+      return sendJson(res, 200, { ok: true, file: personaFile, chars: text.length })
     }
 
     if (req.method === 'POST' && path === '/api/bili-duty/run') {
