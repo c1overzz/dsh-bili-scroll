@@ -1,5 +1,5 @@
 /**
- * dsh-bili-scroll —— 浏览器半端（**设置在「设置」里的一页**）
+ * dsh-bili-scroll —— 浏览器半端（**面板挂在右侧栏**）
  * ============================================================================
  * ⭐ **client bundle 不是 ESM，是自注册脚本**（2026-10-14 从官方包里挖到的约定）：
  *
@@ -8,20 +8,35 @@
  *       factory: (require) => { ... return { inject: [...], apply(ctx) {...} } },
  *     })
  *
- * ⭐ **怎么进「设置」**（抄第三方插件 `dsh-meme/client.js`，2026-10-14 使用者指出位置不对后才查到）：
+ * ⭐ **入口：右侧栏**（2026-10-16 从「设置页」搬过来的）
  *
- *     const slots = ctx.get('slots')
- *     slots.inject('settings.section', () => slots.register(
- *       { name: 'settings.section', id: 'bili-scroll', order: 30, label: '刷B站' },   // label = 左侧导航那一项
- *       () => h(Panel),
- *     ))
+ * 原来是注册成 `settings.section`（设置里的一页）。搬到右侧栏是因为
+ * 使用者更希望它**随手就能开**：右侧栏是常驻的，设置页要专门点进去。
  *
- *   ⇒ **别自己糊一个标题栏按钮 + 全屏 overlay** ✗（第一版就是这么干的，使用者一眼看出"跟别的插件不一样"）。
+ * 右侧栏要注册**三处**（两阶段注册，少一处就点不动或没标题）：
  *
- * 这一页要满足使用者 2026-10-14 说的形状：
+ *   ① tab 类型定义   `ctx.sidebarRightTabs.register({ id, kind, title, guide })`
+ *      —— `guide` 让它在右侧栏「开始」页出现一张卡
+ *   ② tab 本体       `slots.register('sidebar.right.pane.tab', { key: <①的 id> })`
+ *      —— 🔴 **只注册①的卡是点不动的**：卡片的点击行为被官方写死成
+ *         `openTab(selected.kind, { replaceTab: true })`，必须真有这个 kind 的页面
+ *   ③ tab 标题芯片   `slots.register('sidebar.right.pane.tab.title', { key: <①的 id> })`
+ *      —— 可选，不注册就用 ① 里的 `title()`
+ *
+ * ⚠️ **两个 inject 是两回事**（极易错）：
+ *   · 本文件 `inject`（下面是 `['slots', 'sidebarRightTabs']`）= **客户端服务短名**
+ *   · `package.json` 的 `dsh.client.inject` = **模块包名**（预加载哪些 client 模块）
+ *   填错任一处 ⇒ 该 entry 永远 pending ⇒ **整页 `Failed to load plugins`**（不是局部失效）。
+ *   ⚠️ 改 `package.json` 那处属于**包元数据** ⇒ **必须重启宿主**才生效（JS 那处走 HMR）。
+ *
+ * ⚠️ **id / kind 撞车会 throw**，而 throw 同样拖垮整个 entry ⇒ 已扫过：
+ *   内置 kind 有 keyed/list/plan/subagentchat/terminal，第三方见过 wb-switch；
+ *   本插件用 `bili-scroll`，未占用。
+ *
+ * 这一页要满足使用者说的形状：
  *   · **总开关 → 打开之后下面才展开子开关**（峰谷自动刷 → 中午 / 晚上）
  *   · **数字项要能自己填**（定量刷：每天几条）
- *   · **账号绑定必须在设置页里**（扫码登录 + 二维码直接显示在页里）
+ *   · **账号绑定必须在面板里**（扫码登录 + 二维码直接显示在页里）
  *   · 会发东西出去的（自动评论）、要下大模型的（本地转写）**默认关**
  * ============================================================================
  */
@@ -41,7 +56,9 @@ window.__ModuleLoader__.load({
     })).json()
 
     const CSS = `
-[data-bd-page]{display:flex;flex-direction:column;gap:18px;padding:2px 2px 8px;max-width:640px;}
+/* 右侧栏 tab 的外层：撑满并自己滚（右侧栏比设置页窄得多，别写死 max-width） */
+[data-bd-tabwrap]{display:block;height:100%;overflow:auto;box-sizing:border-box;padding:14px 12px 24px;}
+[data-bd-page]{display:flex;flex-direction:column;gap:18px;padding:2px 2px 8px;}
 [data-bd-sec]{display:flex;flex-direction:column;gap:8px;}
 [data-bd-h]{font-size:11px;font-weight:600;letter-spacing:.04em;color:var(--dsw-alias-label-tertiary,#9aa0a6);}
 [data-bd-row]{display:flex;align-items:center;gap:10px;}
@@ -643,22 +660,78 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /** 右侧栏 tab 类型 id；也是 `sidebar.right.pane.tab` 那个 keyed 槽的键。 */
+    const TAB_ID = 'bili-scroll'
+    /** tab 类型的 kind：openTab 用它指名；不能与内置重名（见文件头）。 */
+    const TAB_KIND = 'bili-scroll'
+
+    /**
+     * 右侧栏 tab 的本体 = 当前这个面板组件（**不是 iframe**）。
+     *
+     * 为什么不像别的插件那样嵌 iframe：本插件的面板**本来就是 React 组件**
+     * （`Panel` 就在本文件里），直接复用最省事 —— 没有 iframe 的高度/滚动条打架问题，
+     * 也不用再发一份页面出去。（若面板是独立 HTML，那才该用 iframe。）
+     */
+    function BiliScrollTab() {
+      return h('div', { 'data-bd-tabwrap': '' }, h(Panel))
+    }
+
     return {
-      inject: ['slots'],
+      /**
+       * ⚠️ 这里是**客户端服务短名**，不是包名。
+       *    包名那份在 package.json 的 `dsh.client.inject`（两处含义不同）。
+       *    `sidebarRightTabs` 由 `@deepseek-ai/dsh-client-ui-sidebar-right` 提供。
+       */
+      inject: ['slots', 'sidebarRightTabs'],
       apply(ctx) {
         const style = document.createElement('style')
         style.setAttribute('data-plugin-css', 'dsh-bili-duty')
         style.textContent = CSS
         document.head.appendChild(style)
-        ctx.effect(() => () => style.remove(), 'dsh-bili-duty: 设置页样式')
+        ctx.effect(() => () => style.remove(), 'dsh-bili-duty: 面板样式')
 
-        // ⭐ 进「设置」：label 就是左侧导航里那一项（抄 dsh-meme 的写法）
         const slots = (typeof ctx.get === 'function' ? ctx.get('slots') : undefined) || ctx.slots
         if (!slots) return
-        slots.inject('settings.section', () => slots.register(
-          { name: 'settings.section', id: 'bili-scroll', order: 30, label: '刷B站' },
-          () => h(Panel),
-        ))
+
+        // ── ① tab 类型定义：让它在右侧栏「开始」页出现一张卡 ──
+        //    整段包 try/catch：boot 对「任一 entry 未激活」是致命的，
+        //    宁可本插件没入口，也不能把整页 boot 拖垮。
+        try {
+          ctx.sidebarRightTabs.register({
+            id: TAB_ID,
+            kind: TAB_KIND,
+            // `extension` = 可被 builtin 覆盖的扩展带；三值只有 extension / builtin / fallback。
+            priority: 'extension',
+            keepMounted: true,                 // 切走/换会话不卸载，否则每次展开都回首页
+            title: () => '刷B站',
+            guide: [
+              {
+                id: 'panel',
+                order: 40,                     // 排在 wb-switch(30) 之后
+                title: () => '刷B站',
+                description: () => '每天替你看一轮 B站、挑出值得的，写份日报',
+              },
+            ],
+          })
+        } catch (e) { console.error('[dsh-bili-duty] 注册右侧栏 tab 类型失败：', e) }
+
+        // ── ② tab 本体（🔴 只注册 ① 的卡是点不动的）──
+        //    key 必须是 ① 里的 `id`，不是 `kind`。
+        try {
+          ctx.effect(() => slots.inject('sidebar.right.pane.tab', () =>
+            slots.register({ name: 'sidebar.right.pane.tab', key: TAB_ID }, BiliScrollTab),
+          ), 'bili-duty: 右侧栏 tab 本体')
+        } catch (e) { console.error('[dsh-bili-duty] 注册右侧栏 tab 本体失败：', e) }
+
+        // ── ③ tab 标题芯片（可选；不注册会用 ① 的 title()）──
+        try {
+          ctx.effect(() => slots.inject('sidebar.right.pane.tab.title', () =>
+            slots.register(
+              { name: 'sidebar.right.pane.tab.title', key: TAB_ID },
+              function BiliScrollTitle() { return h('span', null, '刷B站') },
+            ),
+          ), 'bili-duty: 右侧栏 tab 标题')
+        } catch (e) { console.error('[dsh-bili-duty] 注册右侧栏 tab 标题失败：', e) }
       },
     }
   },
