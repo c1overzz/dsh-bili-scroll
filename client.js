@@ -1,5 +1,5 @@
 /**
- * dsh-bili-scroll —— 浏览器半端（**设置在「设置」里的一页**）
+ * dsh-bili-scroll —— 浏览器半端（**面板挂在右侧栏**）
  * ============================================================================
  * ⭐ **client bundle 不是 ESM，是自注册脚本**（2026-10-14 从官方包里挖到的约定）：
  *
@@ -8,20 +8,35 @@
  *       factory: (require) => { ... return { inject: [...], apply(ctx) {...} } },
  *     })
  *
- * ⭐ **怎么进「设置」**（抄第三方插件 `dsh-meme/client.js`，2026-10-14 使用者指出位置不对后才查到）：
+ * ⭐ **入口：右侧栏**（2026-10-16 从「设置页」搬过来的）
  *
- *     const slots = ctx.get('slots')
- *     slots.inject('settings.section', () => slots.register(
- *       { name: 'settings.section', id: 'bili-scroll', order: 30, label: '刷B站' },   // label = 左侧导航那一项
- *       () => h(Panel),
- *     ))
+ * 原来是注册成 `settings.section`（设置里的一页）。搬到右侧栏是因为
+ * 使用者更希望它**随手就能开**：右侧栏是常驻的，设置页要专门点进去。
  *
- *   ⇒ **别自己糊一个标题栏按钮 + 全屏 overlay** ✗（第一版就是这么干的，使用者一眼看出"跟别的插件不一样"）。
+ * 右侧栏要注册**三处**（两阶段注册，少一处就点不动或没标题）：
  *
- * 这一页要满足使用者 2026-10-14 说的形状：
+ *   ① tab 类型定义   `ctx.sidebarRightTabs.register({ id, kind, title, guide })`
+ *      —— `guide` 让它在右侧栏「开始」页出现一张卡
+ *   ② tab 本体       `slots.register('sidebar.right.pane.tab', { key: <①的 id> })`
+ *      —— 🔴 **只注册①的卡是点不动的**：卡片的点击行为被官方写死成
+ *         `openTab(selected.kind, { replaceTab: true })`，必须真有这个 kind 的页面
+ *   ③ tab 标题芯片   `slots.register('sidebar.right.pane.tab.title', { key: <①的 id> })`
+ *      —— 可选，不注册就用 ① 里的 `title()`
+ *
+ * ⚠️ **两个 inject 是两回事**（极易错）：
+ *   · 本文件 `inject`（下面是 `['slots', 'sidebarRightTabs']`）= **客户端服务短名**
+ *   · `package.json` 的 `dsh.client.inject` = **模块包名**（预加载哪些 client 模块）
+ *   填错任一处 ⇒ 该 entry 永远 pending ⇒ **整页 `Failed to load plugins`**（不是局部失效）。
+ *   ⚠️ 改 `package.json` 那处属于**包元数据** ⇒ **必须重启宿主**才生效（JS 那处走 HMR）。
+ *
+ * ⚠️ **id / kind 撞车会 throw**，而 throw 同样拖垮整个 entry ⇒ 已扫过：
+ *   内置 kind 有 keyed/list/plan/subagentchat/terminal，第三方见过 wb-switch；
+ *   本插件用 `bili-scroll`，未占用。
+ *
+ * 这一页要满足使用者说的形状：
  *   · **总开关 → 打开之后下面才展开子开关**（峰谷自动刷 → 中午 / 晚上）
  *   · **数字项要能自己填**（定量刷：每天几条）
- *   · **账号绑定必须在设置页里**（扫码登录 + 二维码直接显示在页里）
+ *   · **账号绑定必须在面板里**（扫码登录 + 二维码直接显示在页里）
  *   · 会发东西出去的（自动评论）、要下大模型的（本地转写）**默认关**
  * ============================================================================
  */
@@ -41,7 +56,9 @@ window.__ModuleLoader__.load({
     })).json()
 
     const CSS = `
-[data-bd-page]{display:flex;flex-direction:column;gap:18px;padding:2px 2px 8px;max-width:640px;}
+/* 右侧栏 tab 的外层：撑满并自己滚（右侧栏比设置页窄得多，别写死 max-width） */
+[data-bd-tabwrap]{display:block;height:100%;overflow:auto;box-sizing:border-box;padding:14px 12px 24px;}
+[data-bd-page]{display:flex;flex-direction:column;gap:18px;padding:2px 2px 8px;}
 [data-bd-sec]{display:flex;flex-direction:column;gap:8px;}
 [data-bd-h]{font-size:11px;font-weight:600;letter-spacing:.04em;color:var(--dsw-alias-label-tertiary,#9aa0a6);}
 [data-bd-row]{display:flex;align-items:center;gap:10px;}
@@ -62,6 +79,13 @@ window.__ModuleLoader__.load({
   background:var(--dsw-alias-bg-overlay,rgba(128,128,128,.12));color:inherit;font-family:inherit;}
 [data-bd-input]:focus{outline:none;border-color:#3b82f6;}
 [data-bd-num]{width:88px;text-align:center;}
+[data-bd-select]{width:100%;box-sizing:border-box;padding:7px 9px;border-radius:8px;font-size:12px;
+  border:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.14));
+  background:var(--dsw-alias-bg-overlay,rgba(128,128,128,.12));color:inherit;font-family:inherit;cursor:pointer;}
+[data-bd-select]:focus{outline:none;border-color:#3b82f6;}
+[data-bd-persona]{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;line-height:1.5;resize:vertical;}
+[data-bd-row2]{display:flex;gap:8px;}
+[data-bd-row2]>*{flex:1;min-width:0;}
 [data-bd-btn]{padding:7px 12px;border-radius:8px;font-size:12px;cursor:pointer;font-family:inherit;
   border:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.16));
   background:var(--dsw-alias-bg-overlay,rgba(128,128,128,.14));color:inherit;}
@@ -133,9 +157,8 @@ window.__ModuleLoader__.load({
       const [msg, setMsg] = React.useState('')
       const [msgTone, setMsgTone] = React.useState('')
       const [kws, setKws] = React.useState(null)
-      const [ws, setWs] = React.useState(null)
-      const [rl, setRl] = React.useState(null)
-      const [newVer, setNewVer] = React.useState('')       // 发现的新版本号（空 = 没发现）          // 日报形态：full / brief / off
+      const [rl, setRl] = React.useState(null)          // 日报形态：full / brief / off
+      const [newVer, setNewVer] = React.useState('')    // 发现的新版本号（空 = 没发现）
       // ⚠️ 输入框必须绑"本地草稿"：页面每 5 秒轮询 /status，服务端那份会把 config 盖掉
       //    ⇒ 直接绑 cfg 的话，用户打字打到一半就被冲没了 ✗（2026-10-14 陌生人验收时抓到）
       const [perDay, setPerDay] = React.useState(null)
@@ -147,11 +170,26 @@ window.__ModuleLoader__.load({
       const [report, setReport] = React.useState(null)        // 非 null = 报告已展开   // 顶部那行状态（跑一轮/装依赖的反馈原来在最底下，看不见）
       const [loginState, setLoginState] = React.useState('')
       const [loginTone, setLoginTone] = React.useState('')
+      // ── 人设（2026-10-15 新增）──
+      // ⭐ 人设**不走 /status 轮询**，只在挂载时 GET /persona 一次，之后完全由本地草稿管；
+      //    否则每 5 秒的轮询会把用户正在编辑的正文冲掉（与上面输入框同一个教训）。
+      const [persona, setPersona] = React.useState(null)
+      const [personaSaved, setPersonaSaved] = React.useState(null)   // 服务端那份（用来判"有没有未保存改动"）
+      const [personaFile, setPersonaFile] = React.useState('')
+      const [personaChars, setPersonaChars] = React.useState(null)
+      const [personaMsg, setPersonaMsg] = React.useState('')
+      const [personaTone, setPersonaTone] = React.useState('')
+      // ── 模型（2026-10-15 新增）──
+      // 清单从 /models 拉（**不硬编码**：DSH 的 provider/模型由使用者装的路由决定）
+      const [models, setModels] = React.useState(null)          // [{id,name,models:[{id,name}]}]
+      const [modelsNote, setModelsNote] = React.useState('')
+      const [mProvider, setMProvider] = React.useState(null)
+      const [mModel, setMModel] = React.useState(null)
+      const [mEffort, setMEffort] = React.useState(null)
 
       const cfg = st?.config
       React.useEffect(() => {
         if (cfg && kws === null) setKws((cfg.keywords || []).join('\n'))
-        if (cfg && ws === null) setWs(cfg.workspace || '')
         if (cfg && rl === null) setRl(cfg.reportLevel || 'full')
         if (cfg && perDay === null) setPerDay(String(cfg.perDay ?? 5))
         if (cfg && perRound === null) setPerRound(String(cfg.commentPerRound ?? 1))
@@ -160,6 +198,41 @@ window.__ModuleLoader__.load({
       }, [cfg])
 
       const win = { ...DEFAULT_WINDOWS, ...(st?.windows || {}) }
+
+      // ⭐ 人设：挂载时取一次（**不进轮询**，免得冲掉正在编辑的草稿）
+      React.useEffect(() => {
+        let alive = true
+        ;(async () => {
+          try {
+            const d = await jget('/persona')
+            if (!alive || !d?.ok) return
+            setPersona((cur) => (cur === null ? (d.text || '') : cur))
+            setPersonaSaved(d.text || '')
+            setPersonaFile(d.file || '')
+            setPersonaChars(d.chars ?? (d.text || '').length)
+          } catch { /* 取不到就等用户点保存 */ }
+        })()
+        return () => { alive = false }
+      }, [])
+
+      // ⭐ 模型清单：同样只在挂载时取一次（providers/模型不会天天变）
+      React.useEffect(() => {
+        let alive = true
+        ;(async () => {
+          try {
+            const d = await jget('/models')
+            if (!alive) return
+            if (Array.isArray(d?.providers)) setModels(d.providers)
+            if (d?.note) setModelsNote(d.note)
+            else if (d && d.ok === false && d.error) setModelsNote(d.error)
+            const cur = d?.current || {}
+            setMProvider((v) => (v === null ? (cur.provider || '') : v))
+            setMModel((v) => (v === null ? (cur.model || '') : v))
+            setMEffort((v) => (v === null ? (cur.reasoningEffort || '') : v))
+          } catch (e) { setModelsNote(String(e?.message ?? e)) }
+        })()
+        return () => { alive = false }
+      }, [])
 
       const say = (text, tone) => {
         setMsg(text); setMsgTone(tone || '')
@@ -297,7 +370,36 @@ window.__ModuleLoader__.load({
 
       const onSaveText = async () => {
         const list = String(kws || '').split('\n').map((s) => s.trim()).filter(Boolean)
-        await patch({ keywords: list, workspace: String(ws || '').trim() }, '关键词与工作区')
+        await patch({ keywords: list }, '关键词')
+      }
+
+      // ⭐ 保存人设：POST /persona ⇒ 落盘 persona.md。下一轮 promptFor() 现读 ⇒ 即时生效
+      const onSavePersona = async () => {
+        const text = String(persona || '')
+        setBusy('persona')
+        setPersonaMsg('')
+        try {
+          const r = await jpost('/persona', { text })
+          if (r?.ok) {
+            setPersonaSaved(text)
+            setPersonaChars(r.chars ?? text.length)
+            setPersonaTone('good')
+            setPersonaMsg('人设已保存 —— 下一轮就用新的（不用重启）')
+            say('人设已保存', 'good')
+          } else {
+            setPersonaTone('warn'); setPersonaMsg(r?.error || '保存失败')
+          }
+        } catch (e) { setPersonaTone('warn'); setPersonaMsg(String(e?.message ?? e)) }
+        finally { setBusy('') }
+      }
+
+      // ⭐ 保存模型选择：写进 config，下一轮 overlay 会把它覆盖进那一轮
+      const onSaveModel = async () => {
+        await patch({
+          llmProvider: String(mProvider || '').trim(),
+          llmModel: String(mModel || '').trim(),
+          llmReasoningEffort: String(mEffort || '').trim(),
+        }, '模型')
       }
 
       if (!cfg) {
@@ -418,17 +520,12 @@ window.__ModuleLoader__.load({
               h('div', { 'data-bd-note': '' }, st.asrInstalling ? '正在装转写依赖（进度）：' : '转写依赖的日志（末尾）—— 只有「没字幕的视频」用得到它：'),
               h('pre', { 'data-bd-pre': '' }, st.asrTail)) : null) : null),
 
-        /* ── 关注什么 / 在哪儿刷 ── */
+        /* ── 关注什么 ── */
         h('div', { 'data-bd-sec': '' },
           h('div', { 'data-bd-h': '' }, '关注什么'),
           h('textarea', {
             'data-bd-input': '', rows: 5, placeholder: '一行一个关键词；留空用内置那几组',
             value: kws ?? '', onChange: (e) => setKws(e.target.value),
-          }),
-          h('div', { 'data-bd-label': '' }, '工作区（它按这里的 AGENTS.md 认设定）'),
-          h('input', {
-            'data-bd-input': '', value: ws ?? '', placeholder: '留空 = dsh 自己的工作目录',
-            onChange: (e) => setWs(e.target.value),
           }),
           h('div', { 'data-bd-label': '' }, '日报写多细'),
           h('select', {
@@ -441,6 +538,86 @@ window.__ModuleLoader__.load({
           h('div', { 'data-bd-row': '' },
             h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: Boolean(busy), onClick: onSaveText }, '保存'),
             msg ? h('div', { 'data-bd-msg': '', 'data-good': msgTone === 'good' ? '' : undefined, 'data-warn': msgTone === 'warn' ? '' : undefined }, msg) : null)),
+
+        /* ── 用哪个模型（2026-10-15 新增） ── */
+        (() => {
+          const provs = models || []
+          const cur = provs.find((p) => p.id === mProvider)
+          const mlist = cur?.models || []
+          const isCustom = Boolean(mProvider) && !cur            // 存着一个下拉里没有的 provider（自定义/已下线）
+          return h('div', { 'data-bd-sec': '' },
+            h('div', { 'data-bd-h': '' }, '用哪个模型'),
+            h('div', { 'data-bd-note': '' },
+              '跑一轮时会用这里选的模型（覆盖 headless profile 的默认）。留空 = 用那个 profile 原本的默认。'),
+            modelsNote ? h('div', { 'data-bd-note': '', 'data-warn': '' }, modelsNote) : null,
+            h('div', { 'data-bd-row2': '' },
+              h('select', {
+                'data-bd-select': '',
+                value: mProvider ?? '',
+                onChange: (e) => { setMProvider(e.target.value); setMModel('') },   // 换 provider 要清掉 model
+              },
+                h('option', { value: '' }, '（不指定，用 profile 默认）'),
+                ...provs.map((p) => h('option', { key: p.id, value: p.id }, `${p.name}（${p.id}）`)),
+                isCustom ? h('option', { value: mProvider }, `${mProvider}（当前值，已不在清单里）`) : null),
+              h('select', {
+                'data-bd-select': '',
+                value: mModel ?? '',
+                disabled: !mProvider,
+                onChange: (e) => setMModel(e.target.value),
+              },
+                h('option', { value: '' }, mProvider ? '（该 provider 默认）' : '（先选 provider）'),
+                ...mlist.map((m) => h('option', { key: m.id, value: m.id }, m.name && m.name !== m.id ? `${m.name}（${m.id}）` : m.id)),
+                (mModel && !mlist.some((m) => m.id === mModel))
+                  ? h('option', { value: mModel }, `${mModel}（当前值，已不在清单里）`) : null)),
+            h('div', { 'data-bd-row2': '' },
+              h('select', {
+                'data-bd-select': '',
+                value: mEffort ?? '',
+                onChange: (e) => setMEffort(e.target.value),
+              },
+                h('option', { value: '' }, '（思考档位：不指定）'),
+                ...['off', 'low', 'medium', 'high', 'max'].map((x) => h('option', { key: x, value: x }, x))),
+              h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: Boolean(busy), onClick: onSaveModel }, '保存模型')),
+            h('div', { 'data-bd-note': '' },
+              mProvider && mModel ? `当前：${mProvider} / ${mModel}${mEffort ? ` · ${mEffort}` : ''}`
+                : '当前：未指定（用 profile 默认）'))
+        })(),
+
+        /* ── 人设（2026-10-15 新增：不再用 AGENTS.md，改插件自己的文本框） ── */
+        h('div', { 'data-bd-sec': '' },
+          h('div', { 'data-bd-h': '' }, '它的人设'),
+          h(ToggleRow, {
+            label: '启用下面这份人设',
+            note: '默认开；关掉的话它就中性出场，不扮演任何人格',
+            on: sw('personaEnabled'),
+            onChange: (v) => patch({ personaEnabled: v }, '启用人设'),
+          }),
+          sw('personaEnabled') ? h('div', { 'data-bd-sub': '' },
+            h('textarea', {
+              'data-bd-input': '', 'data-bd-persona': '', rows: 12,
+              placeholder: '写它的说话方式与准则。例如：\n· 叫我「老板」，说话短、别客套\n· 只推我看得懂的技术内容，别推营销号\n· 拿不准的事就说没查到，不许编',
+              value: persona ?? '',
+              onChange: (e) => setPersona(e.target.value),
+            }),
+            h('div', { 'data-bd-row': '' },
+              h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: busy === 'persona', onClick: onSavePersona }, '保存人设'),
+              h('button', {
+                'data-bd-btn': '', disabled: busy === 'persona' || !(persona || '').trim(),
+                onClick: () => { setPersona(''); },
+              }, '清空'),
+              (persona !== null && personaSaved !== null && persona !== personaSaved)
+                ? h('span', { 'data-bd-note': '' }, '有未保存的改动') : null),
+            h('div', { 'data-bd-note': '' },
+              personaChars != null ? `当前 ${personaChars} 字符` : '',
+              personaChars != null ? h('br') : null,
+              '存本地：', h('code', null, personaFile || ''),
+              h('br'),
+              '每一轮开始前现读这个文件 —— 保存后**立刻生效**，不用重启 dsh。'),
+            personaMsg ? h('div', {
+              'data-bd-msg': '',
+              'data-good': personaTone === 'good' ? '' : undefined,
+              'data-warn': personaTone === 'warn' ? '' : undefined,
+            }, personaMsg) : null) : null),
 
         /* ── 环境与账号 ── */
         h('div', { 'data-bd-sec': '' },
@@ -483,22 +660,78 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /** 右侧栏 tab 类型 id；也是 `sidebar.right.pane.tab` 那个 keyed 槽的键。 */
+    const TAB_ID = 'bili-scroll'
+    /** tab 类型的 kind：openTab 用它指名；不能与内置重名（见文件头）。 */
+    const TAB_KIND = 'bili-scroll'
+
+    /**
+     * 右侧栏 tab 的本体 = 当前这个面板组件（**不是 iframe**）。
+     *
+     * 为什么不像别的插件那样嵌 iframe：本插件的面板**本来就是 React 组件**
+     * （`Panel` 就在本文件里），直接复用最省事 —— 没有 iframe 的高度/滚动条打架问题，
+     * 也不用再发一份页面出去。（若面板是独立 HTML，那才该用 iframe。）
+     */
+    function BiliScrollTab() {
+      return h('div', { 'data-bd-tabwrap': '' }, h(Panel))
+    }
+
     return {
-      inject: ['slots'],
+      /**
+       * ⚠️ 这里是**客户端服务短名**，不是包名。
+       *    包名那份在 package.json 的 `dsh.client.inject`（两处含义不同）。
+       *    `sidebarRightTabs` 由 `@deepseek-ai/dsh-client-ui-sidebar-right` 提供。
+       */
+      inject: ['slots', 'sidebarRightTabs'],
       apply(ctx) {
         const style = document.createElement('style')
         style.setAttribute('data-plugin-css', 'dsh-bili-duty')
         style.textContent = CSS
         document.head.appendChild(style)
-        ctx.effect(() => () => style.remove(), 'dsh-bili-duty: 设置页样式')
+        ctx.effect(() => () => style.remove(), 'dsh-bili-duty: 面板样式')
 
-        // ⭐ 进「设置」：label 就是左侧导航里那一项（抄 dsh-meme 的写法）
         const slots = (typeof ctx.get === 'function' ? ctx.get('slots') : undefined) || ctx.slots
         if (!slots) return
-        slots.inject('settings.section', () => slots.register(
-          { name: 'settings.section', id: 'bili-scroll', order: 30, label: '刷B站' },
-          () => h(Panel),
-        ))
+
+        // ── ① tab 类型定义：让它在右侧栏「开始」页出现一张卡 ──
+        //    整段包 try/catch：boot 对「任一 entry 未激活」是致命的，
+        //    宁可本插件没入口，也不能把整页 boot 拖垮。
+        try {
+          ctx.sidebarRightTabs.register({
+            id: TAB_ID,
+            kind: TAB_KIND,
+            // `extension` = 可被 builtin 覆盖的扩展带；三值只有 extension / builtin / fallback。
+            priority: 'extension',
+            keepMounted: true,                 // 切走/换会话不卸载，否则每次展开都回首页
+            title: () => '刷B站',
+            guide: [
+              {
+                id: 'panel',
+                order: 40,                     // 排在 wb-switch(30) 之后
+                title: () => '刷B站',
+                description: () => '每天替你看一轮 B站、挑出值得的，写份日报',
+              },
+            ],
+          })
+        } catch (e) { console.error('[dsh-bili-duty] 注册右侧栏 tab 类型失败：', e) }
+
+        // ── ② tab 本体（🔴 只注册 ① 的卡是点不动的）──
+        //    key 必须是 ① 里的 `id`，不是 `kind`。
+        try {
+          ctx.effect(() => slots.inject('sidebar.right.pane.tab', () =>
+            slots.register({ name: 'sidebar.right.pane.tab', key: TAB_ID }, BiliScrollTab),
+          ), 'bili-duty: 右侧栏 tab 本体')
+        } catch (e) { console.error('[dsh-bili-duty] 注册右侧栏 tab 本体失败：', e) }
+
+        // ── ③ tab 标题芯片（可选；不注册会用 ① 的 title()）──
+        try {
+          ctx.effect(() => slots.inject('sidebar.right.pane.tab.title', () =>
+            slots.register(
+              { name: 'sidebar.right.pane.tab.title', key: TAB_ID },
+              function BiliScrollTitle() { return h('span', null, '刷B站') },
+            ),
+          ), 'bili-duty: 右侧栏 tab 标题')
+        } catch (e) { console.error('[dsh-bili-duty] 注册右侧栏 tab 标题失败：', e) }
       },
     }
   },
