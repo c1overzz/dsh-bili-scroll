@@ -177,7 +177,27 @@ window.__ModuleLoader__.load({
         try {
           const r = await jpost('/config', p)
           if (r?.config) setSt((old) => ({ ...old, config: r.config }))
-          say(what ? `${what}：已保存` : '已保存', 'good')
+          // ⭐ 兜底自检（2026-10-17 加）：把"我发出去的"和"服务端回给我的"对一遍。
+          //    起因：服务端那半没重载时，新字段会被**静默丢掉** ——
+          //    界面显示"已保存"，可刷新就变回默认，使用者完全无从排查 ✗。
+          //    服务端实现了 notApplied 就用它；没有（旧版本）就用这个对比兜住 ✓。
+          const bad = Array.isArray(r?.notApplied) ? r.notApplied.slice() : []
+          const back = r?.config || {}
+          for (const k of Object.keys(p)) {
+            if (bad.includes(k)) continue
+            const want = p[k], got = back[k]
+            const same = Array.isArray(want)
+              ? JSON.stringify(want) === JSON.stringify(got || [])
+              : (typeof want === 'number' ? Number(got) === want : String(got ?? '') === String(want ?? ''))
+            if (!same) bad.push(k)
+          }
+          if (bad.length) {
+            say(`${what || '设置'}：⚠️ 未生效 → ${bad.join('、')}`, 'warn')
+            setRunNote(`⚠️ 这几个设置**没写进去**：${bad.join('、')}\n`
+              + '最常见的原因：插件加了新字段，但**服务端那半还没重载** —— 重启一次 dsh 就好。')
+          } else {
+            say(what ? `${what}：已保存` : '已保存', 'good')
+          }
         } catch (e) { say(String(e?.message ?? e), 'warn') }
         finally { setBusy('') }
       }

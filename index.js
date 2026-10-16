@@ -175,7 +175,20 @@ export function apply(ctx, config) {
     return out
   }
   const cfg = normalize(readJson(cfgFile, {}), normalize(config, { ...DEFAULTS }))
-  const saveCfg = (patch) => { Object.assign(cfg, normalize(patch, cfg)); writeJson(cfgFile, cfg) }
+  /**
+   * 存设置。
+   * ⭐ 返回值 = **这次没生效的字段**（2026-10-17 加）。
+   *   起因：`normalize(patch, cfg)` 是拿**当前** cfg 的键集去过滤的 ⇒
+   *   字段名拼错、或者"浏览器半已经是新版、宿主半还是旧版"时前端新发的字段，
+   *   都会被**静默丢掉** —— 界面显示"已保存"，实际一个字段都没改，用户完全看不出来 ✗。
+   *   ⇒ 把丢掉的字段**交回给调用方**，让它明说"这几个没生效"。
+   */
+  const saveCfg = (patch) => {
+    const want = patch && typeof patch === 'object' && !Array.isArray(patch) ? Object.keys(patch) : []
+    Object.assign(cfg, normalize(patch, cfg))
+    writeJson(cfgFile, cfg)
+    return want.filter((k) => !(k in cfg))
+  }
 
   ensureHomeFiles(pluginDir, stateDir, log)
 
@@ -418,8 +431,23 @@ export function apply(ctx, config) {
       + '楼中楼开关 `{"aiReply":false}`；自定义 AI 识别词 `{"aiKeywords":["XX助手","YBot"]}`（**补充**内置那批，不是替换）。',
     parameters: { patch: { type: 'object', additionalProperties: true, description: '要改的字段（可省）' } },
     async execute(args) {
-      if (args?.patch && typeof args.patch === 'object' && !Array.isArray(args.patch)) saveCfg(args.patch)
-      return { ok: true, config: cfg, windows: WINDOWS, home: stateDir, venvReady: venvReadyNow() }
+      const notApplied = (args?.patch && typeof args.patch === 'object' && !Array.isArray(args.patch))
+        ? saveCfg(args.patch)
+        : []
+      return {
+        ok: true,
+        config: cfg,
+        windows: WINDOWS,
+        home: stateDir,
+        venvReady: venvReadyNow(),
+        // ⭐ 只报"真丢了"的：字段名拼错，或者这个字段还没被当前这版代码认识
+        ...(notApplied.length
+          ? {
+            notApplied,
+            note: `⚠️ 这些字段**没生效**：${notApplied.join('、')} —— 多半是插件没重载（重启一次 dsh 即可），也可能是字段名拼错了`,
+          }
+          : {}),
+      }
     },
   })
 
@@ -1004,9 +1032,12 @@ export function apply(ctx, config) {
       if ('reportLevel' in patch) patch.reportLevel = ['full', 'brief', 'off'].includes(String(patch.reportLevel)) ? String(patch.reportLevel) : 'full'
       if ('replyToComments' in patch) patch.replyToComments = Boolean(patch.replyToComments)
       if ('replyPerRound' in patch) patch.replyPerRound = Math.max(1, Math.min(Number(patch.replyPerRound) || 1, 10))
-      saveCfg(patch)
-      log(`设置已更新：${JSON.stringify(patch)}`)
-      return sendJson(res, 200, { ok: true, config: cfg })
+      const saved = saveCfg(patch)
+      // 前端发了、但白名单里没有的字段（拼错 / 旧版宿主还不认识）—— 一起报回去
+      const ignored = Object.keys(body).filter((k) => k !== 'ok' && !(k in patch))
+      const notApplied = [...new Set([...ignored, ...saved])]
+      log(`设置已更新：${JSON.stringify(patch)}${notApplied.length ? `（⚠️ 没生效：${notApplied.join('、')}）` : ''}`)
+      return sendJson(res, 200, { ok: true, config: cfg, notApplied })
     }
 
     if (req.method === 'POST' && path === '/api/bili-duty/run') {
