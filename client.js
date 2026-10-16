@@ -159,7 +159,11 @@ window.__ModuleLoader__.load({
         if (cfg && perDay === null) setPerDay(String(cfg.perDay ?? 5))
         if (cfg && perRound === null) setPerRound(String(cfg.commentPerRound ?? 1))
         if (cfg && replyPer === null) setReplyPer(String(cfg.replyPerRound ?? 1))
-        if (cfg && mention === null) setMention(cfg.mentionName || '')
+        if (cfg && mention === null) {
+          // ⭐ 新配置是列表（mentionNames）；老配置是单名字（mentionName）—— 这里自动迁移着显示
+          const list = Array.isArray(cfg.mentionNames) ? cfg.mentionNames.filter(Boolean) : []
+          setMention(list.length ? list.join('\n') : (cfg.mentionName || ''))
+        }
         if (cfg && dmUid === null) setDmUid(cfg.dmUid ? String(cfg.dmUid) : '')
         if (cfg && dmMode === null) setDmMode(cfg.dmMode || 'off')
         if (cfg && aiKw === null) setAiKw((cfg.aiKeywords || []).join('\n'))
@@ -430,14 +434,21 @@ window.__ModuleLoader__.load({
                 onChange: (e) => setPerRound(e.target.value),
                 onBlur: () => { const n = Math.max(1, Math.min(Number(perRound) || 1, 20)); setPerRound(String(n)); patch({ commentPerRound: n }, '每轮几条评论') },
               })),
-            h('div', { 'data-bd-label': '' }, '要 @ 谁（B站 昵称）'),
-            h('input', {
-              'data-bd-input': '', value: mention ?? '',
-              placeholder: '填你要 @ 的那个人的 B站 昵称；留空 = 只写报告、不发评论',
+            h('div', { 'data-bd-label': '' }, '要 @ 谁（B站 昵称，一行一个；按顺序全部 @ 上）'),
+            h('textarea', {
+              'data-bd-input': '', rows: 3,
+              placeholder: '一行一个昵称；留空 = 只写报告、不发评论',
+              value: mention ?? '',
               onChange: (e) => setMention(e.target.value),
-              onBlur: () => { const v = String(mention || '').trim(); setMention(v); patch({ mentionName: v }, '要 @ 谁') },
+              onBlur: () => {
+                const list = String(mention || '').split('\n').map((s) => s.trim()).filter(Boolean)
+                setMention(list.join('\n'))
+                // 存成列表；顺手把老的单名字段清掉（迁移），免得两边打架
+                patch({ mentionNames: list, mentionName: '' }, '要 @ 谁')
+              },
             }),
-            h('div', { 'data-bd-note': '' }, '留空的话它就不发评论了 —— 因为评论存在的意义就是 @ 那一下')) : null,
+            h('div', { 'data-bd-note': '' }, '⭐ 按顺序 @ 全部名字、中间自动留空格（B站 靠空格才认得出 @）；留空 = 不发评论'),
+            h('div', { 'data-bd-note': '' }, '⚠️ 昵称要跟 B站 上**一模一样**（含大小写、空格、符号），写错了那个 @ 不亮')) : null,
           h('div', { 'data-bd-label': '' }, '投递方式（评论 还是 私信）'),
           h('select', {
             'data-bd-input': '', value: dmMode ?? 'off',

@@ -67,8 +67,10 @@ export const Config = !z ? undefined : z.object({
   asrModel: z.string().default('small').extra('volatile', true),
   /** ⭐ 每轮最多发几条评论（每条里 @ 一次下面那个人） */
   commentPerRound: z.natural().default(1).extra('volatile', true),
-  /** ⭐ 要 @ 谁（B站 昵称）；**留空 = 不发评论** —— 评论存在的意义就是 @ 那一下 */
+  /** ⭐ 要 @ 谁（B站 昵称，单个）；**留空 = 不发评论** —— 保留是为了向后兼容，新配置请用 mentionNames */
   mentionName: z.string().default('').extra('volatile', true),
+  /** ⭐⭐ 要 @ 的**名单**（一行一个）—— 多个名字**按顺序全 @ 上**；给了它就优先于上面那个单名字 */
+  mentionNames: z.array(z.string()).default([]).extra('volatile', true),
   /** 关注关键词（空了用章程里默认那几组） */
   keywords: z.array(z.string()).default([]).extra('volatile', true),
   /** Python：指向 venv 里的那个最好 */
@@ -160,7 +162,7 @@ export function apply(ctx, config) {
   const DEFAULTS = {
     perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
     dmMode: 'off', dmUid: 0, aiReply: true, aiKeywords: [],
-    keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1,
+    keywords: [], commentPerRound: 1, mentionName: '', mentionNames: [], pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1,
   }
   const normalize = (src, base) => {
     const out = { ...base }
@@ -175,6 +177,19 @@ export function apply(ctx, config) {
     return out
   }
   const cfg = normalize(readJson(cfgFile, {}), normalize(config, { ...DEFAULTS }))
+  /** ⭐ 要 @ 的名单：mentionNames 优先，回落到老的单名字 mentionName（向后兼容） */
+  const mentionList = (c = cfg) => {
+    const list = Array.isArray(c?.mentionNames) ? c.mentionNames.map((s) => String(s).trim()).filter(Boolean) : []
+    if (list.length) return list
+    const one = String(c?.mentionName || '').trim()
+    return one ? [one] : []
+  }
+  /**
+   * ⭐ 拼给那一轮看的 @ 标签串：`@A @B`。
+   * 🔴 **每个 @ 后面都必须跟一个空格** —— B站 是**靠空格判定 @ 到哪儿结束**的，
+   *    连写成 `@A@B` 的话**一个都 @ 不出来**（等于白 @）✗
+   */
+  const mentionTag = (c = cfg) => mentionList(c).map((m) => `@${m}`).join(' ')
   /**
    * 存设置。
    * ⭐ 返回值 = **这次没生效的字段**（2026-10-17 加）。
@@ -326,7 +341,7 @@ export function apply(ctx, config) {
     },
     async execute(args) {
       // dmMode==='only' 时本轮根本不该发公开评论 —— 在工具层也一并挡掉（除非当场 force）
-      const commentOn = Boolean(cfg.autoComment && cfg.mentionName && cfg.dmMode !== 'only')
+      const commentOn = Boolean(cfg.autoComment && mentionList().length && cfg.dmMode !== 'only')
       if (!commentOn && !args.force) {
         return {
           ok: false,
@@ -363,6 +378,8 @@ export function apply(ctx, config) {
         }])),
         peakValley: cfg.peakValley,
         autoComment: cfg.autoComment,
+        mentionNames: mentionList(),
+        mentionTag: mentionTag(),
         dmMode: cfg.dmMode,
         dmUid: Number(cfg.dmUid) || 0,
         aiReply: cfg.aiReply !== false,
@@ -428,7 +445,8 @@ export function apply(ctx, config) {
     description: '读 / 改「刷B站」的设置。不给 `patch` 就是读；给了就改（只认 schema 里的字段）。\n'
       + '例：`{"perDay":5,"peakValley":true,"noon":true,"night":true,"autoComment":false,"transcribe":false,"keywords":["DeepSeek Harness"]}`；'
       + '私信投递：`{"dmMode":"only","dmUid":12345678}`（dmMode = off / only / both）；'
-      + '楼中楼开关 `{"aiReply":false}`；自定义 AI 识别词 `{"aiKeywords":["XX助手","YBot"]}`（**补充**内置那批，不是替换）。',
+      + '楼中楼开关 `{"aiReply":false}`；自定义 AI 识别词 `{"aiKeywords":["XX助手","YBot"]}`（**补充**内置那批，不是替换）；'
+      + '要 @ 的名单 `{"mentionNames":["某人","另一个人"]}`（按顺序全部 @ 上；老的单个 `mentionName` 仍然认，但名单优先）。',
     parameters: { patch: { type: 'object', additionalProperties: true, description: '要改的字段（可省）' } },
     async execute(args) {
       const notApplied = (args?.patch && typeof args.patch === 'object' && !Array.isArray(args.patch))
@@ -525,7 +543,11 @@ export function apply(ctx, config) {
     } catch { /* 读不到就算了，别因此跑不成 */ }
     // ⭐ 投递方式（2026-10-17 加）：dmMode = off（只评论）· only（只私信）· both（都发）
     //    commentOn 是"这一轮到底能不能发公开评论"的唯一判据（工具层的闸用的是同一套逻辑）
-    const commentOn = Boolean(cfg.autoComment && cfg.mentionName && cfg.dmMode !== 'only')
+    // ⭐ 要 @ 的名单（mentionNames 优先，回落到老的单名字 mentionName）
+    const mentions = mentionList()
+    // ⭐ 评论开头要原样写的那串：`@A @B`；**结尾必须再跟一个空格**，B站 才认得出这些 @
+    const mentionTagText = mentions.map((m) => `@${m}`).join(' ')
+    const commentOn = Boolean(cfg.autoComment && mentions.length && cfg.dmMode !== 'only')
     const dmOn = Boolean(cfg.dmMode !== 'off' && Number(cfg.dmUid) > 0)
     // 楼中楼开关（默认开 = 只在识别为 AI / 机器人的账号下面回；关了 = 永远只发自己的顶层评论）
     const aiReplyOn = cfg.aiReply !== false
@@ -549,11 +571,18 @@ export function apply(ctx, config) {
       + `⭐ 不管哪种情况，**报告里都要写一行「因无字幕跳过 N 条」**（N=0 也写）—— 别让它悄悄少几条。`
       + `判重表 = ${join(stateDir, 'seen.md')}（**就是这个绝对路径**，别写到家目录 ~、也别写到别处）；`
       + `⚠️ 它读不出来或写不进去，**必须在报告里明说** —— 那一轮宁可不发评论，也别当成"没有记录"重发一遍。`
-      + `自动评论并 @ ${cfg.mentionName || '（还没填要 @ 谁）'} 是${commentOn
-        ? `开着的（每轮最多 ${cfg.commentPerRound} 条评论，每条在正文里纯文本 @ ${cfg.mentionName}，150 字内）`
+      + `自动评论并 @ ${mentions.length ? mentions.join('、') : '（还没填要 @ 谁）'} 是${commentOn
+        ? `开着的（每轮最多 ${cfg.commentPerRound} 条评论，每条 **150 字内**、短、干净）`
         : (cfg.dmMode === 'only'
-          ? '关着的 —— 当前是「**只私信**」模式：**这一轮一条公开评论都不许发**，改走私信'
+          ? '关着的 —— 当前是「**只私信**」模式：**这一轮一条公开评论都不许发**（楼中楼也不许），改走私信'
           : '关着的（只写报告，别发评论）')}。`
+      + (commentOn
+        ? `🔴 **每条评论的开头，必须原样写成**：\`${mentionTagText} \` —— ⚠️ **注意结尾还有那个空格**：`
+          + `B站 是**靠空格判定 @ 到哪儿结束**的，所以 ${mentions.map((m) => `@${m}`).join('、')} **每一个 @ 后面都要跟一个空格**，`
+          + `写完最后一个名字**还要再补一个空格**，然后才接着写正文 ✗✗ `
+          + `（写成 ${mentions.join('')} 这种连在一起的、或者漏了空格，B站 一个都认不出来 = **白 @** ✗）。`
+          + `⭐ 名字按上面给的顺序 @，**一个都不能漏**。`
+        : '')
       + (dmOn
         ? `⭐⭐ **私信投递**（dmMode=${cfg.dmMode}）：用 bili_send_message 把这一轮的结果发到 UID **${Number(cfg.dmUid)}**。`
           + `内容**别照抄评论那套**：把本轮每条值得的写成 **标题 + 链接 + 一句话理由**（私信是私人渠道、不占别人的地方，`
@@ -568,9 +597,9 @@ export function apply(ctx, config) {
             + ` ⇒ 所以**只认 AI，绝不碰真人**。先用 bili_comments 看这条视频的热门评论（会返回 user / sign / mid / level），`
             + `判断说话的是不是 AI（口径见章程那一节），再三选一：`
             + `① **明确是 AI / 机器人账号**、**且它已经把"值得"的那个点说出来过** ⇒ **不要另发新评论**，`
-            + `改成**在它那条评论下面回一条楼中楼**（bili_reply 带上它的 rpid），正文照样纯文本 @ ${cfg.mentionName}；`
+            + `改成**在它那条评论下面回一条楼中楼**（bili_reply 带上它的 rpid），正文开头照样是「${mentionTagText} 」（**注意结尾那个空格**）；`
             + `⭐ **只呼应 / 补充，不许抢功、不许贬低**；`
-            + `② **其它一切情况**（没人说过 / 说了的是真人 / 拿不准）⇒ **发自己的新评论（顶层）**并 @ ${cfg.mentionName}。`
+            + `② **其它一切情况**（没人说过 / 说了的是真人 / 拿不准）⇒ **发自己的新评论（顶层）**，开头写「${mentionTagText} 」（**带结尾空格**）。`
             + (aiKw.length
               ? `⭐ 使用者**另外自定义**了这些 AI 识别特征（⚠️ **内置那批照常有效，这批只是补充**）：`
                 + aiKw.map((k) => `「${k}」`).join(' ') + ` —— 昵称 / 签名 / 正文里沾上任意一个，也算"疑似 AI"，照样走上面那套判断。`
@@ -580,7 +609,7 @@ export function apply(ctx, config) {
             + `⚠️ 同一个视频只留一条（新评论 or 楼中楼，二选一）；⚠️ 走楼中楼时判重表里**同时记**自己那条的 rpid 和被回复的根评论 rpid；`
             + `⚠️ 评论区取不到就当"没人说过"、按 ② 发，别卡住。`
           : `⚠️ **楼中楼回复：关着** —— **不许在任何人的评论下面回复**，`
-            + `不管对方是不是 AI、有没有先说过这个点，**一律只发自己的顶层评论**并 @ ${cfg.mentionName}；`
+            + `不管对方是不是 AI、有没有先说过这个点，**一律只发自己的顶层评论**，开头写「${mentionTagText} 」（**带结尾空格**）；`
             + `评论区里有没有 AI 号都跟你无关，**别为此去翻评论区**；`
             + `⚠️ 同一个视频只留一条评论（就是你自己那条顶层）✓。`)
         : '')
@@ -1019,7 +1048,7 @@ export function apply(ctx, config) {
       const body = await readBody(req)
       const patch = {}
       for (const k of ['perDay', 'peakValley', 'noon', 'night', 'autoComment', 'transcribe', 'asrModel',
-        'commentPerRound', 'mentionName', 'dmMode', 'dmUid', 'aiReply', 'aiKeywords',
+        'commentPerRound', 'mentionName', 'mentionNames', 'dmMode', 'dmUid', 'aiReply', 'aiKeywords',
         'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound']) {
         if (k in body) patch[k] = body[k]
       }
@@ -1029,6 +1058,8 @@ export function apply(ctx, config) {
       if ('aiReply' in patch) patch.aiReply = Boolean(patch.aiReply)
       if ('aiKeywords' in patch) patch.aiKeywords = Array.isArray(patch.aiKeywords)
         ? patch.aiKeywords.map((x) => String(x).trim()).filter(Boolean).slice(0, 50) : []
+      if ('mentionNames' in patch) patch.mentionNames = Array.isArray(patch.mentionNames)
+        ? patch.mentionNames.map((x) => String(x).trim()).filter(Boolean).slice(0, 20) : []
       if ('reportLevel' in patch) patch.reportLevel = ['full', 'brief', 'off'].includes(String(patch.reportLevel)) ? String(patch.reportLevel) : 'full'
       if ('replyToComments' in patch) patch.replyToComments = Boolean(patch.replyToComments)
       if ('replyPerRound' in patch) patch.replyPerRound = Math.max(1, Math.min(Number(patch.replyPerRound) || 1, 10))
