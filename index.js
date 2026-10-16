@@ -392,6 +392,34 @@ export function apply(ctx, config) {
     },
   })
 
+  /* ⭐⭐ 报账工具：让「那一轮」把"本轮实际挑到几条"告诉插件。
+   * 没有它的话 state.json 里的 count 永远是 0 ⇒ 徽章永远是「今天已挑 0 / N」，
+   * 而且定时器那句 `if (count >= perDay) return` 永远不成立 ⇒ **每日上限形同虚设** ✗
+   *
+   * ⚠️ 注意：跑那一轮的子进程**根本不加载本插件**（它只挂 Python MCP），
+   *    所以这个工具在 vendor/bilibili-mcp/mcp_server.py 里**也有一份同名的** ——
+   *    那一轮用的是 MCP 那份；这份是给宿主 / 设置页这边用的。 */
+  tool({
+    name: 'bili_note_picks',
+    description: '⭐ 报账：把「**这一轮**实际挑到几条」告诉插件，它会累加进当天的额度（今天已挑 X / 上限 Y）。\n'
+      + '每一轮**收尾时都要调一次**（**一条都没挑到也要调，传 count: 0**）。\n'
+      + '不调的话，设置页那个「今天已挑 X / Y」会一直显示 0，而且**每天的条数上限也拦不住**。',
+    parameters: { count: { type: 'number', description: '这一轮实际挑到几条（≥0 的整数）' } },
+    async execute(args) {
+      const r = notePicks(args?.count)
+      log(`本轮报账：挑到 ${r.added} 条，今天累计 ${r.total}/${r.cap}`)
+      return {
+        ok: true,
+        thisRound: r.added,
+        todayTotal: r.total,
+        cap: r.cap,
+        ...(r.cap > 0 && r.total >= r.cap
+          ? { note: `今天额度已经用满（${r.total}/${r.cap}）—— 后面自动那几轮不会再开跑（手动跑仍允许，但本轮开头会告诉你"还剩 0 条"，应该只写报告、不再挑新的）。` }
+          : { note: `今天还剩 ${Math.max(0, r.cap - r.total)} 条额度。` }),
+      }
+    },
+  })
+
   tool({
     name: 'bili_run',
     description: '**立刻跑一轮**（不等窗口）：起一个 headless 会话，把 duty.md 交给它去刷、写报告。'
@@ -480,6 +508,30 @@ export function apply(ctx, config) {
     return st
   }
 
+  /**
+   * ⭐⭐ 记「今天挑到几条」—— 修的是**一个做了一半的每日额度**。
+   * 🔴 起因：`state.json` 里的 `count` 本来是"今天挑了几条"的计数器 ——
+   *    设置页的徽章读它（「今天已挑 X / 上限」）、谷时定时器也靠它拦每日上限
+   *    （`if (count >= perDay) return`），但**全代码里从来没有任何地方给 `count` 加过**
+   *    （唯一的 `bumpState` 只写 windows / lastRunAt / lastWhy）⇒
+   *    徽章**永远是 0**，而且**每日上限根本没在拦** ✗。
+   *    根治要靠"那一轮把本轮挑到几条报回来"，所以配了 `bili_note_picks` 工具
+   *    （MCP 侧也要有，见 vendor/bilibili-mcp/mcp_server.py）+ prompt 里的收尾报账要求。
+   */
+  const picksToday = () => {
+    const st = readJson(dutyStateFile, {})
+    return st.day === dayKey() ? Math.max(0, Number(st.count || 0)) : 0
+  }
+  const notePicks = (n) => {
+    const st = readJson(dutyStateFile, {})
+    const today = dayKey()
+    const base = st.day === today ? Math.max(0, Number(st.count || 0)) : 0
+    const total = base + Math.max(0, Math.floor(Number(n) || 0))
+    // 跨天就把窗口标记一起清掉（跟 bumpState 的行为保持一致）
+    writeJson(dutyStateFile, { ...st, ...(st.day === today ? {} : { windows: {} }), day: today, count: total })
+    return { added: total - base, total, cap: Number(cfg.perDay) || 0 }
+  }
+
   // ⭐ 一键升级：由宿主自己跑 `dsh plugin --profile web add dsh-bili-scroll`
   //    ⚠️ 装完必须重启 dsh 才生效；⚠️ Windows 上"替换正在运行的插件"可能被文件占用挡住（我们踩过）
   let upgrading = false
@@ -553,6 +605,10 @@ export function apply(ctx, config) {
     const aiReplyOn = cfg.aiReply !== false
     // 使用者自定义的 AI 识别词 —— **补充**内置那批，不是替换
     const aiKw = Array.isArray(cfg.aiKeywords) ? cfg.aiKeywords.map((x) => String(x).trim()).filter(Boolean) : []
+    // ⭐ 今天的条数额度：perDay = 每天最多挑几条；picked = 今天已经挑过几条（靠 bili_note_picks 累加）
+    const cap = Math.max(0, Number(cfg.perDay) || 0)
+    const picked = picksToday()
+    const left = Math.max(0, cap - picked)
     return `你是这个账号的 B站 助手。`
       + `下面是使用者的设定（如果有）—— **按它来**，别用你默认那套人格。`
       + ownerDoc
@@ -562,7 +618,13 @@ export function apply(ctx, config) {
         : cfg.reportLevel === 'off'
           ? `这一轮不要写日报文件，也别生成任何报告；只有真发了评论就一句话记下。`
           : `把报告写到 ${join(outDir, `${dayKey()}.md`)}。`)
-      + `今天最多挑 ${cfg.perDay} 条；关键词${kws.length ? `用这些：${kws.join('、')}` : '用章程里的默认那几组'}。`
+      + `今天的条数上限是 **${cap} 条**（设置里「每天最多挑几条」）—— `
+      + `**今天已经挑过 ${picked} 条、这一轮最多还能挑 ${left} 条**`
+      + `${left <= 0 ? '（⚠️ **额度已经用满**：这一轮就**只写报告、不要再挑新的**，挑到 0 条是正常的）' : ''}；`
+      + `关键词${kws.length ? `用这些：${kws.join('、')}` : '用章程里的默认那几组'}。`
+      + `⭐⭐ **收尾必须报账**：这一轮的**最后一步**，一定要调用一次 \`bili_note_picks\`，`
+      + `把你**这一轮实际挑到的条数**传进去（**一条都没挑到也要传 count: 0**，别省这一步）—— `
+      + `插件靠它维护「今天已挑 X / ${cap}」和每日上限，**不报的话界面上永远是 0**。`
       + `本地转写：${cfg.transcribe
         ? (asrReadyNow()
           ? '开着，而且装好了（没字幕的视频用家里那份 asr.py 转，命令见章程）'

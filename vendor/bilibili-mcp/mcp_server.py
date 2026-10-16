@@ -12,6 +12,7 @@ import json
 import base64
 import os
 import tempfile
+import time
 from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
@@ -1357,6 +1358,84 @@ async def bili_received_at_and_likes() -> str:
     except Exception as e:
         result["likes_error"] = str(e)
     return json.dumps(result, ensure_ascii=False)
+
+
+# ========== 报账：本轮挑到几条 ==========
+
+def _duty_home() -> Path:
+    """插件家目录：优先用 BILI_DUTY_HOME（插件起这一轮时会设），退回到本文件所在目录。"""
+    return Path(os.environ.get("BILI_DUTY_HOME") or Path(__file__).resolve().parent)
+
+
+@mcp.tool()
+async def bili_note_picks(count: int) -> str:
+    """
+    ⭐ 报账：把「**这一轮**实际挑到几条」告诉插件，它会累加进当天的额度（今天已挑 X / 上限 Y）。
+
+    **每一轮收尾时都要调一次**（**一条都没挑到也要调，传 count=0**）。
+    不调的话：设置页那个「今天已挑 X / Y」会一直显示 0，而且**每天的条数上限也拦不住**。
+
+    Args:
+        count: 这一轮实际挑到几条（>=0 的整数）
+
+    Returns:
+        今天的累计条数 / 上限 / 还剩几条
+    """
+    home = _duty_home()
+    state_file = home / "state.json"
+    today = time.strftime("%Y-%m-%d")          # 本地日期，跟插件的 dayKey() 一致
+
+    st = {}
+    if state_file.exists():
+        try:
+            st = json.loads(state_file.read_text(encoding="utf-8")) or {}
+        except Exception:
+            st = {}
+
+    try:
+        n = max(0, int(count))
+    except Exception:
+        n = 0
+
+    same_day = str(st.get("day") or "") == today
+    base = max(0, int(st.get("count") or 0)) if same_day else 0
+    total = base + n
+
+    if not same_day:
+        st["windows"] = {}                     # 跨天就把窗口标记一起清掉（跟插件的 bumpState 一致）
+    st["day"] = today
+    st["count"] = total
+
+    try:
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        state_file.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        return json.dumps(
+            {"success": False, "error": f"写 {state_file} 失败：{e}"}, ensure_ascii=False
+        )
+
+    cap = 0
+    try:
+        cfg_file = home / "config.json"
+        if cfg_file.exists():
+            cap = max(0, int((json.loads(cfg_file.read_text(encoding="utf-8")) or {}).get("perDay") or 0))
+    except Exception:
+        cap = 0
+
+    left = max(0, cap - total)
+    return json.dumps({
+        "success": True,
+        "thisRound": n,
+        "todayTotal": total,
+        "cap": cap,
+        "left": left,
+        "note": (
+            f"今天额度已经用满（{total}/{cap}）—— 后面自动那几轮不会再开跑（手动跑仍允许，但本轮开头会告诉你"
+            f"「还剩 0 条」，应该只写报告、不再挑新的）。"
+            if cap and total >= cap else
+            f"今天还剩 {left} 条额度。"
+        ),
+    }, ensure_ascii=False)
 
 
 # ========== 启动 ==========
