@@ -143,6 +143,7 @@ window.__ModuleLoader__.load({
       const [replyPer, setReplyPer] = React.useState(null)
       const [dmUid, setDmUid] = React.useState(null)        // 私信收件人 UID（本地草稿）
       const [dmMode, setDmMode] = React.useState(null)      // 投递方式：off / only / both
+      const [aiKw, setAiKw] = React.useState(null)          // 自定义 AI 识别词（本地草稿，一行一个）
       const [mention, setMention] = React.useState(null)
       const [login, setLogin] = React.useState(null)
       const [runNote, setRunNote] = React.useState(null)
@@ -161,6 +162,7 @@ window.__ModuleLoader__.load({
         if (cfg && mention === null) setMention(cfg.mentionName || '')
         if (cfg && dmUid === null) setDmUid(cfg.dmUid ? String(cfg.dmUid) : '')
         if (cfg && dmMode === null) setDmMode(cfg.dmMode || 'off')
+        if (cfg && aiKw === null) setAiKw((cfg.aiKeywords || []).join('\n'))
       }, [cfg])
 
       const win = { ...DEFAULT_WINDOWS, ...(st?.windows || {}) }
@@ -434,6 +436,25 @@ window.__ModuleLoader__.load({
             }),
             h('div', { 'data-bd-note': '' }, '私信内容 = 本轮每条的「标题 + 链接 + 一句话」，一轮合并成一条发（不受 150 字限制）'),
             h('div', { 'data-bd-note': '' }, '⚠️ 建议先让这个号和收件人互关：B站 对「陌生人私信」会限流，还可能不弹提醒')) : null,
+          h(ToggleRow, {
+            label: '在 AI 号下面楼中楼回复',
+            note: '默认开；开了之后，评论区里如果已经有 AI / 机器人号把值得的点说过了，它就在那条下面回一句。关掉 = 永远只发自己的顶层评论，不去别人的评论下面留言',
+            on: sw('aiReply'),
+            onChange: (v) => patch({ aiReply: v }, '楼中楼回复'),
+          }),
+          sw('aiReply') ? h('div', { 'data-bd-sub': '' },
+            h('div', { 'data-bd-label': '' }, '额外用来识别 AI 的关键词（一行一个）'),
+            h('textarea', {
+              'data-bd-input': '', rows: 4,
+              placeholder: '留空 = 只用内置那批（AI / Bot / 机器人 / 助手 / Agent / 测试 / 大肥鱼 / 鲸鱼娘 …）',
+              value: aiKw ?? '', onChange: (e) => setAiKw(e.target.value),
+              onBlur: () => {
+                const list = String(aiKw || '').split('\n').map((s) => s.trim()).filter(Boolean)
+                setAiKw(list.join('\n'))
+                patch({ aiKeywords: list }, '自定义 AI 识别词')
+              },
+            }),
+            h('div', { 'data-bd-note': '' }, '这些是「补充」不是「替换」—— 内置那批一直在用，这里留空就只按内置的认')) : null,
           h(ToggleRow, {
             label: '本地转写没字幕的视频',
             note: '默认关；开了以后，没字幕的视频会在本机转写一遍（不花 API 钱）',

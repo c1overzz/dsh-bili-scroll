@@ -57,6 +57,10 @@ export const Config = !z ? undefined : z.object({
   dmMode: z.string().default('off').extra('volatile', true),
   /** ⭐ 私信发给谁的 UID（数字）。要在 dmMode 不是 off 时填 */
   dmUid: z.natural().default(0).extra('volatile', true),
+  /** ⭐ 楼中楼回复：开=只在「明确是 AI / 机器人」的账号下面回（避免打扰真人）；关=永远只发自己的顶层评论 */
+  aiReply: z.boolean().default(true).extra('volatile', true),
+  /** ⭐ 自定义的 AI 识别特征词（**补充**内置那批，不是替换 —— 内置一直有效；留空 = 只用内置） */
+  aiKeywords: z.array(z.string()).default([]).extra('volatile', true),
   /** 本地转写（没字幕的视频用 Whisper 转；默认关，要下模型） */
   transcribe: z.boolean().default(false).extra('volatile', true),
   /** 本地转写用哪个 Whisper 模型（tiny / base / small / medium） */
@@ -155,7 +159,7 @@ export function apply(ctx, config) {
    */
   const DEFAULTS = {
     perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
-    dmMode: 'off', dmUid: 0,
+    dmMode: 'off', dmUid: 0, aiReply: true, aiKeywords: [],
     keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1,
   }
   const normalize = (src, base) => {
@@ -348,6 +352,8 @@ export function apply(ctx, config) {
         autoComment: cfg.autoComment,
         dmMode: cfg.dmMode,
         dmUid: Number(cfg.dmUid) || 0,
+        aiReply: cfg.aiReply !== false,
+        aiKeywords: Array.isArray(cfg.aiKeywords) ? cfg.aiKeywords : [],
         transcribe: cfg.transcribe,
         loggedIn: hasCredential(),
         home: stateDir,
@@ -408,7 +414,8 @@ export function apply(ctx, config) {
     name: 'bili_config',
     description: '读 / 改「刷B站」的设置。不给 `patch` 就是读；给了就改（只认 schema 里的字段）。\n'
       + '例：`{"perDay":5,"peakValley":true,"noon":true,"night":true,"autoComment":false,"transcribe":false,"keywords":["DeepSeek Harness"]}`；'
-      + '私信投递：`{"dmMode":"only","dmUid":12345678}`（dmMode = off / only / both）。',
+      + '私信投递：`{"dmMode":"only","dmUid":12345678}`（dmMode = off / only / both）；'
+      + '楼中楼开关 `{"aiReply":false}`；自定义 AI 识别词 `{"aiKeywords":["XX助手","YBot"]}`（**补充**内置那批，不是替换）。',
     parameters: { patch: { type: 'object', additionalProperties: true, description: '要改的字段（可省）' } },
     async execute(args) {
       if (args?.patch && typeof args.patch === 'object' && !Array.isArray(args.patch)) saveCfg(args.patch)
@@ -492,6 +499,10 @@ export function apply(ctx, config) {
     //    commentOn 是"这一轮到底能不能发公开评论"的唯一判据（工具层的闸用的是同一套逻辑）
     const commentOn = Boolean(cfg.autoComment && cfg.mentionName && cfg.dmMode !== 'only')
     const dmOn = Boolean(cfg.dmMode !== 'off' && Number(cfg.dmUid) > 0)
+    // 楼中楼开关（默认开 = 只在识别为 AI / 机器人的账号下面回；关了 = 永远只发自己的顶层评论）
+    const aiReplyOn = cfg.aiReply !== false
+    // 使用者自定义的 AI 识别词 —— **补充**内置那批，不是替换
+    const aiKw = Array.isArray(cfg.aiKeywords) ? cfg.aiKeywords.map((x) => String(x).trim()).filter(Boolean) : []
     return `你是这个账号的 B站 助手。`
       + `下面是使用者的设定（如果有）—— **按它来**，别用你默认那套人格。`
       + ownerDoc
@@ -522,9 +533,34 @@ export function apply(ctx, config) {
           + `⚠️ 私信里**不用 @ 任何人**；⚠️ **一轮只发一条私信**（多条合并成一条）；⚠️ 发完把"已私信"记进报告。`
           + (cfg.dmMode === 'both' ? `⚠️ 现在是 **both**：公开评论照发（走下面那一整套规矩），私信**另外**再发一条。` : '')
         : '')
-      + (cfg.replyToComments
+      + (commentOn
+        ? (aiReplyOn
+          ? `⭐⭐ **只在「明确是 AI / 机器人」的账号下面楼中楼**（由设置里的「在 AI 号下面楼中楼回复」开关控制，默认开）。`
+            + `为什么有这条：**真人看到陌生人在自己的评论下面回复会觉得被打扰**，而 AI / 机器人号之间互相呼应没这个问题`
+            + ` ⇒ 所以**只认 AI，绝不碰真人**。先用 bili_comments 看这条视频的热门评论（会返回 user / sign / mid / level），`
+            + `判断说话的是不是 AI（口径见章程那一节），再三选一：`
+            + `① **明确是 AI / 机器人账号**、**且它已经把"值得"的那个点说出来过** ⇒ **不要另发新评论**，`
+            + `改成**在它那条评论下面回一条楼中楼**（bili_reply 带上它的 rpid），正文照样纯文本 @ ${cfg.mentionName}；`
+            + `⭐ **只呼应 / 补充，不许抢功、不许贬低**；`
+            + `② **其它一切情况**（没人说过 / 说了的是真人 / 拿不准）⇒ **发自己的新评论（顶层）**并 @ ${cfg.mentionName}。`
+            + (aiKw.length
+              ? `⭐ 使用者**另外自定义**了这些 AI 识别特征（⚠️ **内置那批照常有效，这批只是补充**）：`
+                + aiKw.map((k) => `「${k}」`).join(' ') + ` —— 昵称 / 签名 / 正文里沾上任意一个，也算"疑似 AI"，照样走上面那套判断。`
+              : '')
+            + `🔴 **绝对不许在真人的评论下面回复** —— 判不准就当真人，宁可多发一条顶层评论，也不要在真人下面留痕；`
+            + `⚠️ 不许硬凑"他是 AI"的证据，判断只用 bili_comments 已返回的字段、别为此多花工具调用；`
+            + `⚠️ 同一个视频只留一条（新评论 or 楼中楼，二选一）；⚠️ 走楼中楼时判重表里**同时记**自己那条的 rpid 和被回复的根评论 rpid；`
+            + `⚠️ 评论区取不到就当"没人说过"、按 ② 发，别卡住。`
+          : `⚠️ **楼中楼回复：关着** —— **不许在任何人的评论下面回复**，`
+            + `不管对方是不是 AI、有没有先说过这个点，**一律只发自己的顶层评论**并 @ ${cfg.mentionName}；`
+            + `评论区里有没有 AI 号都跟你无关，**别为此去翻评论区**；`
+            + `⚠️ 同一个视频只留一条评论（就是你自己那条顶层）✓。`)
+        : '')
+      + (cfg.replyToComments && commentOn
         ? `回复评论：开着（每轮最多回 ${Number(cfg.replyPerRound) || 1} 条）—— 只回「直接回复到你那条评论下面的人」，回完记进报告；找不到你那条评论就跳过，别硬找。`
-        : `回复评论：关着（一个字都不要回任何人 —— 有人回复你那条评论也不要理）。`)
+        : `回复评论：关着（${commentOn && aiReplyOn
+          ? '**上面那条「只在 AI 号下面楼中楼」的 ① 除外**，其余一个字都不要回任何人'
+          : '一个字都不要回任何人'} —— 有人回复你那条评论也不要理会）。`)
       + `最后用一句话汇报你挑到了什么。现在几点了自己看一眼系统时间。`
   }
 
@@ -955,13 +991,16 @@ export function apply(ctx, config) {
       const body = await readBody(req)
       const patch = {}
       for (const k of ['perDay', 'peakValley', 'noon', 'night', 'autoComment', 'transcribe', 'asrModel',
-        'commentPerRound', 'mentionName', 'dmMode', 'dmUid',
+        'commentPerRound', 'mentionName', 'dmMode', 'dmUid', 'aiReply', 'aiKeywords',
         'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound']) {
         if (k in body) patch[k] = body[k]
       }
       if ('perDay' in patch) patch.perDay = Math.max(0, Math.min(Number(patch.perDay) || 0, 50))
       if ('dmMode' in patch) patch.dmMode = ['off', 'only', 'both'].includes(String(patch.dmMode)) ? String(patch.dmMode) : 'off'
       if ('dmUid' in patch) patch.dmUid = Math.max(0, Math.min(Number(patch.dmUid) || 0, Number.MAX_SAFE_INTEGER))
+      if ('aiReply' in patch) patch.aiReply = Boolean(patch.aiReply)
+      if ('aiKeywords' in patch) patch.aiKeywords = Array.isArray(patch.aiKeywords)
+        ? patch.aiKeywords.map((x) => String(x).trim()).filter(Boolean).slice(0, 50) : []
       if ('reportLevel' in patch) patch.reportLevel = ['full', 'brief', 'off'].includes(String(patch.reportLevel)) ? String(patch.reportLevel) : 'full'
       if ('replyToComments' in patch) patch.replyToComments = Boolean(patch.replyToComments)
       if ('replyPerRound' in patch) patch.replyPerRound = Math.max(1, Math.min(Number(patch.replyPerRound) || 1, 10))
