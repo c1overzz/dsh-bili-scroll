@@ -141,6 +141,8 @@ window.__ModuleLoader__.load({
       const [perDay, setPerDay] = React.useState(null)
       const [perRound, setPerRound] = React.useState(null)
       const [replyPer, setReplyPer] = React.useState(null)
+      const [dmUid, setDmUid] = React.useState(null)        // 私信收件人 UID（本地草稿）
+      const [dmMode, setDmMode] = React.useState(null)      // 投递方式：off / only / both
       const [mention, setMention] = React.useState(null)
       const [login, setLogin] = React.useState(null)
       const [runNote, setRunNote] = React.useState(null)
@@ -157,6 +159,8 @@ window.__ModuleLoader__.load({
         if (cfg && perRound === null) setPerRound(String(cfg.commentPerRound ?? 1))
         if (cfg && replyPer === null) setReplyPer(String(cfg.replyPerRound ?? 1))
         if (cfg && mention === null) setMention(cfg.mentionName || '')
+        if (cfg && dmUid === null) setDmUid(cfg.dmUid ? String(cfg.dmUid) : '')
+        if (cfg && dmMode === null) setDmMode(cfg.dmMode || 'off')
       }, [cfg])
 
       const win = { ...DEFAULT_WINDOWS, ...(st?.windows || {}) }
@@ -412,6 +416,24 @@ window.__ModuleLoader__.load({
               onBlur: () => { const v = String(mention || '').trim(); setMention(v); patch({ mentionName: v }, '要 @ 谁') },
             }),
             h('div', { 'data-bd-note': '' }, '留空的话它就不发评论了 —— 因为评论存在的意义就是 @ 那一下')) : null,
+          h('div', { 'data-bd-label': '' }, '投递方式（评论 还是 私信）'),
+          h('select', {
+            'data-bd-input': '', value: dmMode ?? 'off',
+            onChange: (e) => { setDmMode(e.target.value); patch({ dmMode: e.target.value }, '投递方式') },
+          },
+            h('option', { value: 'off' }, '只发评论 —— 在视频下面 @ 你（默认）'),
+            h('option', { value: 'only' }, '只私信 —— 一条公开评论都不发，最不打扰别人'),
+            h('option', { value: 'both' }, '评论 + 私信 —— 两边都发')),
+          (dmMode && dmMode !== 'off') ? h('div', { 'data-bd-sub': '' },
+            h('div', { 'data-bd-label': '' }, '私信发给谁（B站 UID，数字）'),
+            h('input', {
+              'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 0, value: dmUid ?? '',
+              placeholder: '对方的数字 UID；比如你自己的另一个号',
+              onChange: (e) => setDmUid(e.target.value),
+              onBlur: () => { const n = Math.max(0, Number(dmUid) || 0); setDmUid(n ? String(n) : ''); patch({ dmUid: n }, '私信收件人') },
+            }),
+            h('div', { 'data-bd-note': '' }, '私信内容 = 本轮每条的「标题 + 链接 + 一句话」，一轮合并成一条发（不受 150 字限制）'),
+            h('div', { 'data-bd-note': '' }, '⚠️ 建议先让这个号和收件人互关：B站 对「陌生人私信」会限流，还可能不弹提醒')) : null,
           h(ToggleRow, {
             label: '本地转写没字幕的视频',
             note: '默认关；开了以后，没字幕的视频会在本机转写一遍（不花 API 钱）',

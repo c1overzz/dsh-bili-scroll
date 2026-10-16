@@ -53,6 +53,10 @@ export const Config = !z ? undefined : z.object({
   night: z.boolean().default(true).extra('volatile', true),
   /** 自动评论 @ 使用者（默认关 —— 会拿用户的号说话，必须他自己开） */
   autoComment: z.boolean().default(false).extra('volatile', true),
+  /** ⭐ 私信投递：off=只发评论（现状）· only=只私信（完全不公开评论）· both=评论 + 私信 */
+  dmMode: z.string().default('off').extra('volatile', true),
+  /** ⭐ 私信发给谁的 UID（数字）。要在 dmMode 不是 off 时填 */
+  dmUid: z.natural().default(0).extra('volatile', true),
   /** 本地转写（没字幕的视频用 Whisper 转；默认关，要下模型） */
   transcribe: z.boolean().default(false).extra('volatile', true),
   /** 本地转写用哪个 Whisper 模型（tiny / base / small / medium） */
@@ -151,6 +155,7 @@ export function apply(ctx, config) {
    */
   const DEFAULTS = {
     perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
+    dmMode: 'off', dmUid: 0,
     keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1,
   }
   const normalize = (src, base) => {
@@ -303,11 +308,15 @@ export function apply(ctx, config) {
       force: { type: 'boolean', description: '本人当场让你发的，传 true 越过"自动评论关着"的闸' },
     },
     async execute(args) {
-      if ((!cfg.autoComment || !cfg.mentionName) && !args.force) {
+      // dmMode==='only' 时本轮根本不该发公开评论 —— 在工具层也一并挡掉（除非当场 force）
+      const commentOn = Boolean(cfg.autoComment && cfg.mentionName && cfg.dmMode !== 'only')
+      if (!commentOn && !args.force) {
         return {
           ok: false,
           blocked: true,
-          hint: '要发评论得同时满足两条：设置里开着「自动评论并 @ 你」、并且填了「要 @ 谁」。或者本人当场让你发时传 force: true。',
+          hint: cfg.dmMode === 'only'
+            ? '现在是「只私信」模式（dmMode=only）—— 规定不发公开评论，改成用 bili_send_message 私信。确实要发时传 force: true。'
+            : '要发评论得同时满足两条：设置里开着「自动评论并 @ 你」、并且填了「要 @ 谁」。或者本人当场让你发时传 force: true。',
         }
       }
       return call('bili_reply', {
@@ -337,6 +346,8 @@ export function apply(ctx, config) {
         }])),
         peakValley: cfg.peakValley,
         autoComment: cfg.autoComment,
+        dmMode: cfg.dmMode,
+        dmUid: Number(cfg.dmUid) || 0,
         transcribe: cfg.transcribe,
         loggedIn: hasCredential(),
         home: stateDir,
@@ -396,7 +407,8 @@ export function apply(ctx, config) {
   tool({
     name: 'bili_config',
     description: '读 / 改「刷B站」的设置。不给 `patch` 就是读；给了就改（只认 schema 里的字段）。\n'
-      + '例：`{"perDay":5,"peakValley":true,"noon":true,"night":true,"autoComment":false,"transcribe":false,"keywords":["DeepSeek Harness"]}`',
+      + '例：`{"perDay":5,"peakValley":true,"noon":true,"night":true,"autoComment":false,"transcribe":false,"keywords":["DeepSeek Harness"]}`；'
+      + '私信投递：`{"dmMode":"only","dmUid":12345678}`（dmMode = off / only / both）。',
     parameters: { patch: { type: 'object', additionalProperties: true, description: '要改的字段（可省）' } },
     async execute(args) {
       if (args?.patch && typeof args.patch === 'object' && !Array.isArray(args.patch)) saveCfg(args.patch)
@@ -476,6 +488,10 @@ export function apply(ctx, config) {
           + '\n===== 设定结束 =====\n'
       }
     } catch { /* 读不到就算了，别因此跑不成 */ }
+    // ⭐ 投递方式（2026-10-17 加）：dmMode = off（只评论）· only（只私信）· both（都发）
+    //    commentOn 是"这一轮到底能不能发公开评论"的唯一判据（工具层的闸用的是同一套逻辑）
+    const commentOn = Boolean(cfg.autoComment && cfg.mentionName && cfg.dmMode !== 'only')
+    const dmOn = Boolean(cfg.dmMode !== 'off' && Number(cfg.dmUid) > 0)
     return `你是这个账号的 B站 助手。`
       + `下面是使用者的设定（如果有）—— **按它来**，别用你默认那套人格。`
       + ownerDoc
@@ -494,9 +510,18 @@ export function apply(ctx, config) {
       + `⭐ 不管哪种情况，**报告里都要写一行「因无字幕跳过 N 条」**（N=0 也写）—— 别让它悄悄少几条。`
       + `判重表 = ${join(stateDir, 'seen.md')}（**就是这个绝对路径**，别写到家目录 ~、也别写到别处）；`
       + `⚠️ 它读不出来或写不进去，**必须在报告里明说** —— 那一轮宁可不发评论，也别当成"没有记录"重发一遍。`
-      + `自动评论并 @ ${cfg.mentionName || '（还没填要 @ 谁）'} 是${cfg.autoComment && cfg.mentionName
+      + `自动评论并 @ ${cfg.mentionName || '（还没填要 @ 谁）'} 是${commentOn
         ? `开着的（每轮最多 ${cfg.commentPerRound} 条评论，每条在正文里纯文本 @ ${cfg.mentionName}，150 字内）`
-        : '关着的（只写报告，别发评论）'}。`
+        : (cfg.dmMode === 'only'
+          ? '关着的 —— 当前是「**只私信**」模式：**这一轮一条公开评论都不许发**，改走私信'
+          : '关着的（只写报告，别发评论）')}。`
+      + (dmOn
+        ? `⭐⭐ **私信投递**（dmMode=${cfg.dmMode}）：用 bili_send_message 把这一轮的结果发到 UID **${Number(cfg.dmUid)}**。`
+          + `内容**别照抄评论那套**：把本轮每条值得的写成 **标题 + 链接 + 一句话理由**（私信是私人渠道、不占别人的地方，`
+          + `**不受 150 字限制**，但也别啰嗦）。`
+          + `⚠️ 私信里**不用 @ 任何人**；⚠️ **一轮只发一条私信**（多条合并成一条）；⚠️ 发完把"已私信"记进报告。`
+          + (cfg.dmMode === 'both' ? `⚠️ 现在是 **both**：公开评论照发（走下面那一整套规矩），私信**另外**再发一条。` : '')
+        : '')
       + (cfg.replyToComments
         ? `回复评论：开着（每轮最多回 ${Number(cfg.replyPerRound) || 1} 条）—— 只回「直接回复到你那条评论下面的人」，回完记进报告；找不到你那条评论就跳过，别硬找。`
         : `回复评论：关着（一个字都不要回任何人 —— 有人回复你那条评论也不要理）。`)
@@ -930,11 +955,13 @@ export function apply(ctx, config) {
       const body = await readBody(req)
       const patch = {}
       for (const k of ['perDay', 'peakValley', 'noon', 'night', 'autoComment', 'transcribe', 'asrModel',
-        'commentPerRound', 'mentionName',
+        'commentPerRound', 'mentionName', 'dmMode', 'dmUid',
         'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound']) {
         if (k in body) patch[k] = body[k]
       }
       if ('perDay' in patch) patch.perDay = Math.max(0, Math.min(Number(patch.perDay) || 0, 50))
+      if ('dmMode' in patch) patch.dmMode = ['off', 'only', 'both'].includes(String(patch.dmMode)) ? String(patch.dmMode) : 'off'
+      if ('dmUid' in patch) patch.dmUid = Math.max(0, Math.min(Number(patch.dmUid) || 0, Number.MAX_SAFE_INTEGER))
       if ('reportLevel' in patch) patch.reportLevel = ['full', 'brief', 'off'].includes(String(patch.reportLevel)) ? String(patch.reportLevel) : 'full'
       if ('replyToComments' in patch) patch.replyToComments = Boolean(patch.replyToComments)
       if ('replyPerRound' in patch) patch.replyPerRound = Math.max(1, Math.min(Number(patch.replyPerRound) || 1, 10))
