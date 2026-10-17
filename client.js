@@ -578,6 +578,7 @@ window.__ModuleLoader__.load({
       const [d, setD] = React.useState(null)
       const [err, setErr] = React.useState('')
       const [showRaw, setShowRaw] = React.useState(false)
+      const [showPrompt, setShowPrompt] = React.useState(false)   // 提示词原文（默认收着：几千字）
 
       React.useEffect(() => {
         let alive = true
@@ -643,7 +644,15 @@ window.__ModuleLoader__.load({
         showRaw ? h('div', null,
           h('div', { 'data-bd-note': '' }, '原始日志尾部：' + d.logFile),
           h('pre', { 'data-bd-pre': '', 'data-tall': '' }, d.logTail || '（空）')) : null,
-)
+
+        /* ⭐ 这一轮被交代了什么（2026-10-18 加）：提示词是按当前设置**现拼**的，
+         *    "我的设置到底生效了没"不该靠猜 —— 摊开原文，一眼能核 ✓ */
+        d.prompt ? h('div', null,
+          h('button', {
+            'data-bd-btn': '', 'data-bd-fold': '',
+            onClick: () => setShowPrompt(!showPrompt),
+          }, (showPrompt ? '▾ ' : '▸ ') + `这一轮收到的话（${d.promptChars || d.prompt.length} 字）`),
+          showPrompt ? h('pre', { 'data-bd-pre': '', 'data-tall': '' }, d.prompt) : null) : null)
     }
 
     /* ────────────── 设置页正文 ────────────── */

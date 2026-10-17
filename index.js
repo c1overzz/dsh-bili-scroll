@@ -924,6 +924,10 @@ export function apply(ctx, config) {
       lastExit: dutyLastExit, today: dayKey(),
       progress: readProgress(), keyLines: readKeyLines(),
       logTail: tailOf(logFile, 6000), logFile, progressFile,
+      // ⭐ 这一轮**到底被交代了什么**（2026-10-18 加）：提示词是按当前设置现拼的，
+      //    光看设置页只能猜"它会不会按我说的做" —— 把原文摊出来，有疑问一眼就能核 ✓
+      prompt: promptFor(),
+      promptChars: promptFor().length,
       stats,
     }
   }

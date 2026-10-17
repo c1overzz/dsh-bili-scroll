@@ -186,6 +186,68 @@ ok('/debug 报错那行被标 bad', d?.keyLines?.some((x) => x.bad === true))
 ok('/debug 日志尾不为空', typeof d?.logTail === 'string' && d.logTail.length > 0)
 ok('/debug 带上了当天的报告统计', Boolean(d?.stats))
 
+/* ⑤ 时段：/status 给的必须是**生效的那张表**，且带得回"下次什么时候跑" */
+ok('/status 的 windows 是数组（生效的时段表，不再是内置字典）', Array.isArray(st.json?.windows))
+ok('/status 保留了内置文案（设置页要显示）', Boolean(st.json?.builtinWindows?.noon?.label))
+ok('/status 有 nextRunAt 字段', 'nextRunAt' in (st.json || {}))
+ok('/status 带得回重叠告警字段', Array.isArray(st.json?.windowIssues))
+
+/* ⑥ ⭐ 自定义时段：存得下、被规范化、重叠当场告警（设置页不靠 5 秒轮询） */
+const c1 = await call('POST', '/api/bili-duty/config', { windows: ['12:00-14:00', '13:00-15:00'] })
+ok('保存自定义时段 200', c1.code === 200, 'code=' + c1.code)
+ok('存进去的是规范化的字符串数组',
+  JSON.stringify(c1.json?.config?.windows) === JSON.stringify(['12:00-14:00', '13:00-15:00']),
+  JSON.stringify(c1.json?.config?.windows))
+ok('⭐ 应答里直接带重叠告警（不用等轮询）',
+  Array.isArray(c1.json?.windowIssues) && c1.json.windowIssues.length === 1 && c1.json.windowIssues[0].kind === 'overlap',
+  JSON.stringify(c1.json?.windowIssues))
+ok('应答里带回了下次什么时候跑', typeof c1.json?.nextRunAt === 'string')
+ok('生效的时段表跟着变了',
+  Array.isArray(c1.json?.effectiveWindows) && c1.json.effectiveWindows.length === 2)
+
+/* ⑦ 看不懂的输入不能被原样吃进去 */
+const c2 = await call('POST', '/api/bili-duty/config',
+  { windows: ['瞎写', '25:00-26:00', ' 09:00 ~ 10:30 '] })
+ok('认不出的时段被丢掉、认得出的压成标准写法',
+  JSON.stringify(c2.json?.config?.windows) === JSON.stringify(['09:00-10:30']),
+  JSON.stringify(c2.json?.config?.windows))
+const c2b = await call('POST', '/api/bili-duty/config', { windows: ['09:00-10:30', '09:00～10:30'] })
+ok('⭐ 写成一个样的两条**不偷偷合并**（行留着、靠告警说清）',
+  (c2b.json?.config?.windows || []).length === 2, JSON.stringify(c2b.json?.config?.windows))
+ok('并且确实报了 dup',
+  (c2b.json?.windowIssues || []).some((x) => x.kind === 'dup'),
+  JSON.stringify(c2b.json?.windowIssues))
+const c2c = await call('POST', '/api/bili-duty/config', { windows: ['瞎写', '25:00-26:00', ''] })
+ok('全不可用 ⇒ 等于没配 ⇒ 退回内置那两组',
+  (c2c.json?.effectiveWindows || []).map((w) => w.key).join() === 'noon,night',
+  JSON.stringify((c2c.json?.effectiveWindows || []).map((w) => w.key)))
+
+/* ⑧ 名单类字段的清洗（用户粘进来的东西什么形状都有） */
+const c3 = await call('POST', '/api/bili-duty/config',
+  { dmUids: [' 10967510 ', '@123456', '10967510', '000'] })
+ok('UID 名单：去空格 / 去 @ 前缀、去重、丢掉 0',
+  JSON.stringify(c3.json?.config?.dmUids) === JSON.stringify(['10967510', '123456']),
+  JSON.stringify(c3.json?.config?.dmUids))
+const c4 = await call('POST', '/api/bili-duty/config', { windows: [], noSubtitlePick: true })
+ok('清空时段能回到内置',
+  (c4.json?.effectiveWindows || []).map((w) => w.key).join() === 'noon,night')
+ok('「拿不到字幕的也看看」存得下', c4.json?.config?.noSubtitlePick === true)
+
+/* ⑨ ⭐ 提示词会跟着设置变 —— "设置到底生效没有"最直接的证据 */
+await call('POST', '/api/bili-duty/config', { noSubtitlePick: true })
+const prOn = (await call('GET', '/api/bili-duty/debug')).json?.prompt || ''
+ok('/debug 摊得出这一轮收到的提示词（原文）', prOn.length > 200, 'chars=' + prOn.length)
+ok('⭐ 开着「没字幕也看看」时，口径真写进了提示词', /拿不到字幕/.test(prOn))
+ok('并且说清了"不分析内容"、要标注',
+  /不要去分析视频内容/.test(prOn) && /没看内容，只凭标题/.test(prOn))
+await call('POST', '/api/bili-duty/config', { noSubtitlePick: false })
+const prOff = (await call('GET', '/api/bili-duty/debug')).json?.prompt || ''
+ok('关着时口径变回"照老规矩跳过"', !/拿不到字幕/.test(prOff) && /照老规矩跳过/.test(prOff))
+ok('提示词里也带上了条数额度这类现算的值', /每天最多挑几条|条数上限/.test(prOn))
+
+/* ⑩ 收拾干净 —— 沙箱里的配置别留给下一次跑 */
+await call('POST', '/api/bili-duty/config', { windows: [], noSubtitlePick: false, dmUids: [], dmUid: 0 })
+
 /* ⑤ 未知路径要 404，不能挂 */
 const nf = await call('GET', '/api/bili-duty/不存在的东西')
 ok('未知路径返回 404', nf.code === 404, 'code=' + nf.code)
