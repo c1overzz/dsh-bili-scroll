@@ -121,7 +121,12 @@ window.__ModuleLoader__.load({
   background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.3);}
 [data-bd-tally]{font-size:11px;font-weight:400;color:var(--dsw-alias-label-tertiary,#9aa0a6);}
 [data-bd-tally][data-soft]{opacity:.7;}
-[data-bd-tabs]{position:sticky;top:0;z-index:5;display:flex;gap:4px;padding:4px 0 10px;overflow-x:auto;-webkit-overflow-scrolling:touch;}
+[data-bd-tabs]{position:sticky;top:0;z-index:5;display:flex;gap:4px;padding:6px 0 10px;overflow-x:auto;
+  -webkit-overflow-scrolling:touch;
+  /* 🔴 sticky 必须有不透明底色：原来没有 ⇒ 往下拉时下面的内容从标签底下透上来，
+     看着像"菜单变透明了" ✗（2026-10-18 使用者反馈） */
+  background:var(--dsw-alias-bg-base,#fff);
+  border-bottom:1px solid var(--dsw-alias-border-secondary,#00000014);}
 [data-bd-tab]{flex:none;padding:6px 16px;border-radius:8px;font-size:13px;cursor:pointer;border:0;font-family:inherit;
   background:transparent;color:var(--dsw-alias-label-tertiary,#9aa0a6);}
 [data-bd-tab]:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.16));}
@@ -791,8 +796,8 @@ window.__ModuleLoader__.load({
     const personaLine = (p) => {
       if (!p) return '（宿主端还没重启，读不到人格文件的实情）'
       const where = p.custom ? `你指定的：${p.path}` : `默认位置：${p.path}`
-      if (p.exists) return `${where} ⇒ 这一轮**带着人格**（${p.chars} 字${p.truncated ? `，超长只取前 ${p.limit} 字` : ''}）`
-      return `${where} ⇒ 这一轮**不带人格设定**（${p.err || '还没有这个文件'}）`
+      if (p.exists) return `${where} · 已启用（${p.chars} 字${p.truncated ? `，超长只取前 ${p.limit} 字` : ''}）`
+      return `${where} · 还没启用`
     }
 
     function PersonaView({ st, say }) {
@@ -831,20 +836,16 @@ window.__ModuleLoader__.load({
       if (!per) return h('div', { 'data-bd-sec': '' }, h('div', { 'data-bd-note': '' }, '正在读人格设定…'))
 
       const dirty = draft !== null && draft !== (per.text ?? '')
-      const pieces = (pr && pr.pieces) || []
+      // ⚠️ 这里**只列章程**：人格就在上面那个编辑框里，再列一遍就是同一份内容出现两次 ✗
+      const charterPiece = ((pr && pr.pieces) || []).find((p) => p.key === 'charter')
       return h('div', { 'data-bd-pane-settings': '' },
-        /* ① 唯一的人格来源：那个 md，直接改 */
+        /* ① 人格：那个 md，直接改 */
         h('div', { 'data-bd-sec': '' },
-          h('div', { 'data-bd-h': '' }, '人格设定（整个插件唯一的一份）'),
-          h('div', { 'data-bd-note': '' },
-            '插件本**不带**任何性格：这个文件里写什么，它这一轮就照什么来；'
-            + '文件空的或不存在 ⇒ 这一轮就没有人格设定。'
-            + '别处的提示词都只为"刷B站"这件事服务，不含性格。'),
-          h('div', { 'data-bd-note': '', 'data-bd-bad': per.exists ? undefined : '' }, personaLine(per)),
+          h('div', { 'data-bd-h': '' }, '人格设定'),
           h('textarea', {
             'data-bd-input': '', 'data-bd-area': '', rows: 12,
             value: draft ?? '',
-            placeholder: '在这里写你的人格与语气；留空 = 不带人格设定。\n例如：说话轻快一点，句尾用「～」收；遇到失败别卖萌。',
+            placeholder: '在这里写你的人格与语气。留空 = 不带人格设定。\n例如：说话轻快一点，句尾用「～」收；遇到失败别卖萌。',
             onChange: (e) => setDraft(e.target.value),
           }),
           h('div', { 'data-bd-row': '' },
@@ -854,24 +855,31 @@ window.__ModuleLoader__.load({
             h('button', { 'data-bd-btn': '', disabled: saving, onClick: load }, '重新读'),
             h('span', { 'data-bd-note': '' },
               `${(draft ?? '').length} 字${per.truncated ? `（超长，只会送前 ${per.limit} 字）` : ''}`),
-            dirty ? h('span', { 'data-bd-warn': '' }, '有改动没保存') : null)),
+            dirty ? h('span', { 'data-bd-warn': '' }, '有改动没保存') : null),
+          h('div', { 'data-bd-note': '' }, personaLine(per))),
 
-        /* ② 这一轮实际会发出去的话 */
-        h('div', { 'data-bd-sec': '' },
-          h('div', { 'data-bd-h': '' }, '这一轮会发出去的话'),
-          h('div', { 'data-bd-note': '' },
-            pr ? `拼起来一共 ${pr.chars} 字，分两段 —— 人格那段的来源就是上面这个文件：` : '正在读…')),
-        ...pieces.map((p) => h('div', { key: p.key, 'data-bd-sec': '' },
+        /* ② 这一段是插件自己按业务拼的，跟人格分开 */
+        charterPiece ? h('div', { 'data-bd-sec': '' },
           h('div', { 'data-bd-row': '' },
-            h('div', { 'data-bd-label': '' }, p.title),
-            h('span', { 'data-bd-note': '' }, `${p.chars} 字`),
+            h('div', { 'data-bd-h': '' }, '章程（这一轮要做的事）'),
+            h('span', { 'data-bd-note': '' }, `${charterPiece.chars} 字`),
             h('button', {
               'data-bd-btn': '', 'data-bd-tiny': '',
-              onClick: () => setOpen(open === p.key ? '' : p.key),
-            }, open === p.key ? '收起' : '看全文')),
-          h('div', { 'data-bd-note': '' }, p.from),
-          open === p.key ? h('pre', { 'data-bd-pre': '', 'data-tall': '' },
-            p.chars ? p.text : '（这一段是空的）') : null)))
+              onClick: () => setOpen(open === 'charter' ? '' : 'charter'),
+            }, open === 'charter' ? '收起' : '看全文')),
+          open === 'charter' ? h('pre', { 'data-bd-pre': '', 'data-tall': '' }, charterPiece.text) : null) : null,
+
+        /* ③ 拼起来的样子 */
+        pr ? h('div', { 'data-bd-sec': '' },
+          h('div', { 'data-bd-row': '' },
+            h('div', { 'data-bd-h': '' }, '这一轮发出去的话'),
+            h('span', { 'data-bd-note': '' }, `共 ${pr.chars} 字`),
+            h('button', {
+              'data-bd-btn': '', 'data-bd-tiny': '',
+              onClick: () => setOpen(open === 'full' ? '' : 'full'),
+            }, open === 'full' ? '收起' : '看全文'),
+            h('button', { 'data-bd-btn': '', 'data-bd-tiny': '', onClick: () => copyText(pr.full) }, '复制')),
+          open === 'full' ? h('pre', { 'data-bd-pre': '', 'data-tall': '' }, pr.full) : null) : null)
     }
 
     /* ────────────── 设置页正文 ────────────── */
@@ -1190,7 +1198,7 @@ window.__ModuleLoader__.load({
 
         tab !== 'settings' ? null : h('div', { 'data-bd-pane-settings': '' },
         h('div', { 'data-bd-note': '' },
-          '开关和下拉**点了就生效**；文字框**改完自动存**（离开输入框也会存）—— 没有保存按钮'),
+          '开关和下拉点了就生效；文字框改完自动存（离开输入框也会存）—— 没有保存按钮'),
 
         /* ── ① 什么时候自己跑 ── */
         h('div', { 'data-bd-sec': '' },
@@ -1282,7 +1290,7 @@ window.__ModuleLoader__.load({
             h(Field, {
               label: '要 @ 谁',
               note: '⭐ 按顺序全部 @ 上、中间自动留空格（B站 靠空格才认得出 @）'
-                + ' · 留空 = 只写报告不发评论 · 昵称要跟 B站 上**完全一致**，错一个字那个 @ 就不亮',
+                + ' · 留空 = 只写报告不发评论 · 昵称要跟 B站 上完全一致，错一个字那个 @ 就不亮',
             },
               h(Chips, {
                 value: mention || [],
@@ -1305,7 +1313,7 @@ window.__ModuleLoader__.load({
           (dmMode && dmMode !== 'off') ? h('div', { 'data-bd-sub': '' },
             h(Field, {
               label: '私信发给谁',
-              note: '填 B站 UID（主页地址里那串数字），可以填多个 · ⚠️ 要跟对方**互关**，'
+              note: '填 B站 UID（主页地址里那串数字），可以填多个 · 要跟对方互关，'
                 + '否则会被限流、还可能不弹提醒 · 内容 = 每条的「标题 + 链接 + 一句话」',
             },
               h(Chips, {
@@ -1373,9 +1381,7 @@ window.__ModuleLoader__.load({
             label: '人格设定文件',
             // ⚠️ 原来这里叫「工作区」，读的是那个目录里的 AGENTS.md ——
             //    既说不清"留空去了哪儿"，又会把毫不相干的文档当成人格读进来 ✗（2026-10-18 去掉）
-            note: '整个插件**唯一**的人格来源，就这一个 md 文件。留空 = 用数据目录里的 persona.md。'
-              + '想放别处就填一个完整文件路径（如 /home/me/我的语气.md）；'
-              + '在「人格」那一页可以直接编辑它。文件不存在或留空 ⇒ 这一轮不带人格设定',
+            note: '留空 = 用数据目录里的 persona.md；想放别处就填完整路径。内容在「人格」那一页改',
           },
             [
               h('input', {
@@ -1405,14 +1411,14 @@ window.__ModuleLoader__.load({
            *   开着这个开关，这些视频就退回"只看面上的信息"，值得的照样推 ✓ */
           h(ToggleRow, {
             label: '拿不到字幕的也看看',
-            note: '不开 = 直接跳过。开了 = 只凭**标题 / 简介 / 播放量**判断值不值得推，'
-              + '**不去分析视频内容**；报告里会单独标出哪些是没看内容、只凭标题的',
+            note: '不开 = 直接跳过。开了 = 只凭标题 / 简介 / 播放量判断值不值得推，'
+              + '不去分析视频内容；报告里会单独标出哪些是没看内容、只凭标题的',
             on: sw('noSubtitlePick'),
             onChange: (v) => patch({ noSubtitlePick: v }, '拿不到字幕的也看看'),
           }),
           sw('noSubtitlePick') ? h('div', { 'data-bd-sub': '' },
             h('div', { 'data-bd-note': '' },
-              '这类推荐的把握**天然小一些**（没看过内容），所以：'
+              '这类推荐的把握天然小一些（没看过内容），所以：'
               + '值得推的照样推，但报告里每条都会写明「没看内容，只凭标题 / 简介」，'
               + '理由也不会编具体内容。嫌吵的话，把「每天最多挑几条」调小一点。')) : null,
           h(ToggleRow, {
