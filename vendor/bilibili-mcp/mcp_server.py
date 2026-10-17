@@ -557,6 +557,53 @@ async def bili_video_info(bvid: str) -> str:
     }, ensure_ascii=False)
 
 
+# ========== 评论台账：同一个视频只留一条 ==========
+# 🔴 2026-10-18 加：原来"别重复评论同一个视频"**全靠 AI 自觉**（章程里写着）✗ ——
+#    插件自己不记。定时器撞上手动跑、或者一轮里重试，就可能对同一个视频发第二条 ✗。
+#    发评论只有 bili_reply 这一个入口（宿主那个 bili_reply 工具也是转发到这儿）
+#    ⇒ 把闸设在这里最稳，跑那一轮和宿主调用都盖得住 ✓
+_COMMENT_LEDGER = "commented.json"
+
+
+def _ledger_path() -> Path:
+    return _duty_home() / _COMMENT_LEDGER
+
+
+def _ledger_load() -> dict:
+    p = _ledger_path()
+    if not p.exists():
+        return {}
+    try:
+        d = json.loads(p.read_text(encoding="utf-8")) or {}
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _ledger_save(d: dict) -> None:
+    try:
+        _ledger_path().write_text(
+            json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass          # 记不上也不能因此把评论搞失败（已经发出去了）
+
+
+def _rpid_of(result) -> str:
+    """从 bilibili-api 的返回里尽量把 rpid 捞出来（不同版本字段名不一样，逐个试）"""
+    if not isinstance(result, dict):
+        return ""
+    for k in ("rpid", "rpid_str", "root", "root_str"):
+        v = result.get(k)
+        if v:
+            return str(v)
+    inner = result.get("data")
+    if isinstance(inner, dict):
+        for k in ("rpid", "rpid_str"):
+            if inner.get(k):
+                return str(inner[k])
+    return ""
+
+
 # ========== Tool 6: 回复评论 ==========
 
 @logged_tool()
@@ -573,6 +620,20 @@ async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0) -> str:
     Returns:
         发表结果
     """
+    # ⭐ 先查台账：这个视频已经评论过就不再发（同一个视频只留一条）✗
+    ledger = _ledger_load()
+    prev = ledger.get(bvid)
+    if prev:
+        return json.dumps({
+            "success": False,
+            "blocked": True,
+            "error": "这个视频已经评论过了，不再发第二条（同一个视频只留一条）",
+            "already": prev,
+            "hint": "新评论和楼中楼二选一，合起来只算一条。"
+                    "万一是那条已经被删 / 不公开：在报告里写清楚，让使用者决定怎么办，"
+                    "不要自己再发一条 ✗。",
+        }, ensure_ascii=False)
+
     cred = get_cred()
     v = video.Video(bvid=bvid, credential=cred)
     info = await v.get_info()
@@ -601,7 +662,21 @@ async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0) -> str:
                 credential=cred,
             )
 
-        return json.dumps({"success": True, "message": "评论发送成功"}, ensure_ascii=False)
+        # ⭐ 记进台账（同一个视频不再发第二条）✓
+        ledger[bvid] = {
+            "kind": "reply" if rpid else "top",
+            "rpid": _rpid_of(result),
+            "root": str(root or ""),
+            "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "text": (text or "")[:40],
+        }
+        _ledger_save(ledger)
+        return json.dumps({
+            "success": True,
+            "message": "评论发送成功",
+            "rpid": ledger[bvid]["rpid"],
+            "note": "已记进评论台账：这个视频后面不会再发第二条",
+        }, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
 

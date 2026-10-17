@@ -23,7 +23,7 @@ const hostDeps = await loadHostDeps()
 const z = hostDeps.z
 const defineTool = hostDeps.defineTool
 import { spawn } from 'node:child_process'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { McpClient } from './lib/mcp.mjs'
@@ -1072,6 +1072,67 @@ export function apply(ctx, config) {
   let dutyWhy = ''
   let dutyLastExit = null
 
+  /* ─────────────── 「一轮只能跑一个」的锁（2026-10-18 补）───────────────
+   * 🔴 原来 `runDuty()` **没有任何并发闸** ✗。定时器那条靠"先把这一场标成跑过"挡住了
+   *    重复触发 ✓，但**手动跑撞上定时器**、或者**连点两次「现在跑一轮」**，
+   *    会同时起**两个 dsh 进程**：两个都在刷 B站、都可能发评论 ⇒ **重复打扰真人** ✗✗
+   * ⚠️ 光看内存里的 `dutyChild` 不够：宿主重启过之后，上一轮那个 `dsh` 可能**还在跑** ✗
+   *    ⇒ 再加一个**锁文件**（pid + 起始时间），并且**探活**：进程没了就当陈旧的清掉 ✓
+   */
+  /* ─────────────── 评论台账（2026-10-18 补）───────────────
+   * 🔴 原来"同一个视频别重复评论"**全靠 AI 自觉**（章程里写着）✗ —— 插件自己不记。
+   *    现在 MCP 那边发评论时会把 BV 号记进 `commented.json`（**发评论只有那一个入口**，
+   *    宿主那个 bili_reply 工具也是转发过去的）⇒ 这里读出来给设置页看 ✓
+   *    ⚠️ 台账是 MCP 写的，插件只读 + 提供"清空"（那条被删了要重发时的逃生口）✓
+   */
+  const ledgerFile = join(stateDir, 'commented.json')
+  const ledgerRead = () => {
+    try {
+      const d = JSON.parse(readFileSync(ledgerFile, 'utf8'))
+      if (!d || typeof d !== 'object') return {}
+      return d
+    } catch { return {} }
+  }
+  const ledgerInfo = () => {
+    const d = ledgerRead()
+    const rows = Object.entries(d).map(([bvid, v]) => ({
+      bvid, at: String(v?.at || ''), kind: v?.kind === 'reply' ? '楼中楼' : '顶层',
+      rpid: String(v?.rpid || ''), text: String(v?.text || ''),
+    })).sort((a, b) => String(b.at).localeCompare(String(a.at)))
+    return { file: ledgerFile, count: rows.length, recent: rows.slice(0, 5) }
+  }
+
+  const roundLockFile = join(stateDir, 'round.lock')
+  const ROUND_STALE_MS = 6 * 3600 * 1000      // 一轮跑了 6 小时还没结束 ⇒ 当它是陈旧的（正常一轮几分钟）
+  /**
+   * ⚠️ `process.kill(pid, 0)` 抛 **EPERM** 时意思是"进程在，只是不归你、发不了信号" ——
+   *    那也得算活着 ✗（2026-10-18 实测：pid=1 被当成不存在，锁就白加了）
+   */
+  const pidAlive = (pid) => {
+    try { process.kill(pid, 0); return true }
+    catch (e) { return e?.code === 'EPERM' }
+  }
+  const lockRead = () => { try { return JSON.parse(readFileSync(roundLockFile, 'utf8')) } catch { return null } }
+  const lockClear = () => { try { rmSync(roundLockFile, { force: true }) } catch { /* 清不掉也没关系 */ } }
+
+  /** 现在有没有一轮在跑：内存里那个 + 锁文件里那个，两处都看 ✓ */
+  const roundBusy = () => {
+    if (dutyChild && dutyChild.exitCode === null && !dutyChild.killed) {
+      return { busy: true, pid: dutyChild.pid, since: dutyStartedAt || 0, why: dutyWhy, via: '本进程' }
+    }
+    const lk = lockRead()
+    if (lk && Number(lk.pid)) {
+      const pid = Number(lk.pid)
+      const age = Date.now() - Number(lk.at || 0)
+      const alive = pid !== process.pid && pidAlive(pid)
+      if (alive && age < ROUND_STALE_MS) {
+        return { busy: true, pid, since: Number(lk.at || 0), why: lk.why || '', via: '上一次的宿主进程（它还在跑）' }
+      }
+      lockClear()      // 进程没了、或者早就超时 ⇒ 陈旧，清掉
+    }
+    return { busy: false }
+  }
+
   /** 往进度流里追一条"这一轮开始了"的分隔标记（前端按它给进度分段） */
   const markRoundStart = (why) => {
     try {
@@ -1123,6 +1184,7 @@ export function apply(ctx, config) {
 
   const debugInfo = () => {
     const running = Boolean(dutyChild)
+    const round = roundBusy()
     let stats = null
     try {
       const p = join(outDir, dayKey() + '.md')
@@ -1130,6 +1192,8 @@ export function apply(ctx, config) {
     } catch { /* 报告还没有/读不动都不算调试失败 */ }
     return {
       ok: true, running, why: dutyWhy,
+      // ⭐ 并发锁的实情（2026-10-18）：有没有一轮在跑、是谁在跑、从什么时候开始 ✓
+      round,
       startedAt: dutyStartedAt, elapsedMs: dutyStartedAt ? Date.now() - dutyStartedAt : 0,
       lastExit: dutyLastExit, today: dayKey(),
       progress: readProgress(), keyLines: readKeyLines(),
@@ -1148,6 +1212,15 @@ export function apply(ctx, config) {
 
   const runDuty = (why = 'window') => {
    try {
+    // ⭐ 并发闸：已经有一轮在跑就**不许再起**（两个一起跑会重复发评论）✗
+    const cur = roundBusy()
+    if (cur.busy) {
+      log(`刷B站没开跑（${why}）：上一轮还在跑（pid=${cur.pid}，${cur.via}）`)
+      return {
+        started: false, busy: true, pid: cur.pid, since: cur.since, runningWhy: cur.why, via: cur.via,
+        hint: '上一轮还在跑 —— 等它结束再来（同时跑两轮会重复发评论）',
+      }
+    }
     const dsh = resolveDsh()
     const overlay = ensureOverlay()
     const args = [...dsh.args, '--profile', cfg.headlessProfile || 'headless']
@@ -1176,9 +1249,12 @@ export function apply(ctx, config) {
     dutyChild = child
     dutyStartedAt = Date.now()
     dutyWhy = why
+    // 把锁写下来：宿主重启之后（内存里那份没了）还认得出来上一轮在跑 ✓
+    try { writeFileSync(roundLockFile, JSON.stringify({ pid: child.pid, at: dutyStartedAt, why }), 'utf8') } catch { /* 写不了就只靠内存那份 */ }
     markRoundStart(why)
     child.on('exit', (code) => {
       if (dutyChild === child) dutyChild = null          // 只有"当前这一轮"才清，避免连跑时互相顶掉
+      lockClear()                                        // ⭐ 锁也要跟着清，否则后面全被挡住 ✗
       dutyLastExit = { code, at: Date.now(), why }
       log(`刷B站结束（${why}，code=${code}）`)
       stubReportIfMissing(code)   // ⭐ 没写报告就补一份占位 —— 别让使用者什么都看不到
@@ -1187,7 +1263,12 @@ export function apply(ctx, config) {
       //    插件会以为发了、下一轮不再发 ⇒ 一条都没到人。等 90 秒再查，避免把"还在审核"误判成"没发出去"。
       setTimeout(() => { Promise.resolve(runVerify('round')).catch((e) => log('复核异常：' + (e?.message ?? e))) }, 90_000)
     })
-    child.on('error', (e) => log(`刷B站起不来：${e?.message ?? e}`))
+    child.on('error', (e) => {
+      // ⚠️ 起不来也必须清锁 —— 否则这个插件会**永久**停在"上一轮还在跑" ✗
+      if (dutyChild === child) dutyChild = null
+      lockClear()
+      log(`刷B站起不来：${e?.message ?? e}`)
+    })
     return { started: true, why, profile: cfg.headlessProfile, cwd, log: logFile }
    } catch (e) {
     log(`刷B站开跑失败（${why}）：${e?.stack ?? e}`)
@@ -1529,6 +1610,7 @@ export function apply(ctx, config) {
   let updateCache = null            // { at, latest } —— 检查更新的结果缓存
 
   const status = () => {
+    const round = roundBusy()
     const st = readJson(dutyStateFile, {})
     const today = dayKey()
     const now = new Date()
@@ -1537,6 +1619,10 @@ export function apply(ctx, config) {
     return {
       ok: true,
       home: stateDir,
+      // ⭐ 并发锁的实情（2026-10-18）：有没有一轮在跑、是谁在跑 ✓
+      round,
+      // ⭐ 评论台账：已经评论过哪些视频（同一个视频不再发第二条）✓
+      ledger: ledgerInfo(),
       config: cfg,
       // ⭐ 时段那套（2026-10-18）：给的是**生效的那张表**（配了自定义就是自定义），
       //    外加体检告警与"下次什么时候跑" —— 设置页直接显示，不用自己再算一遍
@@ -1777,6 +1863,20 @@ export function apply(ctx, config) {
         res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' })
         return res.end('读不出来：' + (e?.message ?? e))
       }
+    }
+
+    // 「评论台账」：看 / 清空。清空是**逃生口** —— 那条评论被删了才需要重发 ✓
+    if (req.method === 'GET' && path === '/api/bili-duty/ledger') return sendJson(res, 200, { ok: true, ...ledgerInfo() })
+    if (req.method === 'POST' && path === '/api/bili-duty/ledger') {
+      const body = await readBody(req)
+      if (body?.clear) {
+        try {
+          writeFileSync(ledgerFile, '{}\n', 'utf8')
+          log('评论台账已清空（下一个视频起重新记）')
+          return sendJson(res, 200, { ok: true, cleared: true, ...ledgerInfo() })
+        } catch (e) { return sendJson(res, 200, { ok: false, error: '清不掉：' + (e?.message ?? e) }) }
+      }
+      return sendJson(res, 200, { ok: true, ...ledgerInfo() })
     }
 
     // 「人格 / 提示词」：把这一轮真发出去的话摊给设置页看 ✓

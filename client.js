@@ -895,6 +895,7 @@ window.__ModuleLoader__.load({
       const [rl, setRl] = React.useState(null)
       const [mdl, setMdl] = React.useState(null)        // 模型草稿
       const [mdlP, setMdlP] = React.useState(null)      // 服务商草稿
+      const [ledgerAsk, setLedgerAsk] = React.useState(false)   // 「清空台账」要按两下
       const [newVer, setNewVer] = React.useState('')       // 发现的新版本号（空 = 没发现）          // 日报形态：full / brief / off
       // ⚠️ 输入框必须绑"本地草稿"：页面每 5 秒轮询 /status，服务端那份会把 config 盖掉
       //    ⇒ 直接绑 cfg 的话，用户打字打到一半就被冲没了 ✗（2026-10-14 陌生人验收时抓到）
@@ -1033,6 +1034,20 @@ window.__ModuleLoader__.load({
             say('打不开（' + ((r && r.error) || '未知原因') + '）—— 已经把这个目录摊在下面了，可以直接看、直接下载', 'warn')
             setFilesWhat(what)
           }
+        } catch (e) { say(String(e?.message ?? e), 'warn') }
+      }
+
+      const onClearLedger = async () => {
+        if (!ledgerAsk) {
+          setLedgerAsk(true)
+          say('再点一次就真的清空（清空后，已经评论过的视频会被重新认为"没评过"）', 'warn')
+          return
+        }
+        setLedgerAsk(false)
+        try {
+          const r = await jpost('/ledger', { clear: true })
+          if (r && r.ok) say('评论台账已清空', 'good')
+          else say('清空失败：' + ((r && r.error) || '未知原因'), 'warn')
         } catch (e) { say(String(e?.message ?? e), 'warn') }
       }
 
@@ -1181,6 +1196,12 @@ window.__ModuleLoader__.load({
         ? `这一轮会用：${pick.provider || '（沿用 profile 的服务商）'} / ${pick.model}`
         : '这一轮会用：profile 自己配的那个（没有覆盖）'
       const modelBad = (pick.rejected || []).join(' ／ ')
+
+      // ⭐ 评论台账（2026-10-18）：MCP 那边发评论时记的，这里只读 + 提供清空 ✓
+      const ledger = st.ledger || { count: 0, recent: [] }
+      const ledgerLine = (ledger.recent || []).length
+        ? '最近：' + ledger.recent.map((x) => `${x.bvid}（${x.kind}${x.at ? ' ' + x.at.slice(5, 16) : ''}）`).join(' · ')
+        : ''
 
       const TABS = [['settings', '设置'], ['report', '报告'], ['persona', '人格'], ['debug', '调试']]
 
@@ -1480,6 +1501,21 @@ window.__ModuleLoader__.load({
           modelBad ? h('div', { 'data-bd-warn': '' },
             '这两个值只能填字母数字和 . _ : / -（要写进配置文件），下面这个没被采用：' + modelBad) : null,
           h('div', { 'data-bd-note': '' }, modelNow)),
+
+        /* ── 评论台账：同一个视频不再发第二条 ── */
+        h('div', { 'data-bd-sec': '' },
+          h('div', { 'data-bd-h': '' }, '评论台账'),
+          h('div', { 'data-bd-note': '' },
+            ledger.count
+              ? `已经评论过 ${ledger.count} 个视频 —— 同一个视频不会再发第二条（新评论和楼中楼合起来只算一条）`
+              : '还没评论过任何视频。评论过的会记在这儿，同一个视频不会再发第二条'),
+          ledgerLine ? h('div', { 'data-bd-note': '' }, ledgerLine) : null,
+          ledger.count
+            ? h('div', { 'data-bd-row': '' },
+              h('button', {
+                'data-bd-btn': '', 'data-bd-warn': ledgerAsk ? '' : undefined, onClick: onClearLedger,
+              }, ledgerAsk ? '再点一次：确认清空' : '清空台账'))
+            : null),
 
         /* ── ⑤ 环境与账号 ── */
         h('div', { 'data-bd-sec': '' },

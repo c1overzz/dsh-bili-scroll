@@ -8,7 +8,8 @@
  * 用法：node --import ./tools/register.mjs route-smoke.mjs
  * 夹具：把线上 out/*.md 拷进沙箱的数据目录（只读线上，不往真数据目录写任何东西）
  */
-import { mkdirSync, copyFileSync, writeFileSync, rmSync, existsSync, readdirSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { spawn } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -465,6 +466,61 @@ for (const bad of ['a b', 'a"b', "a'b", 'a\nb', '../etc', '-x', '']) {
 }
 // 恢复干净
 await call('POST', '/api/bili-duty/config', { modelProvider: '', model: '' })
+
+/* ⑬⁗ 并发锁 + 评论台账（2026-10-18 补的两道闸）
+ *  🔴 前者：原来 runDuty **没有并发闸** ⇒ 手动跑撞上定时器会起两个 dsh，重复发评论 ✗
+ *  🔴 后者：原来"别重复评论同一个视频"全靠 AI 自觉 ⇒ 插件自己不记 ✗ */
+const lockFile = join(SANDBOX, 'bili-duty', 'round.lock')
+rmSync(lockFile, { force: true })
+const rd0 = (await call('GET', '/api/bili-duty/status')).json?.round
+ok('/status 带回了并发锁实情', rd0 && typeof rd0.busy === 'boolean', JSON.stringify(rd0))
+ok('没锁时是空闲', rd0.busy === false)
+
+// 拿一个"真活着但不是本进程"的 pid
+const sleeper = spawn('sleep', ['60'], { stdio: 'ignore' })
+await new Promise((r) => setTimeout(r, 300))
+writeFileSync(lockFile, JSON.stringify({ pid: sleeper.pid, at: Date.now(), why: 'window:b1' }))
+const rd1 = (await call('GET', '/api/bili-duty/status')).json?.round
+ok('⭐ 锁在、进程还活着 ⇒ 报"正在跑"', rd1.busy === true && Number(rd1.pid) === sleeper.pid, JSON.stringify(rd1))
+ok('并说清是谁在跑', /宿主进程|本进程/.test(String(rd1.via || '')), rd1.via)
+// ⭐ 这时点「现在跑一轮」必须被挡（挡不住就会真起一个 dsh）
+const runBlocked = await call('POST', '/api/bili-duty/run', {})
+ok('⭐⭐ 有一轮在跑时，「现在跑一轮」被挡住（否则就是两个进程重复发评论）',
+  runBlocked.json?.started !== true && runBlocked.json?.busy === true, JSON.stringify(runBlocked.json).slice(0, 120))
+ok('并且给了一句人话解释', /还在跑/.test(String(runBlocked.json?.hint || '')), runBlocked.json?.hint)
+
+// 进程没了 ⇒ 陈旧锁要自己清掉，别把插件永久卡住
+writeFileSync(lockFile, JSON.stringify({ pid: 999999, at: Date.now(), why: 'x' }))
+const rd2 = (await call('GET', '/api/bili-duty/status')).json?.round
+ok('⭐ 进程早没了 ⇒ 当成陈旧锁清掉（否则永久卡住）', rd2.busy === false && !existsSync(lockFile), JSON.stringify(rd2))
+// 跑了 7 小时 ⇒ 也算陈旧
+writeFileSync(lockFile, JSON.stringify({ pid: sleeper.pid, at: Date.now() - 7 * 3600 * 1000, why: 'x' }))
+const rd3 = (await call('GET', '/api/bili-duty/status')).json?.round
+ok('⭐ 超过 6 小时的锁也算陈旧', rd3.busy === false, JSON.stringify(rd3))
+// EPERM（进程在但不归我们）也要算活着 —— 这条之前踩过：pid=1 被当成不存在，锁白加了 ✗
+writeFileSync(lockFile, JSON.stringify({ pid: 1, at: Date.now(), why: 'x' }))
+const rd4 = (await call('GET', '/api/bili-duty/status')).json?.round
+ok('⭐ pid=1（EPERM：进程在、没权限发信号）也算活着', rd4.busy === true, JSON.stringify(rd4))
+sleeper.kill()
+rmSync(lockFile, { force: true })
+
+// ── 评论台账 ──
+const led0 = await call('GET', '/api/bili-duty/ledger')
+ok('/ledger 读得到', led0.code === 200 && led0.json?.ok === true && typeof led0.json.count === 'number')
+ok('空台账时 count = 0', led0.json.count === 0, String(led0.json.count))
+writeFileSync(join(SANDBOX, 'bili-duty', 'commented.json'), JSON.stringify({
+  BV1xx411c7mD: { kind: 'top', rpid: '123', at: '2026-10-18 12:00:00', text: '挖到宝啦' },
+  BV1yy411c7mD: { kind: 'reply', rpid: '456', at: '2026-10-17 20:00:00', text: '诶嘿' },
+}))
+const led1 = await call('GET', '/api/bili-duty/ledger')
+ok('读得到已评论过的视频', led1.json.count === 2, String(led1.json.count))
+ok('楼中楼与顶层分得开', led1.json.recent.some((x) => x.kind === '楼中楼'), JSON.stringify(led1.json.recent))
+ok('最近的在前面（按时间倒序）', led1.json.recent[0].bvid === 'BV1xx411c7mD')
+ok('/status 也带上了台账', (await call('GET', '/api/bili-duty/status')).json?.ledger?.count === 2)
+const led2 = await call('POST', '/api/bili-duty/ledger', { clear: true })
+ok('能清空（那条被删了要重发时的逃生口）', led2.json?.ok === true && led2.json.count === 0, JSON.stringify(led2.json))
+ok('清空后文件里真的是空的', JSON.parse(readFileSync(join(SANDBOX, 'bili-duty', 'commented.json'), 'utf8') && '{}') !== null)
+rmSync(join(SANDBOX, 'bili-duty', 'commented.json'), { force: true })
 
 /* ⑭ 收拾干净 —— 沙箱里的配置别留给下一次跑 */
 await call('POST', '/api/bili-duty/config', { windows: [], noSubtitlePick: false, dmUids: [], dmUid: 0 })
