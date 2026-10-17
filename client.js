@@ -170,6 +170,21 @@ window.__ModuleLoader__.load({
 [data-bd-pill][data-bad]{background:rgba(239,68,68,.2);color:#f87171;}
 [data-bd-pill][data-run]{background:rgba(59,130,246,.2);color:#60a5fa;}
 [data-bd-pre][data-tall]{max-height:520px;}
+
+/* ── 目录浏览（2026-10-18）：服务器 / NAS 上没有桌面，"打开文件夹"没意义，
+      改成在设置页里把目录真列出来 —— 能看、能下载 ✓ ── */
+[data-bd-files]{display:flex;flex-direction:column;gap:1px;max-height:340px;overflow:auto;padding:5px;
+  border:1px solid var(--dsw-alias-border-secondary,#00000014);border-radius:10px;}
+[data-bd-file]{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:7px;cursor:pointer;
+  font-size:12px;line-height:17px;}
+[data-bd-file]:hover{background:var(--dsw-alias-bg-hover,#0000000a);}
+[data-bd-file-n]{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+[data-bd-file-m]{color:var(--dsw-alias-label-tertiary,#9aa0a6);font-size:11px;font-variant-numeric:tabular-nums;
+  white-space:nowrap;}
+[data-bd-file][data-cur]{background:var(--dsw-alias-bg-hover,#0000000a);}
+[data-bd-crumb]{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;
+  color:var(--dsw-alias-label-secondary,#6b7280);}
+[data-bd-crumb] b{font-weight:500;color:var(--dsw-alias-label-primary,#111827);}
 [data-bd-narrow]{width:auto;max-width:200px;}
 
 /* ⭐ 窄屏（手机）：少几列、字号小一点、按钮挤一挤 —— 别横向溢出 */
@@ -186,6 +201,7 @@ window.__ModuleLoader__.load({
   [data-bd-num]{width:70px;}
   [data-bd-narrow]{max-width:130px;}
   [data-bd-feed]{max-height:300px;}
+  [data-bd-files]{max-height:260px;}
 }
 `
 
@@ -574,7 +590,7 @@ window.__ModuleLoader__.load({
           ev.phase === 'fail' && ev.note ? h('div', { 'data-bd-note': '', 'data-warn': '' }, ev.note) : null))
     }
 
-    function DebugView({ onRun, busy }) {
+    function DebugView({ onRun, busy, st }) {
       const [d, setD] = React.useState(null)
       const [err, setErr] = React.useState('')
       const [showRaw, setShowRaw] = React.useState(false)
@@ -630,6 +646,20 @@ window.__ModuleLoader__.load({
         bads.length ? h('div', { 'data-bd-msg': '', 'data-warn': '' },
           '这一轮有 ' + bads.length + ' 处报错 —— 下面标红的就是') : null,
 
+        // ⭐ 这台机器到底是什么环境（2026-10-18 加）：跨平台的问题（找不到 python、
+        //    没有桌面、dsh 定位不对）全都得靠这几行看出来，别再让人猜 ✓
+        h('div', { 'data-bd-h': '' }, '这台机器'),
+        h('div', { 'data-bd-kv': '' },
+          '系统：' + ((st && st.platform && st.platform.os) || '（还没读到）'),
+          h('br'),
+          (st && st.platform && st.platform.desktop)
+            ? '文件夹：有桌面 —— 能让系统的程序打开'
+            : '文件夹：没有桌面（服务器 / NAS 常态）—— 在设置页里直接翻目录',
+          h('br'),
+          'python：' + ((st && st.platform && st.platform.python) || '（还没定：还没装依赖就先这样）'),
+          h('br'),
+          'dsh：' + ((st && st.platform && st.platform.dsh) || '?')),
+
         h('div', { 'data-bd-h': '' }, '实时进度（MCP 每次工具调用都上报）'),
         feed.length ? h('div', { 'data-bd-feed': '' }, ...feed.map((ev, i) => h(EvRow, { key: i, ev })))
           : h('div', { 'data-bd-note': '' }, '还没有进度 —— 点「试跑一轮」看看'),
@@ -655,6 +685,93 @@ window.__ModuleLoader__.load({
           showPrompt ? h('pre', { 'data-bd-pre': '', 'data-tall': '' }, d.prompt) : null) : null)
     }
 
+    /* ────────────── 目录浏览（2026-10-18）──────────────
+     * 🔴 为什么要有：服务器 / NAS（这台就是）**没有桌面** —— `xdg-open`、文件管理器
+     *    一个都没有，"打开文件夹"在那儿是**做不到**的事。但功能不该就此消失 ✗：
+     *    退一步，把目录**列在设置页里**，点开看内容、要整份就下载 ✓
+     *    （这也正是"合理的 Linux 实现"该有的样子：承认没有桌面，然后换个能做到的做法）
+     */
+    const fmtSize = (n) => {
+      const v = Number(n) || 0
+      if (v < 1024) return v + ' B'
+      if (v < 1024 * 1024) return (v / 1024).toFixed(v < 10240 ? 1 : 0) + ' KB'
+      return (v / 1024 / 1024).toFixed(1) + ' MB'
+    }
+    const fmtWhen = (ms) => {
+      const d = new Date(Number(ms) || 0)
+      if (Number.isNaN(d.getTime())) return ''
+      const p = (x) => String(x).padStart(2, '0')
+      return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+    }
+
+    function FilesPane({ what, onClose }) {
+      const [st, setSt] = React.useState(null)        // null = 还在读
+      const [sub, setSub] = React.useState('')        // 进到哪一层子目录
+      const [busy, setBusy] = React.useState('')
+      const [view, setView] = React.useState(null)    // 正在看的那个文件
+
+      const load = async (s) => {
+        setBusy('list')
+        try {
+          const r = await jget('/files?what=' + what + (s ? '&sub=' + encodeURIComponent(s) : ''))
+          setSt(r || { ok: false, entries: [] })
+          setSub(s || '')
+          setView(null)
+        } catch (e) { setSt({ ok: false, entries: [], error: String(e?.message ?? e) }) } finally { setBusy('') }
+      }
+      React.useEffect(() => { load('') }, [what])
+
+      const openFile = async (name) => {
+        setBusy('file')
+        try {
+          const r = await jget('/file?what=' + what
+            + (sub ? '&sub=' + encodeURIComponent(sub) : '') + '&name=' + encodeURIComponent(name))
+          setView({ name, ...(r || {}) })
+        } catch (e) { setView({ name, ok: false, error: String(e?.message ?? e) }) } finally { setBusy('') }
+      }
+
+      const dl = (n) => '/api/bili-duty/download?what=' + what
+        + (sub ? '&sub=' + encodeURIComponent(sub) : '') + '&name=' + encodeURIComponent(n)
+
+      const entries = (st && st.entries) || []
+      let body
+      if (st === null) body = h('div', { 'data-bd-note': '' }, '正在读目录…')
+      else if (!entries.length) body = h('div', { 'data-bd-note': '' }, st.error || '这个目录是空的')
+      else body = h('div', { 'data-bd-files': '' }, ...entries.map((e, i) => h('div', {
+        key: i, 'data-bd-file': '',
+        'data-cur': view && view.name === e.name ? '' : undefined,
+        onClick: () => (e.dir ? load(e.name) : openFile(e.name)),
+      },
+        h('span', { 'data-bd-file-n': '' }, (e.dir ? '📁 ' : '📄 ') + e.name),
+        h('span', { 'data-bd-file-m': '' }, e.dir ? '目录' : fmtSize(e.size)),
+        h('span', { 'data-bd-file-m': '' }, fmtWhen(e.mtime)),
+        e.dir ? null : h('a', {
+          'data-bd-file-m': '', href: dl(e.name), download: e.name,
+          style: { textDecoration: 'underline' }, title: '下载这份',
+          onClick: (ev) => ev.stopPropagation(),
+        }, '下载'))))
+
+      return h('div', { 'data-bd-sub': '' },
+        h('div', { 'data-bd-crumb': '' },
+          h('span', null, what === 'out' ? '报告目录：' : '插件家目录：'),
+          h('b', null, (st && st.dir) || '…'),
+          sub ? h('button', {
+            'data-bd-btn': '', 'data-bd-tiny': '',
+            onClick: () => load(''),
+          }, '← 上一层') : null,
+          h('button', {
+            'data-bd-btn': '', 'data-bd-tiny': '', disabled: busy === 'list',
+            onClick: () => load(sub),
+          }, busy === 'list' ? '读…' : '刷新'),
+          onClose ? h('button', { 'data-bd-btn': '', 'data-bd-tiny': '', onClick: onClose }, '收起') : null),
+        body,
+        view ? h('div', { 'data-bd-field': '' },
+          h('div', { 'data-bd-label': '' }, view.name + (view.size ? '（' + fmtSize(view.size) + '）' : '')),
+          view.ok === false ? h('div', { 'data-bd-warn': '' }, view.error || '读不出来')
+            : h('pre', { 'data-bd-pre': '', 'data-tall': '' }, view.text || '（空文件）'),
+          h('a', { 'data-bd-btn': '', href: dl(view.name), download: view.name }, '下载这份')) : null)
+    }
+
     /* ────────────── 设置页正文 ────────────── */
 
     function Panel() {
@@ -678,12 +795,16 @@ window.__ModuleLoader__.load({
       const [aiKw, setAiKw] = React.useState(null)          // 自定义 AI 识别词
       const [mention, setMention] = React.useState(null)    // 要 @ 的名单
       const [wins, setWins] = React.useState(null)          // 自定义时段（"HH:MM-HH:MM"）
+      // ⭐ 目录浏览（2026-10-18）：'out' / 'home' 展开对应目录，'' 收起，null = 还没决定
+      const [filesWhat, setFilesWhat] = React.useState(null)
       const [login, setLogin] = React.useState(null)
       const [report, setReport] = React.useState(null)        // 非 null = 报告已展开
       const [loginState, setLoginState] = React.useState('')
       const [loginTone, setLoginTone] = React.useState('')
 
       const cfg = st?.config
+      // ⭐ 这台机器有没有桌面（决定"打开文件夹"是真按钮还是换成翻目录）✓
+      const noDesktop = Boolean(st && st.platform && st.platform.desktop === false)
       React.useEffect(() => {
         if (cfg && kws === null) setKws(Array.isArray(cfg.keywords) ? cfg.keywords.filter(Boolean) : [])
         if (cfg && ws === null) setWs(cfg.workspace || '')
@@ -704,7 +825,9 @@ window.__ModuleLoader__.load({
         if (cfg && dmMode === null) setDmMode(cfg.dmMode || 'off')
         if (cfg && aiKw === null) setAiKw(Array.isArray(cfg.aiKeywords) ? cfg.aiKeywords.filter(Boolean) : [])
         if (cfg && wins === null) setWins(Array.isArray(cfg.windows) ? cfg.windows.filter(Boolean) : [])
-      }, [cfg])
+        // ⭐ 没有桌面的机器（NAS / 服务器）上「打开文件夹」是做不到的事 ⇒ 默认就把目录摊开 ✓
+        if (st && filesWhat === null) setFilesWhat(st.platform && st.platform.desktop === false ? 'out' : '')
+      }, [cfg, st && st.platform && st.platform.desktop])
 
       // ⚠️ 注意：服务端的 `st.windows` 从 2026-10-18 起是**生效的时段表**（数组，配了自定义就是自定义），
       //    不再是内置那两组的字典 ⇒ 内置的文案从 st.builtinWindows 取，常量只做兜底。
@@ -785,8 +908,13 @@ window.__ModuleLoader__.load({
       const onOpenFolder = async (what) => {
         try {
           const r = await jpost('/open', { what })
-          if (r && r.ok) say('已请系统打开：' + (r.opened || '') + '（要是没看到窗口，用旁边的「复制报告路径」——那个一定成）', 'good')
-          else say('打不开（' + ((r && r.error) || '未知原因') + '）—— 你可以手动打开这个路径：' + ((r && r.dir) || ''))
+          if (r && r.ok) {
+            say('已请系统打开：' + (r.opened || '') + '（要是没看到窗口，用旁边的「复制报告路径」——那个一定成）', 'good')
+          } else {
+            // ⭐ 打不开不是终点：**直接把目录摊在下面**（服务器 / NAS 上这才是唯一能做到的做法 ✓）
+            say('打不开（' + ((r && r.error) || '未知原因') + '）—— 已经把这个目录摊在下面了，可以直接看、直接下载', 'warn')
+            setFilesWhat(what)
+          }
         } catch (e) { say(String(e?.message ?? e), 'warn') }
       }
 
@@ -1229,13 +1357,25 @@ window.__ModuleLoader__.load({
             h('button', { 'data-bd-btn': '', disabled: busy === 'report', onClick: onShowReport },
               report !== null ? '收起报告' : '看今天的报告'),
             h('button', { 'data-bd-btn': '', disabled: busy === 'verify', onClick: onVerify }, '复核评论'),
-            h('button', { 'data-bd-btn': '', onClick: () => onOpenFolder('out') }, '打开报告文件夹'),
-            h('button', { 'data-bd-btn': '', onClick: () => onOpenFolder('home') }, '打开家目录'),
+            // ⚠️ "让系统去打开"这回事**只有在有桌面的机器上才存在** ⇒ 没有就别摆这个按钮，
+            //    换成下面那两个"翻目录"（那才是服务器 / NAS 上真能做到的 ✓）
+            noDesktop ? null : h('button', { 'data-bd-btn': '', onClick: () => onOpenFolder('out') }, '打开报告文件夹'),
+            noDesktop ? null : h('button', { 'data-bd-btn': '', onClick: () => onOpenFolder('home') }, '打开家目录'),
+            h('button', {
+              'data-bd-btn': '', onClick: () => setFilesWhat(filesWhat === 'out' ? '' : 'out'),
+            }, filesWhat === 'out' ? '收起目录' : '翻报告目录'),
+            h('button', {
+              'data-bd-btn': '', onClick: () => setFilesWhat(filesWhat === 'home' ? '' : 'home'),
+            }, filesWhat === 'home' ? '收起目录' : '翻家目录'),
             h('button', { 'data-bd-btn': '', onClick: () => copyText(st.report) }, '复制报告路径')),
+          noDesktop ? h('div', { 'data-bd-note': '' },
+            '这台机器上没有桌面（多半是服务器 / NAS）—— 让系统"打开文件夹"在这儿是做不到的事，'
+            + '所以直接把目录摊在下面：能看内容、能下载 ✓') : null,
+          filesWhat ? h(FilesPane, { what: filesWhat, onClose: () => setFilesWhat('') }) : null,
           report !== null ? h('pre', { 'data-bd-pre': '' }, report) : null)),
 
         tab === 'report' ? h(ReportView) : null,
-        tab === 'debug' ? h(DebugView, { onRun, busy }) : null,
+        tab === 'debug' ? h(DebugView, { onRun, busy, st }) : null,
       )
     }
 

@@ -1143,6 +1143,62 @@ export function apply(ctx, config) {
     req.on('error', () => resolve({}))
   })
 
+  // ── 「打开文件夹」以及**没有桌面时的退路** ────────────────────────────────
+  //  🔴 原来这里是一句 `if (process.platform !== 'win32') return { error:'这个按钮目前只做了 Windows' }`
+  //     —— Linux 使用者点下去只看到一句拒绝，功能是**缺的** ✗。
+  //  ✅ 现在分两层：
+  //     ① 有桌面的机器：macOS 用 `open`，Linux 依次挑真的装了的打开器；
+  //     ② **没有桌面**（服务器 / NAS，这台就是）：老实说清楚，并把路径带回去，
+  //        设置页那边可以直接翻这个目录 / 看文件内容 / 下载 ✓
+  const desktopOpeners = (dir) => {
+    if (IS_MAC) return [['open', [dir]]]
+    if (IS_WIN) {
+      // ⭐ 顺序有讲究：`cmd start` 走 shell 的 ShellExecute，**最可能真的弹出窗口**；
+      //    PATH 不全时 explorer.exe 找不到 ✗；spawn 的失败是**异步**的（下面必须挂 error 监听）
+      return [
+        ['cmd.exe', ['/c', 'start', '', dir]],
+        [join(process.env.SystemRoot || 'C:\\Windows', 'explorer.exe'), [dir]],
+        ['powershell.exe', ['-NoProfile', '-Command', "Start-Process -FilePath '" + dir.replace(/'/g, "''") + "'"]],
+      ]
+    }
+    // Linux / 其它 POSIX：**挑真的在的**那个 —— 很多 NAS 上一个都没有（⇒ 空数组，走第 ② 层）
+    const cands = [
+      ['xdg-open', [dir]], ['gio', ['open', dir]], ['kde-open5', [dir]], ['kde-open', [dir]],
+      ['exo-open', [dir]], ['gnome-open', [dir]], ['deepin-open-file', [dir]],
+      ['nautilus', [dir]], ['dolphin', [dir]], ['thunar', [dir]], ['nemo', [dir]],
+      ['pcmanfm', [dir]], ['caja', [dir]], ['nemo', [dir]],
+    ]
+    return cands.map(([c, a]) => [whichSync(c), a]).filter(([c]) => c)
+  }
+
+  /** ⚠️ 只允许**单层**文件名：挡掉 `../`、绝对路径、盘符 —— 这是个能读任意路径的口子 ✗ */
+  const safeName = (n) => {
+    const s = String(n || '')
+    if (!s || s.length > 200 || s.includes('/') || s.includes('\\') || s.includes('..')) return ''
+    return s.replace(/[\x00-\x1f]/g, '')
+  }
+  const dirOf = (what) => (String(what) === 'home' ? stateDir : outDir)
+
+  /** 列一个目录：目录在前，其余按时间**新→旧**（"刚跑完那份报告"永远在最上面 ✓） */
+  const listDir = (dir) => {
+    const rows = []
+    for (const name of readdirSync(dir)) {
+      try {
+        const st = statSync(join(dir, name))
+        rows.push({ name, dir: st.isDirectory(), size: st.isDirectory() ? 0 : st.size, mtime: st.mtimeMs })
+      } catch { /* 读不了就不列，别整个接口挂掉 */ }
+    }
+    rows.sort((a, b) => (a.dir === b.dir ? b.mtime - a.mtime : (a.dir ? -1 : 1)))
+    return rows.slice(0, 300)
+  }
+
+  /** 目标目录 = 白名单根 + **单层**子目录（子目录名同样要过 safeName，挡掉 ../ ✗） */
+  const subDir = (which, sub) => {
+    const base = dirOf(which)
+    const seg = safeName(sub)
+    return seg ? join(base, seg) : base
+  }
+
   const venvPython = () => process.platform === 'win32'
     ? join(stateDir, '.venv', 'Scripts', 'python.exe')
     : join(stateDir, '.venv', 'bin', 'python')
@@ -1394,6 +1450,16 @@ export function apply(ctx, config) {
         return d ? d.toISOString() : null
       })(),
       builtinWindows: WINDOWS,
+      // ⭐ 这台机器是什么环境（2026-10-18 加）：设置页据此决定「打开文件夹」该怎么呈现 ——
+      //    有桌面就照旧；**没有桌面**（服务器 / NAS 常态）就直接把目录列出来 ✓
+      platform: {
+        os: process.platform,
+        desktop: desktopOpeners(stateDir).length > 0,
+        // 这里报**真找得到的那个**，不是设置里那个字符串 ——
+        // 否则 Linux 上会显示 python（而这台机器压根没有），看着像是没问题
+        python: pyPathSync() || String(cfg.pythonPath || ''),
+        dsh: (() => { const d = resolveDsh(); return [d.command, ...(d.args || [])].join(' ') })(),
+      },
       today,
       ranToday: st.day === today ? Number(st.count || 0) : 0,
       lastRunAt: st.lastRunAt || null,
@@ -1528,31 +1594,82 @@ export function apply(ctx, config) {
     // 「打开文件夹」：浏览器开不了本地目录 ⇒ 让宿主去开（只认 out / home 两个，别的不受理）
     if (req.method === 'POST' && path === '/api/bili-duty/open') {
       const body = await readBody(req)
-      const dir = String(body?.what || 'out') === 'home' ? stateDir : outDir
-      if (process.platform !== 'win32') return sendJson(res, 200, { ok: false, error: '这个按钮目前只做了 Windows' })
-      // ⭐ 三种方式依次试（PATH 不全时 explorer.exe 会找不到 ✗；spawn 的失败是**异步**的，
-      //    try/catch 抓不到 ⇒ 必须挂 'error' 监听，否则会升级成未捕获异常）
-      // ⭐ 顺序很重要：把**最可能真的弹出窗口**的放第一（cmd start 走 shell 的 ShellExecute ✓）
-      //    并且**不要再传 windowsHide**（2026-10-15 实测：传了以后"成功"但窗口不出现 ✗）
-      const attempts = [
-        ['cmd.exe', ['/c', 'start', '', dir]],
-        [join(process.env.SystemRoot || 'C:\\Windows', 'explorer.exe'), [dir]],
-        ['powershell.exe', ['-NoProfile', '-Command', "Start-Process -FilePath '" + dir.replace(/'/g, "''") + "'"]],
-      ]
+      const which = String(body?.what || 'out') === 'home' ? 'home' : 'out'
+      const dir = dirOf(which)
+      const attempts = desktopOpeners(dir)
       let lastErr = ''
       for (const [cmd, args] of attempts) {
         const err = await new Promise((resolve) => {
           let done = false
           let child
+          // ⚠️ 不要再传 windowsHide（2026-10-15 实测：传了以后"成功"但窗口不出现 ✗）
           try { child = spawn(cmd, args, { detached: true, stdio: 'ignore' }) } catch (e) { resolve(String(e?.message ?? e)); return }
           child.on('error', (e) => { if (!done) { done = true; resolve(String(e?.message ?? e)) } })
           setTimeout(() => { if (!done) { done = true; try { child.unref() } catch { /* 无所谓 */ } resolve('') } }, 500)
         })
-        if (!err) { log('打开文件夹：用了 ' + cmd + '（没报错；窗口不一定真弹出来了）'); return sendJson(res, 200, { ok: true, opened: dir, via: cmd }) }
+        if (!err) {
+          log(`打开文件夹：用了 ${cmd}（没报错；窗口不一定真弹出来了）`)
+          return sendJson(res, 200, { ok: true, opened: dir, via: cmd, dir, which })
+        }
         lastErr = err
-        log('打开文件夹失败（' + cmd + '）：' + err)
+        log(`打开文件夹失败（${cmd}）：${err}`)
       }
-      return sendJson(res, 200, { ok: false, error: lastErr, dir })
+      // ② 没有桌面 ⇒ 不是"报个错就完了"：把路径和原因带回去，设置页据此换成"翻目录" ✓
+      return sendJson(res, 200, {
+        ok: false, dir, which, path: dir,
+        noDesktop: attempts.length === 0,
+        error: attempts.length
+          ? `打开器都没成功（${lastErr || '未知原因'}）`
+          : (IS_WIN ? '没找到能打开文件夹的程序' : '这台机器上没有桌面环境（能"打开文件夹"的程序一个都没有）'),
+        hint: attempts.length ? '可以「复制路径」，或者在下面直接翻这个目录' : '没关系 —— 在下面直接翻这个目录、看内容、下载都行',
+      })
+    }
+
+    // ── 没有桌面时的退路：列目录 / 看文件 / 下载 ─────────────────────────
+    //  为什么要有：服务器与 NAS 上"打开文件夹"**无从谈起**。与其甩一句打不开，
+    //  不如让设置页真的能看见这些文件（这也是"合理的 Linux 实现"该有的样子 ✓）
+    if (req.method === 'GET' && path === '/api/bili-duty/files') {
+      const which = url.searchParams.get('what') === 'home' ? 'home' : 'out'
+      const sub = safeName(url.searchParams.get('sub'))
+      const dir = subDir(which, sub)
+      try { return sendJson(res, 200, { ok: true, which, sub, dir, entries: listDir(dir) }) }
+      catch (e) { return sendJson(res, 200, { ok: false, which, sub, dir, entries: [], error: '目录读不出来：' + (e?.message ?? e) }) }
+    }
+
+    if (req.method === 'GET' && path === '/api/bili-duty/file') {
+      const which = url.searchParams.get('what') === 'home' ? 'home' : 'out'
+      const dir = subDir(which, url.searchParams.get('sub'))
+      const name = safeName(url.searchParams.get('name'))
+      if (!name) return sendJson(res, 400, { ok: false, error: '文件名不合法' })
+      try {
+        const st = statSync(join(dir, name))
+        if (st.isDirectory()) return sendJson(res, 200, { ok: false, name, error: '这是个目录，点进去看' })
+        // 报告通常几十 KB；放个 2MB 的闸，别把设置页撑爆（要整份就去下载 ✓）
+        if (st.size > 2 * 1024 * 1024) {
+          return sendJson(res, 200, { ok: false, name, size: st.size, error: `文件有点大（${Math.round(st.size / 1024)} KB），下载来看吧` })
+        }
+        return sendJson(res, 200, { ok: true, which, name, size: st.size, text: readFileSync(join(dir, name), 'utf8') })
+      } catch (e) { return sendJson(res, 200, { ok: false, name, error: '读不出来：' + (e?.message ?? e) }) }
+    }
+
+    if (req.method === 'GET' && path === '/api/bili-duty/download') {
+      const which = url.searchParams.get('what') === 'home' ? 'home' : 'out'
+      const dir = subDir(which, url.searchParams.get('sub'))
+      const name = safeName(url.searchParams.get('name'))
+      if (!name) { res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' }); return res.end('文件名不合法') }
+      try {
+        const data = readFileSync(join(dir, name))
+        res.writeHead(200, {
+          'content-type': 'application/octet-stream',
+          // ⚠️ 非 ASCII 文件名要额外给 `filename*`（RFC 5987）—— 只写 filename 会被浏览器丢掉 ✗
+          'content-disposition': `attachment; filename="${name.replace(/[^\x20-\x7e"]/g, '_')}"; filename*=UTF-8''${encodeURIComponent(name)}`,
+          'content-length': String(data.length),
+        })
+        return res.end(data)
+      } catch (e) {
+        res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' })
+        return res.end('读不出来：' + (e?.message ?? e))
+      }
     }
 
     // 「一键升级」：点了它自己跑 add（⚠️ 之后要重启才生效）
