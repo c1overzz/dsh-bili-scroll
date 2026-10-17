@@ -135,6 +135,9 @@ window.__ModuleLoader__.load({
       const [msg, setMsg] = React.useState('')
       const [msgTone, setMsgTone] = React.useState('')
       const [kws, setKws] = React.useState(null)
+      const [modelText, setModelText] = React.useState(null)
+      const [effortText, setEffortText] = React.useState(null)
+      const [modelInfo, setModelInfo] = React.useState(null)
       const [subsText, setSubsText] = React.useState(null)
       const [watchText, setWatchText] = React.useState('')
       const [watchMsg, setWatchMsg] = React.useState('')
@@ -157,6 +160,8 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         if (cfg && kws === null) setKws((cfg.keywords || []).join('\n'))
         if (cfg && subsText === null) setSubsText((cfg.subs || []).join('\n'))
+        if (cfg && modelText === null) setModelText(cfg.headlessModel || '')
+        if (cfg && effortText === null) setEffortText(cfg.headlessEffort || '')
         if (cfg && ws === null) setWs(cfg.workspace || '')
         if (cfg && rl === null) setRl(cfg.reportLevel || 'full')
         if (cfg && perDay === null) setPerDay(String(cfg.perDay ?? 5))
@@ -321,6 +326,16 @@ window.__ModuleLoader__.load({
         await patch({ keywords: list, workspace: String(ws || '').trim() }, '关键词与工作区')
       }
 
+      const onSaveModel = async () => {
+        await patch({ headlessModel: String(modelText || '').trim(), headlessEffort: String(effortText ?? '') }, '模型')
+        setModelInfo(null)
+      }
+
+      const onRefreshModel = async () => {
+        setBusy('model')
+        try { setModelInfo(await jget('/model?fresh=1')) } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
+      }
+
       const onWatch = async () => {
         setBusy('watch'); setWatchMsg('')
         try {
@@ -408,6 +423,41 @@ window.__ModuleLoader__.load({
               onBlur: () => { const n = Math.max(0, Math.min(Number(perDay) || 0, 50)); setPerDay(String(n)); patch({ perDay: n }, '每天挑几条') },
             })),
           st.lastRunAt ? h('div', { 'data-bd-note': '' }, `上次跑：${new Date(st.lastRunAt).toLocaleString('zh-CN')}`) : null),
+        /* ── 这一轮用哪个模型 ── */
+        h('div', { 'data-bd-sec': '' },
+          h('div', { 'data-bd-h': '' }, '这一轮用哪个模型'),
+          h('div', { 'data-bd-note': '' }, '定时刷、点名看用的都是 headless 那一档。留空就跟着 profile 的默认走 —— 这是以前的黑盒。'),
+          h('div', { 'data-bd-row': '' },
+            h('div', { 'data-bd-grow': '' },
+              h('div', { 'data-bd-label': '' }, '模型'),
+              h('div', { 'data-bd-note': '' }, '填你账号里有的那个（例如 deepseek-flash）')),
+            h('input', {
+              'data-bd-input': '', style: { width: '200px', flex: '0 0 200px' },
+              value: modelText ?? '', placeholder: '留空 = 跟默认',
+              onChange: (e) => setModelText(e.target.value),
+              onBlur: () => patch({ headlessModel: String(modelText || '').trim() }, '模型'),
+            })),
+          h('div', { 'data-bd-row': '' },
+            h('div', { 'data-bd-grow': '' },
+              h('div', { 'data-bd-label': '' }, '思考等级'),
+              h('div', { 'data-bd-note': '' }, '越高越慢越贵；「跟默认」= 不写这一项')),
+            h('select', {
+              'data-bd-input': '', 'data-bd-sel': '', value: String(effortText ?? ''),
+              onChange: (e) => { setEffortText(e.target.value); patch({ headlessEffort: e.target.value }, '思考等级') },
+            },
+              h('option', { value: '' }, '跟默认'),
+              h('option', { value: 'low' }, 'low'),
+              h('option', { value: 'medium' }, 'medium'),
+              h('option', { value: 'high' }, 'high'),
+              h('option', { value: 'max' }, 'max'))),
+          h('div', { 'data-bd-row': '' },
+            h('button', { 'data-bd-btn': '', disabled: busy === 'model', onClick: onRefreshModel }, '看实际生效'),
+            h('div', { 'data-bd-note': '' },
+              !modelInfo ? '（点一下会去读 headless profile 里真正在用的那份）'
+                : `profile=${modelInfo.profile} · 实际 ${modelInfo.current ? `${modelInfo.current.provider} / ${modelInfo.current.model} / 思考 ${modelInfo.current.effort || '默认'}` : '读不到'}`
+                  + (modelInfo.injected ? ` · 本插件会覆盖成 ${modelInfo.injected.model}${modelInfo.injected.effort ? ' / ' + modelInfo.injected.effort : ''}` : ' · 本插件不覆盖')))),
+
+
 
         /* ── 发言与转写 ── */
         h('div', { 'data-bd-sec': '' },

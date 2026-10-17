@@ -67,6 +67,12 @@ export const Config = !z ? undefined : z.object({
   subs: z.array(z.string()).default([]).extra('volatile', true),
   /** 台词来源：auto=有字幕轨就用；always=总是本地转写音频（慢，但不受 UP 改字幕影响） */
   frameAudio: z.string().default('auto').extra('volatile', true),
+  /** 刷一轮用哪个模型（留空 = 跟 headless profile 的默认） */
+  headlessModel: z.string().default('').extra('volatile', true),
+  /** provider（一般不用改） */
+  headlessProvider: z.string().default('deepseek-official').extra('volatile', true),
+  /** 思考等级：''（跟默认）/ low / medium / high / max */
+  headlessEffort: z.string().default('').extra('volatile', true),
   /** 下载视频时带账号 Cookie（默认关：匿名够用；开了才稳拿 720p/1080p） */
   useCookie: z.boolean().default(false).extra('volatile', true),
   /** ⭐ 每轮最多发几条评论（每条里 @ 一次下面那个人） */
@@ -163,7 +169,7 @@ export function apply(ctx, config) {
    */
   const DEFAULTS = {
     perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small', seeVideo: true, frameHeight: 480, frameCount: 9, useCookie: false,
-    subs: [], frameAudio: 'auto',
+    subs: [], frameAudio: 'auto', headlessModel: '', headlessProvider: 'deepseek-official', headlessEffort: '',
     keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1,
   }
   const normalize = (src, base) => {
@@ -592,24 +598,88 @@ export function apply(ctx, config) {
    *    （headless 里那两条 B站 MCP 就是当初手写进去的）。分发给别人时不能要求人家改 profile，
    *    所以插件自己生成一份、跑的时候 `--patch` 带上（dsh 支持可重复的 `--patch`）。
    */
+
+  /* ─────────────── 「这一轮到底用什么模型」───────────────
+   * 以前是黑盒：插件起 headless 时不传模型，就一直吃 headless profile 的默认。
+   * 现在既能设，也能把**实际生效**的那份 dump 出来给使用者看。
+   */
+  let modelCache = { at: 0, val: null }
+
+  const dumpModelConfig = () => new Promise((resolve) => {
+    let out = ''
+    let done = false
+    const finish = (v) => { if (!done) { done = true; resolve(v) } }
+    try {
+      const dsh = resolveDsh()
+      const child = spawn(dsh.command, [...dsh.args, '--profile', cfg.headlessProfile || 'headless', '--dump-config'], {
+        shell: dsh.shell, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'],
+      })
+      child.stdout?.on('data', (b) => { out += String(b) })
+      child.on('error', () => finish(''))
+      child.on('exit', () => finish(out))
+      setTimeout(() => { try { child.kill() } catch { /* 无所谓 */ } finish(out) }, 15000)
+    } catch { finish('') }
+  })
+
+  const modelInfo = async (fresh) => {
+    if (!fresh && modelCache.val && Date.now() - modelCache.at < 300000) return modelCache.val
+    const text = await dumpModelConfig()
+    const at = text.indexOf('agent-default-model')
+    let cur = null
+    if (at >= 0) {
+      const seg = text.slice(at, at + 500)
+      const pick = (k) => {
+        const m = new RegExp(k + ':\\s*(.+)').exec(seg)
+        return m ? m[1].trim().replace(/^['"]|['"]$/g, '') : ''
+      }
+      cur = { provider: pick('provider'), model: pick('model'), effort: pick('reasoningEffort') }
+    }
+    const val = {
+      profile: cfg.headlessProfile || 'headless',
+      current: cur,                       // profile 里那份（不注入时就是它）
+      injected: String(cfg.headlessModel || '').trim()
+        ? { provider: String(cfg.headlessProvider || 'deepseek-official').trim(), model: String(cfg.headlessModel).trim(), effort: String(cfg.headlessEffort || '').trim() || null }
+        : null,
+    }
+    modelCache = { at: Date.now(), val }
+    return val
+  }
+
   const ensureOverlay = () => {
-    if (!cfg.overlayMcp) return null
-    const file = join(stateDir, 'headless-overlay.yml')
-    const script = join(stateDir, 'mcp_server.py')
     const posix = (p) => String(p).replace(/\\/g, '/')
-    const yml = [
-      '- insert:',
-      '    - id: mcp-bili-duty',
-      "      name: '@deepseek-ai/dsh-mcp-client'",
-      '      config:',
-      '        serverName: bili-duty',
-      '        transport: stdio',
-      `        command: '${posix(cfg.pythonPath || 'python')}'`,
-      '        args:',
-      `          - '${posix(script)}'`,
-      '',
-    ].join('\n')
-    try { writeFileSync(file, yml, 'utf8'); return file } catch (e) { log(`写 overlay 失败：${e?.message ?? e}`); return null }
+    const parts = []
+    if (cfg.overlayMcp) {
+      const script = join(stateDir, 'mcp_server.py')
+      parts.push([
+        '- insert:',
+        '    - id: mcp-bili-duty',
+        "      name: '@deepseek-ai/dsh-mcp-client'",
+        '      config:',
+        '        serverName: bili-duty',
+        '        transport: stdio',
+        `        command: '${posix(cfg.pythonPath || 'python')}'`,
+        '        args:',
+        `          - '${posix(script)}'`,
+        '',
+      ].join('\n'))
+    }
+    // ⭐ 这一轮用哪个模型 / 思考到多深 —— 以前完全是黑盒（跟 headless profile 的默认走）
+    if (String(cfg.headlessModel || '').trim()) {
+      const model = String(cfg.headlessModel).trim().replace(/'/g, '')
+      const effort = String(cfg.headlessEffort || '').trim()
+      parts.push([
+        '- id: agent-default-model',
+        "  name: '@deepseek-ai/dsh-agent-default-model'",
+        '  config:',
+        `    provider: ${String(cfg.headlessProvider || 'deepseek-official').trim() || 'deepseek-official'}`,
+        `    model: ${model}`,
+        ...(effort ? [`    reasoningEffort: ${effort}`] : []),
+        '',
+      ].join('\n'))
+    }
+    if (!parts.length) return null
+    const file = join(stateDir, 'headless-overlay.yml')
+    try { writeFileSync(file, parts.join('\n'), 'utf8'); return file } catch (e) { log(`写 overlay 失败：${e?.message ?? e}`); return null }
   }
 
   /**
@@ -1040,6 +1110,11 @@ export function apply(ctx, config) {
     const path = url.pathname
     if (req.method === 'GET' && path === '/api/bili-duty/status') return sendJson(res, 200, status())
 
+    if (req.method === 'GET' && path === '/api/bili-duty/model') {
+      const fresh = String(url.searchParams.get('fresh') || '') === '1'
+      return sendJson(res, 200, { ok: true, ...(await modelInfo(fresh)) })
+    }
+
     if (req.method === 'GET' && path === '/api/bili-duty/config') {
       return sendJson(res, 200, { ok: true, config: cfg, windows: WINDOWS, home: stateDir })
     }
@@ -1050,13 +1125,16 @@ export function apply(ctx, config) {
       for (const k of ['perDay', 'peakValley', 'noon', 'night', 'autoComment', 'transcribe', 'asrModel',
         'seeVideo', 'frameHeight', 'frameCount', 'useCookie', 'frameAudio',
         'commentPerRound', 'mentionName',
-        'keywords', 'subs', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound']) {
+        'keywords', 'subs', 'headlessModel', 'headlessProvider', 'headlessEffort', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound']) {
         if (k in body) patch[k] = body[k]
       }
       if ('perDay' in patch) patch.perDay = Math.max(0, Math.min(Number(patch.perDay) || 0, 50))
       if ('frameHeight' in patch) patch.frameHeight = [480, 720, 1080].includes(Number(patch.frameHeight)) ? Number(patch.frameHeight) : 480
       if ('frameCount' in patch) patch.frameCount = Math.max(4, Math.min(Number(patch.frameCount) || 9, 16))
       if ('frameAudio' in patch) patch.frameAudio = ['auto', 'always'].includes(String(patch.frameAudio)) ? String(patch.frameAudio) : 'auto'
+      if ('headlessEffort' in patch) patch.headlessEffort = ['', 'low', 'medium', 'high', 'max'].includes(String(patch.headlessEffort ?? '')) ? String(patch.headlessEffort ?? '') : ''
+      if ('headlessModel' in patch) patch.headlessModel = String(patch.headlessModel ?? '').trim().slice(0, 60)
+      if ('headlessProvider' in patch) patch.headlessProvider = String(patch.headlessProvider ?? '').trim().slice(0, 40) || 'deepseek-official'
       if ('subs' in patch) patch.subs = (Array.isArray(patch.subs) ? patch.subs : [])
         .map((x) => String(x ?? '').trim()).filter(Boolean).slice(0, 30)
       if ('reportLevel' in patch) patch.reportLevel = ['full', 'brief', 'off'].includes(String(patch.reportLevel)) ? String(patch.reportLevel) : 'full'
