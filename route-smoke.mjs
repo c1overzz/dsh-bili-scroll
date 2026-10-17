@@ -245,7 +245,67 @@ const prOff = (await call('GET', '/api/bili-duty/debug')).json?.prompt || ''
 ok('关着时口径变回"照老规矩跳过"', !/拿不到字幕/.test(prOff) && /照老规矩跳过/.test(prOff))
 ok('提示词里也带上了条数额度这类现算的值', /每天最多挑几条|条数上限/.test(prOn))
 
-/* ⑩ 收拾干净 —— 沙箱里的配置别留给下一次跑 */
+/* ⑩ 平台：这台机器是什么环境，得如实报出来（设置页据此决定按钮怎么摆） */
+const pf = st.json?.platform || {}
+ok('/status 带回了平台信息', typeof pf.os === 'string' && typeof pf.desktop === 'boolean', JSON.stringify(pf))
+ok('os 就是真的 process.platform', pf.os === process.platform, pf.os)
+ok('desktop 是"有没有能打开文件夹的程序"（不是写死的）', typeof pf.desktop === 'boolean')
+ok('dsh 能定位到一个真命令（跨平台找法）', /dsh|bin\.js/.test(String(pf.dsh || '')), String(pf.dsh || ''))
+// ⭐ 回归：Linux 上很多发行版**没有 `python`**（只有 `python3`）。以前这里会照抄设置里那个
+//    字符串，于是"明明能用"也显示成 'python' —— 现在必须报**真找得到的那个** ✓
+const pathHas = (n) => String(process.env.PATH || '').split(process.platform === 'win32' ? ';' : ':')
+  .some((d) => d && existsSync(join(d, n)))
+if (process.platform !== 'win32' && pathHas('python3') && !pathHas('python')) {
+  ok('⭐ 这台机器只有 python3 时，python 就不会死报 "python"', pf.python !== 'python', pf.python)
+  ok('而是报出 python3（设置页看得见、也真能用）', /python3/.test(String(pf.python || '')), pf.python)
+}
+
+/* ⑪ ⭐ 打开文件夹：Linux 上不再是那句"只做了 Windows"的拒绝 */
+const op = await call('POST', '/api/bili-duty/open', { what: 'out' })
+ok('/open 返回 200 且是 JSON', op.code === 200 && op.json && typeof op.json === 'object', 'code=' + op.code)
+ok('⭐ 不再回"这个按钮目前只做了 Windows"', !/只做了 Windows/.test(JSON.stringify(op.json || {})))
+ok('答不出"打开"时也把路径带回来了（设置页据此换成翻目录）',
+  op.json?.ok === true || typeof op.json?.dir === 'string', JSON.stringify(op.json))
+if (op.json?.ok !== true) {
+  ok('并且说清了是不是"没有桌面"这件事实', typeof op.json?.noDesktop === 'boolean')
+  ok('还给了下一步怎么办（而不是一句"打不开"就完了）', typeof op.json?.hint === 'string' && op.json.hint.length > 5)
+}
+
+/* ⑫ 目录浏览：没有桌面的机器上这才是真能做到的做法 ✓ */
+const fl = await call('GET', '/api/bili-duty/files?what=out')
+ok('/files 列出了目录', fl.code === 200 && fl.json?.ok === true && Array.isArray(fl.json.entries), 'code=' + fl.code)
+ok('列出来的就是沙箱里那几份报告', days.length === 0 || fl.json.entries.some((e) => /\.md$/.test(e.name)))
+ok('每项都带 size / mtime（设置页要显示）',
+  fl.json.entries.every((e) => typeof e.size === 'number' && typeof e.mtime === 'number'))
+ok('what 不认识时退回 out（不乱跑）',
+  (await call('GET', '/api/bili-duty/files?what=../../etc')).json?.dir === fl.json?.dir)
+
+/* ⑬ 读文件 / 下载 */
+const day0 = days[0] || '2026-10-17'
+const f1 = await call('GET', '/api/bili-duty/file?what=out&name=' + day0 + '.md')
+ok('/file 读得到某一份报告', f1.code === 200 && f1.json?.ok === true && String(f1.json.text).length > 0)
+ok('读回来的名字对得上', f1.json?.name === day0 + '.md')
+
+const trav = [
+  '../../../../etc/passwd', '..%2f..%2fetc%2fpasswd', '/etc/passwd', 'sub/../../x', 'a\\b',
+]
+let blocked = 0
+for (const bad of trav) {
+  const r = await call('GET', '/api/bili-duty/file?what=out&name=' + encodeURIComponent(bad))
+  if (r.code === 400 || (r.json && r.json.ok !== true)) blocked++
+}
+ok('⭐ 路径穿越全被挡掉（这是个能读任意文件的口子）', blocked === trav.length, blocked + '/' + trav.length)
+const subTrav = await call('GET', '/api/bili-duty/files?what=out&sub=' + encodeURIComponent('../..'))
+ok('sub 参数也挡穿越（没跨出白名单根）', subTrav.json?.dir === fl.json?.dir || subTrav.json?.ok === false)
+
+const d1 = await call('GET', '/api/bili-duty/download?what=out&name=' + day0 + '.md')
+ok('/download 200', d1.code === 200)
+ok('带了附件头（浏览器会存文件）', /attachment/.test(String(d1.headers['content-disposition'] || '')))
+ok('中文文件名走 filename*（不然会被丢掉）',
+  /filename\*=UTF-8''/.test(String(d1.headers['content-disposition'] || '')))
+ok('非法文件名的下载被拒', (await call('GET', '/api/bili-duty/download?what=out&name=..%2f..%2fx')).code === 400)
+
+/* ⑭ 收拾干净 —— 沙箱里的配置别留给下一次跑 */
 await call('POST', '/api/bili-duty/config', { windows: [], noSubtitlePick: false, dmUids: [], dmUid: 0 })
 
 /* ⑤ 未知路径要 404，不能挂 */
