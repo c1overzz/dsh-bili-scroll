@@ -62,6 +62,8 @@ window.__ModuleLoader__.load({
   background:var(--dsw-alias-bg-overlay,rgba(128,128,128,.12));color:inherit;font-family:inherit;}
 [data-bd-input]:focus{outline:none;border-color:#3b82f6;}
 [data-bd-num]{width:88px;text-align:center;}
+/* 下拉框：固定宽度 + 不许被压缩 —— 否则 width:100% 会把左边那列挤成一字一行 */
+[data-bd-sel]{width:132px;flex:0 0 132px;}
 [data-bd-btn]{padding:7px 12px;border-radius:8px;font-size:12px;cursor:pointer;font-family:inherit;
   border:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.16));
   background:var(--dsw-alias-bg-overlay,rgba(128,128,128,.14));color:inherit;}
@@ -462,7 +464,7 @@ window.__ModuleLoader__.load({
                 h('div', { 'data-bd-label': '' }, '清晰度'),
                 h('div', { 'data-bd-note': '' }, '480p 读大字够用；720p 读小字和表格；1080p 更清楚，但基本要 Cookie')),
               h('select', {
-                'data-bd-input': '', value: String(cfg.frameHeight ?? 480),
+                'data-bd-input': '', 'data-bd-sel': '', value: String(cfg.frameHeight ?? 480),
                 onChange: (e) => patch({ frameHeight: Number(e.target.value) }, '清晰度'),
               },
                 h('option', { value: '480' }, '480p'),
@@ -473,7 +475,7 @@ window.__ModuleLoader__.load({
                 h('div', { 'data-bd-label': '' }, '每条抽几帧'),
                 h('div', { 'data-bd-note': '' }, '9 帧 = 3×3 九宫格（默认）；16 帧更不容易漏，但一张图更大')),
               h('select', {
-                'data-bd-input': '', value: String(cfg.frameCount ?? 9),
+                'data-bd-input': '', 'data-bd-sel': '', value: String(cfg.frameCount ?? 9),
                 onChange: (e) => patch({ frameCount: Number(e.target.value) }, '抽几帧'),
               },
                 h('option', { value: '4' }, '4 帧'),
