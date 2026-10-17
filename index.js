@@ -139,6 +139,93 @@ export function apply(ctx, config) {
   }
   const stateDir = stateDirOf(ctx)
 
+  /* ══════════════════════════════════════════════════════════════════════════
+   *  跨平台的那点基础设施（2026-10-18 加）
+   *  ──────────────────────────────────────────────────────────────────────────
+   *  起因：这套东西一开始是照着 Windows 上的 dsh 写的，到 Linux 上**有整条路走不通**
+   *  （不是"体验差一点"，是根本不动）：
+   *    · `python` 在多数发行版上**压根不存在**（只有 `python3`）⇒ 二维码画不出来、内部 MCP 起不来；
+   *    · 一键升级硬编码 `cmd.exe /c` ⇒ 在 Linux 上必然失败；
+   *    · 找 `dsh` 只猜 `/usr/local/lib`、`/usr/lib` ⇒ 装在 nvm / `.npm-global` 下就找不到，
+   *      退化回裸 `dsh`，而宿主的 PATH 里常常没有它 ⇒ **静默失败**（spawn 的失败是异步的，抓不到）。
+   *  这一节只干一件事：**别再靠猜平台、别再写死某一个平台的命令**。
+   * ══════════════════════════════════════════════════════════════════════════ */
+
+  const IS_WIN = process.platform === 'win32'
+  const IS_MAC = process.platform === 'darwin'
+
+  /**
+   * 不用起进程的 `which`。Node 没有内置的同步版，而这里必须**同步**决定用哪个命令。
+   * ⚠️ Windows 上光试 `dsh` 不行 —— PATH 里躺的是 `dsh.cmd` / `.exe` ✓
+   */
+  const whichSync = (name) => {
+    const exts = IS_WIN ? ['.cmd', '.exe', '.bat', ''] : ['']
+    const dirs = String(process.env.PATH || '').split(IS_WIN ? ';' : ':')
+    for (const d of dirs) {
+      if (!d) continue
+      for (const ext of exts) {
+        try { const p = join(d, name + ext); if (existsSync(p)) return p } catch { /* PATH 里有坏项，跳过 */ }
+      }
+    }
+    return ''
+  }
+
+  /**
+   * 把一个"可执行文件"包成 spawn 能用的形状。三种情况差别很大，写错就静默失败：
+   *   · `.cmd` / `.bat`（Windows 上 npm 装的 shim）⇒ **必须**交给 shell，直接 exec 会 EINVAL
+   *   · `.exe`（Windows 原生）⇒ 直接 exec
+   *   · 其它（POSIX 上带 shebang 的 node 脚本）⇒ 用 `node <它>` 最稳，不依赖可执行位
+   */
+  const asCommand = (p) => {
+    if (/\.(cmd|bat)$/i.test(p)) return { command: p, args: [], shell: true }
+    if (/\.exe$/i.test(p)) return { command: p, args: [], shell: false }
+    return { command: process.execPath, args: [p], shell: false }
+  }
+
+  /**
+   * 找 Python。⭐ 顺序：设置里写的 → 自己建的 venv → 系统里的候选。
+   * 🔴 原来三个地方直接写 `cfg.pythonPath || 'python'` —— Linux 上 `python` 常常不存在，
+   *    于是「扫码登录」画不出二维码、内部 MCP 也起不来（用户只看到一句没头没脑的失败）✗
+   */
+  const pyCandidates = () => {
+    const explicit = String(cfg.pythonPath || '').trim()
+    const sys = IS_WIN ? ['python', 'py'] : ['python3', 'python']
+    // ⚠️ venvPython() 只是**拼路径**，存不存在由下面逐个探 ✓
+    return [...new Set([explicit, venvPython(), ...sys].filter(Boolean))]
+  }
+
+  /** 同步能定下来的那部分：设置里写的 → venv 里那份 → PATH 上的（**不做 --version 探测**） */
+  const pyPathSync = () => {
+    if (pyCache) return pyCache
+    for (const c of pyCandidates()) {
+      // 带路径的直接看文件在不在（venv 里那份就是这么来的）
+      if (c.includes('/') || c.includes('\\')) { if (existsSync(c)) return c; continue }
+      const hit = whichSync(c)
+      if (hit) return hit
+    }
+    return ''
+  }
+
+  /** 第一个**真的能跑**的 python（带缓存；装完依赖可以 fresh=true 重探） */
+  let pyCache = ''
+  const resolvePy = async (fresh = false) => {
+    if (!fresh) { const quick = pyPathSync(); if (quick) { pyCache = quick; return quick } }
+    for (const c of pyCandidates()) {
+      if (c.includes('/') || c.includes('\\')) {
+        if (existsSync(c)) { pyCache = c; return c }
+        continue
+      }
+      const hit = whichSync(c)
+      if (hit) { pyCache = hit; return hit }
+      if (await probeCmd(c)) { pyCache = c; return c }
+    }
+    // 一个能用的都没探到：把平台默认值交出去，让调用方**自己失败一次并报出来**（别在这里抛）
+    return IS_WIN ? 'python' : 'python3'
+  }
+
+  /** 给同步代码用（写 overlay 那份 yml 的时候）：定不下来就回到平台默认 ✓ */
+  const pyForSync = () => pyPathSync() || (IS_WIN ? 'python' : 'python3')
+
   // ⭐ "就绪"必须检查依赖真的装上了，不能只看目录存不存在
   //    （2026-10-15：只看目录，害一位真实用户"显示就绪但其实装失败"白折腾 ✗）
   const sitePkgs = (venvRoot) => {
@@ -281,7 +368,8 @@ export function apply(ctx, config) {
     if (!existsSync(script)) throw new Error(`家里没有 mcp_server.py（应有 ${script}）—— 装上插件后重启一次 dsh 会自动铺好`)
     mcpKey = mcpKeyNow()
     mcp = new McpClient({
-      command: cfg.pythonPath || 'python',
+      // ⭐ 走 resolvePy：设置里的 → 自己建的 venv → 系统里的 python3/python ✓
+      command: await resolvePy(),
       args: [script],
       cwd: stateDir,                     // 凭证落在家里 ✓
       // ⭐ 这个内置的 Python MCP 会往 stdout 打中文（ensure_ascii=False）；
@@ -491,7 +579,7 @@ export function apply(ctx, config) {
     parameters: {},
     async execute() {
       const { key, url } = await loginStart()
-      const png = await renderQrPng(cfg.pythonPath, stateDir, url)
+      const png = await renderQrPng(await resolvePy(), stateDir, url)
       return {
         ok: true, key, url, png,
         hint: png ? '用 present 把这张 PNG 推给本人扫；扫完调 bili_login_poll' : '没画出 PNG：先去设置里点「建 venv 装依赖」（venv 里要有 qrcode）',
@@ -597,12 +685,13 @@ export function apply(ctx, config) {
       try {
         const dsh = resolveDsh()
         // ⭐ 照抄那一轮的形状：resolveDsh 返回 { command, args, shell }
-        //    （写错就退化成裸 'dsh'，而宿主 PATH 里常常没有它 ⇒ 静默失败）
-        let cmd = dsh.command || 'dsh'
-        let args = [...(dsh.args || []), 'plugin', '--profile', 'web', 'add', 'dsh-bili-scroll']
-        if (dsh.shell) { args = ['/c', cmd, ...args]; cmd = 'cmd.exe' }
-        appendInstall('$ ' + cmd + ' ' + args.join(' ') + '\n')
-        const code = await spawnTo(cmd, args, { sink: appendInstall })
+        //    🔴 这里原来写的是 `if (dsh.shell) { args = ['/c', cmd, ...args]; cmd = 'cmd.exe' }` ——
+        //      那是**只对 Windows 成立**的写法 ⇒ Linux 上「一键升级」必然失败 ✗。
+        //      正确做法是把 `shell` 交给 spawn（它自己知道该用 cmd.exe 还是 /bin/sh）✓
+        const cmd = dsh.command || 'dsh'
+        const args = [...(dsh.args || []), 'plugin', '--profile', 'web', 'add', 'dsh-bili-scroll']
+        appendInstall('$ ' + [cmd, ...args].join(' ') + (dsh.shell ? '    （经系统 shell）' : '') + '\n')
+        const code = await spawnTo(cmd, args, { sink: appendInstall, shell: dsh.shell })
         if (code === 0) appendInstall('=== 升级完成 —— 重启一次 dsh 才生效 ===\n')
         else appendInstall('=== 升级没成功（exit ' + code + '）。可以自己手动跑一次：dsh plugin --profile web add dsh-bili-scroll ===\n')
       } catch (e) { appendInstall('升级崩了：' + (e?.stack ?? e) + '\n') } finally { upgrading = false }
@@ -610,14 +699,37 @@ export function apply(ctx, config) {
     return { ok: true, started: true, log: installLogFile, hint: '正在升级 —— 完成后重启一次 dsh 才生效' }
   }
 
+  /**
+   * 找到 dsh 本体。⭐ 顺序是**从最可靠到最靠猜**（原来是直接跳到猜，Linux 上常常就猜不着）：
+   *   ① 设置里指定的 `dshBin`
+   *   ② **正在跑的这个宿主进程自己** —— `process.argv[1]` 就是 dsh 的入口（`node <entry> web …`），
+   *      跨平台一致，nvm / `.npm-global` / `%APPDATA%\npm` 那些布局**一个都不用猜** ✓
+   *   ③ PATH 里那一份（Windows 上会是 `dsh.cmd`）
+   *   ④ 从 **node 自己所在的位置**往外推（比写死 `/usr/local/lib` 靠谱得多）
+   *   ⑤ 实在没有：退回裸 `dsh`，让 spawn 的 shell 去找
+   */
   const resolveDsh = () => {
     const explicit = String(cfg.dshBin || '').trim()
-    if (explicit && existsSync(explicit)) return { command: process.execPath, args: [explicit], shell: false }
-    // 常见的全局安装位置（Windows 的 npm 前缀 / POSIX 的 lib）
+    if (explicit && existsSync(explicit)) return asCommand(explicit)
+
+    const self = String(process.argv[1] || '')
+    if (self && existsSync(self) && (/[\\/]dsh(\.js)?$/i.test(self) || /[\\/]bin\.js$/i.test(self))) {
+      return asCommand(self)
+    }
+
+    const onPath = whichSync('dsh')
+    if (onPath) return asCommand(onPath)
+
+    const nodeDir = dirname(process.execPath)
     const guesses = [
+      join(nodeDir, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
+      join(nodeDir, '..', 'lib', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
+      join(nodeDir, '..', '..', 'lib', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
+      join(nodeDir, '..', '.npm-global', 'lib', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
       join(process.env.APPDATA || '', 'npm', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
       '/usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js',
       '/usr/lib/node_modules/@deepseek-ai/dsh/lib/bin.js',
+      '/opt/homebrew/lib/node_modules/@deepseek-ai/dsh/lib/bin.js',
     ].filter(Boolean)
     for (const g of guesses) if (existsSync(g)) return { command: process.execPath, args: [g], shell: false }
     return { command: 'dsh', args: [], shell: true }
@@ -791,7 +903,7 @@ export function apply(ctx, config) {
       '      config:',
       '        serverName: bili-duty',
       '        transport: stdio',
-      `        command: '${posix(cfg.pythonPath || 'python')}'`,
+      `        command: '${posix(pyForSync())}'`,
       '        args:',
       `          - '${posix(script)}'`,
       '',
@@ -1127,11 +1239,13 @@ export function apply(ctx, config) {
   }
 
   /** 跟 spawnLogged 一样，但可以写进别的日志、可以带环境变量 */
-  const spawnTo = (cmd, args, { sink = appendInstall, env = null } = {}) => new Promise((resolve) => {
+  const spawnTo = (cmd, args, { sink = appendInstall, env = null, shell = false } = {}) => new Promise((resolve) => {
     sink(`\n$ ${cmd} ${args.join(' ')}\n`)
     let c
     try {
-      c = spawn(cmd, args, { cwd: stateDir, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+      // ⚠️ `shell` 必须有：Windows 上 npm 装出来的是 `dsh.cmd`（直接 exec 会 EINVAL ✗），
+      //    而 POSIX 上交给 /bin/sh 也对；**别在外面手写 `cmd.exe /c`** —— 那只在 Windows 成立 ✗
+      c = spawn(cmd, args, { cwd: stateDir, windowsHide: true, shell, stdio: ['ignore', 'pipe', 'pipe'],
         env: pyEnv(env || {}) })
     } catch (e) { sink(`起不来：${e?.message ?? e}\n`); return resolve(1) }
     const w = (b) => sink(String(b))
@@ -1155,7 +1269,7 @@ export function apply(ctx, config) {
         if (!existsSync(py)) {
           // --seed：把 pip 也装进去（uv 默认不给）—— 不然出现问题时连 pip 都没有，没法补救 ✗
           if (uvCmd) await spawnTo(uvCmd, ['venv', '--seed', asrDir], { sink: appendAsr })
-          else await spawnTo(String(cfg.pythonPath || 'python'), ['-m', 'venv', asrDir], { sink: appendAsr })
+          else await spawnTo(await resolvePy(), ['-m', 'venv', asrDir], { sink: appendAsr })
         }
         if (!existsSync(py)) {
           appendAsr('建环境失败 —— 先点上面的「装依赖」，把 uv 或 Python 准备好\n')
@@ -1197,17 +1311,27 @@ export function apply(ctx, config) {
         const reqFile = join(pluginDir, 'vendor', 'bilibili-mcp', 'requirements.txt')
         const mirror = process.env.BILI_DUTY_PIP_MIRROR || 'https://pypi.tuna.tsinghua.edu.cn/simple'
         const venvPy = venvPython()
-        const py = String(cfg.pythonPath || 'python')
-          const uvCmd = await resolveUv()   // ⭐ 系统里的 → 家里下好的 → 自己下一份
-        if (!existsSync(venvPy) && !uvCmd && !(await probeCmd(py))) {
-          const msg = '这台机器上没有 uv，也没有可用的 python（试过 "' + py + '"），而且我自动下 uv 也没成功'
-            + '（大概是网络到不了 GitHub / PyPI 镜像）。⇒ 请手动装 uv（单个 exe：https://docs.astral.sh/uv/）'
-            + '或 Python 3.10+（安装时勾 Add to PATH），然后回来再点一次「装依赖」。'
+        // ⭐ 候选**一个个试**：设置里写的 → venv 里那份 → 系统里的 python3 / python。
+        //    🔴 原来只试 `cfg.pythonPath || 'python'` —— Linux 上 `python` 常常不存在，
+        //       于是"明明装了 python3"也会被判成"这台机器上没有可用的 python" ✗
+        let py = ''
+        for (const c of pyCandidates()) {
+          if (c.includes('/') || c.includes('\\')) { if (existsSync(c)) { py = c; break } continue }
+          const hit = whichSync(c)
+          if (hit) { py = hit; break }
+          if (await probeCmd(c)) { py = c; break }
+        }
+        const tried = pyCandidates().join(' / ')
+        const uvCmd = await resolveUv()   // ⭐ 系统里的 → 家里下好的 → 自己下一份
+        if (!existsSync(venvPy) && !uvCmd && !py) {
+          const msg = `这台机器上没有 uv，也没找到可用的 python（试过 ${tried}），而且我自动下 uv 也没成功`
+            + '（大概是网络到不了 GitHub / PyPI 镜像）。⇒ 请手动装一份 uv（单个可执行文件，'
+            + 'https://docs.astral.sh/uv/install/ ）或 Python 3.10+，然后回来再点一次「装依赖」。'
           appendInstall(msg + '\n'); log(msg); installing = false; return
         }
         if (!existsSync(venvPy)) {
           if (uvCmd) await spawnLogged(uvCmd, ['venv', join(stateDir, '.venv')])
-          if (!existsSync(venvPy) && !uvCmd) await spawnLogged(py, ['-m', 'venv', join(stateDir, '.venv')])
+          if (!existsSync(venvPy) && !uvCmd && py) await spawnLogged(py, ['-m', 'venv', join(stateDir, '.venv')])
         }
         let code = 1
         if (uvCmd) code = await spawnLogged(uvCmd, ['pip', 'install', '--python', venvPy, '-i', mirror, '-r', reqFile])
@@ -1468,7 +1592,7 @@ export function apply(ctx, config) {
     // ── 扫码登录（设置页用）──
     if (req.method === 'POST' && path === '/api/bili-duty/login/start') {
       const { key, url } = await loginStart()
-      const png = await renderQrPng(cfg.pythonPath, stateDir, url)
+      const png = await renderQrPng(await resolvePy(), stateDir, url)
       let qr = null
       if (png) { try { qr = 'data:image/png;base64,' + readFileSync(png).toString('base64') } catch { qr = null } }
       log(`出码：${url}${qr ? '（已画成 PNG）' : '（没画出 PNG —— venv 里大概还没有 qrcode）'}`)
