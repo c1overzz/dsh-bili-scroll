@@ -1149,9 +1149,24 @@ window.__ModuleLoader__.load({
         /* ── ④ 没字幕的视频 ── */
         h('div', { 'data-bd-sec': '' },
           h('div', { 'data-bd-h': '' }, '没字幕的视频'),
+          /* ⭐⭐ 2026-10-18 加：字幕是判断依据里最贵的一条，但**没有它不等于没法判断** ——
+           *   很多视频压根没有字幕（纯音乐 / 录屏 / 无语音），可标题和简介照样看得出对不对口。
+           *   开着这个开关，这些视频就退回"只看面上的信息"，值得的照样推 ✓ */
+          h(ToggleRow, {
+            label: '拿不到字幕的也看看',
+            note: '不开 = 直接跳过。开了 = 只凭**标题 / 简介 / 播放量**判断值不值得推，'
+              + '**不去分析视频内容**；报告里会单独标出哪些是没看内容、只凭标题的',
+            on: sw('noSubtitlePick'),
+            onChange: (v) => patch({ noSubtitlePick: v }, '拿不到字幕的也看看'),
+          }),
+          sw('noSubtitlePick') ? h('div', { 'data-bd-sub': '' },
+            h('div', { 'data-bd-note': '' },
+              '这类推荐的把握**天然小一些**（没看过内容），所以：'
+              + '值得推的照样推，但报告里每条都会写明「没看内容，只凭标题 / 简介」，'
+              + '理由也不会编具体内容。嫌吵的话，把「每天最多挑几条」调小一点。')) : null,
           h(ToggleRow, {
             label: '在本机转写一遍',
-            note: '默认关 · 不花 API 钱，但慢；没装依赖时会直接跳过这些视频',
+            note: '比"只看标题"更实在：真把语音转成文字再判断（不花 API 钱，但慢，要下模型）',
             on: sw('transcribe'),
             onChange: (v) => patch({ transcribe: v }, '本地转写'),
           }),
@@ -1161,7 +1176,7 @@ window.__ModuleLoader__.load({
                 st.asrReady ? '重装转写依赖' : '装转写依赖'),
               h('div', { 'data-bd-grow': '' },
                 h('div', { 'data-bd-note': '' },
-                  !st.asrReady ? '还没装 —— 现在开着也没用，没字幕的视频会被跳过'
+                  !st.asrReady ? '还没装 —— 现在开着也没用，这些视频只能按上面那条规矩处理'
                     : (st.asrModelReady ? '环境和模型都好了' : '环境好了；模型第一次转写时自动下（几百 MB）')))),
             h('div', { 'data-bd-note': '' },
               '装一次就够：独立环境 + faster-whisper + yt-dlp + Whisper small 模型（走国内镜像）'),

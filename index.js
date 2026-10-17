@@ -80,6 +80,13 @@ export const Config = !z ? undefined : z.object({
   aiKeywords: z.array(z.string()).default([]).extra('volatile', true),
   /** 本地转写（没字幕的视频用 Whisper 转；默认关，要下模型） */
   transcribe: z.boolean().default(false).extra('volatile', true),
+  /**
+   * ⭐⭐ 没字幕的视频也看看（2026-10-18 加）。开着的话：拿不到字幕就不去分析内容了，
+   * 只凭**标题 + 简介 + 播放/弹幕这些面上的信息**判断值不值得推荐 —— 值得就照样推，
+   * 报告里会**明写"没看内容，只凭标题/简介"**，使用者一眼能分清哪些是读过的、哪些只是看着像。
+   * 关着 = 老行为：没字幕就跳过（只在报告末尾记一行「因无字幕跳过 N 条」）。
+   */
+  noSubtitlePick: z.boolean().default(false).extra('volatile', true),
   /** 本地转写用哪个 Whisper 模型（tiny / base / small / medium） */
   asrModel: z.string().default('small').extra('volatile', true),
   /** ⭐ 每轮最多发几条评论（每条里 @ 一次下面那个人） */
@@ -177,7 +184,7 @@ export function apply(ctx, config) {
    *     ② **定时器回调里绝不让异常外冒**（见 tick）—— 未捕获异常会杀掉整个宿主进程。
    */
   const DEFAULTS = {
-    perDay: 5, peakValley: false, noon: true, night: true, windows: [], autoComment: false, transcribe: false, asrModel: 'small',
+    perDay: 5, peakValley: false, noon: true, night: true, windows: [], autoComment: false, transcribe: false, noSubtitlePick: false, asrModel: 'small',
     dmMode: 'off', dmUid: 0, dmUids: [], aiReply: true, aiKeywords: [],
     keywords: [], commentPerRound: 1, mentionName: '', mentionNames: [], pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1,
   }
@@ -433,6 +440,7 @@ export function apply(ctx, config) {
         // ⭐ 私信收件人名单（dmUids 优先，回落老的单个 dmUid）+ 原来那个单独的值（向后兼容）
         dmUids: dmList(),
         dmUid: Number(cfg.dmUid) || 0,
+        noSubtitlePick: Boolean(cfg.noSubtitlePick),
         aiReply: cfg.aiReply !== false,
         aiKeywords: Array.isArray(cfg.aiKeywords) ? cfg.aiKeywords : [],
         transcribe: cfg.transcribe,
@@ -524,6 +532,7 @@ export function apply(ctx, config) {
       + '跨零点照写（`"18:00-09:00"`）、起止相同 = 全天（`"00:00-00:00"`）；时段之间**允许重叠**，允许但会告警。'
       + '私信投递：`{"dmMode":"only","dmUids":["10967510","123456"]}`（dmMode = off / only / both；'
       + '`dmUids` 是**名单**，一轮给每人各发一条；老的单个 `dmUid` 仍然认，但名单优先）；'
+      + '⭐ 没字幕也推荐：`{"noSubtitlePick":true}`（只凭标题/简介判断，报告里会标注"没看内容"）；'
       + '楼中楼开关 `{"aiReply":false}`；自定义 AI 识别词 `{"aiKeywords":["XX助手","YBot"]}`（**补充**内置那批，不是替换）；'
       + '要 @ 的名单 `{"mentionNames":["某人","另一个人"]}`（按顺序全部 @ 上；老的单个 `mentionName` 仍然认，但名单优先）。',
     parameters: { patch: { type: 'object', additionalProperties: true, description: '要改的字段（可省）' } },
@@ -684,8 +693,17 @@ export function apply(ctx, config) {
       + `本地转写：${cfg.transcribe
         ? (asrReadyNow()
           ? '开着，而且装好了（没字幕的视频用家里那份 asr.py 转，命令见章程）'
-          : '**开着、但依赖没装好** ⇒ 这一轮没字幕的视频只能跳过')
-        : '关着（没字幕的视频就跳过）'}；`
+          : '**开着、但依赖没装好** ⇒ 这些视频按下面那条"没字幕也看看"的规矩处理')
+        : '关着'}；`
+      // ⭐⭐ 「没字幕也看看」（2026-10-18 加）：字幕是判断依据里最贵的一条，但**没有它不等于没法判断**。
+      //    开着就退回"只看标题 / 简介这些面上的东西"——**不分析内容**，判断标准相应放宽、结论要标注。
+      + (cfg.noSubtitlePick
+        ? `⭐⭐ **没字幕的视频也看看**（这个开关开着）：拿不到字幕（也没有转写 / 转写是空的）时，**不要直接跳过** —— `
+          + `改看**标题、简介、分区、播放/弹幕/点赞这些面上的信息**，觉得对口就**照样收进报告**。`
+          + `🔴 但这时**不要去分析视频内容**：没看过的就是没看过 —— 报告里那条要**明写「没看内容，只凭标题/简介」**，`
+          + `理由也只能说"从标题/简介看像哪一类"，**不许编具体内容**（别提"视频里讲了什么/演示了什么" ✗）。`
+          + `⚠️ 这类"只看标题"的条数**单独数一行**：报告末尾写「其中 M 条没看内容、只凭标题/简介」。`
+        : `没字幕的视频**照老规矩跳过**（只凭标题/简介判断不够稳，这个开关关着）；`)
       + `⭐ 不管哪种情况，**报告里都要写一行「因无字幕跳过 N 条」**（N=0 也写）—— 别让它悄悄少几条。`
       + `判重表 = ${join(stateDir, 'seen.md')}（**就是这个绝对路径**，别写到家目录 ~、也别写到别处）；`
       + `⚠️ 它读不出来或写不进去，**必须在报告里明说** —— 那一轮宁可不发评论，也别当成"没有记录"重发一遍。`
@@ -1289,7 +1307,7 @@ export function apply(ctx, config) {
     if (req.method === 'POST' && path === '/api/bili-duty/config') {
       const body = await readBody(req)
       const patch = {}
-      for (const k of ['perDay', 'peakValley', 'noon', 'night', 'windows', 'autoComment', 'transcribe', 'asrModel',
+      for (const k of ['perDay', 'peakValley', 'noon', 'night', 'windows', 'autoComment', 'transcribe', 'noSubtitlePick', 'asrModel',
         'commentPerRound', 'mentionName', 'mentionNames', 'dmMode', 'dmUid', 'dmUids', 'aiReply', 'aiKeywords',
         'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound']) {
         if (k in body) patch[k] = body[k]
@@ -1298,6 +1316,7 @@ export function apply(ctx, config) {
       // ⭐ 自定义时段：统一走 normWindows 规范化（丢掉看不懂的、压成 "HH:MM-HH:MM"、上限 12 条）。
       //    ⚠️ 不在这一层拒绝"重叠" —— 重叠是允许的（调度器会把命中的每条一起记账），只是要告警 ✓
       if ('windows' in patch) patch.windows = normWindows(patch.windows).map(windowText)
+      if ('noSubtitlePick' in patch) patch.noSubtitlePick = Boolean(patch.noSubtitlePick)
       if ('dmMode' in patch) patch.dmMode = ['off', 'only', 'both'].includes(String(patch.dmMode)) ? String(patch.dmMode) : 'off'
       if ('dmUid' in patch) patch.dmUid = Math.max(0, Math.min(Number(patch.dmUid) || 0, Number.MAX_SAFE_INTEGER))
       // ⭐ 私信名单：只留数字（顺手吃掉用户粘进来的空格 / 全角 / @ 前缀），去重、丢零、上限 10
