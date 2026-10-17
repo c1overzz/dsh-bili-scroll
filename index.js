@@ -63,6 +63,8 @@ export const Config = !z ? undefined : z.object({
   frameHeight: z.natural().default(480).extra('volatile', true),
   /** 每条视频抽几帧（9 = 3×3 九宫格） */
   frameCount: z.natural().default(9).extra('volatile', true),
+  /** 订阅：UP 空间链接 / 合集链接 / 视频链接，一行一个（插件自己解析成 mid / sid） */
+  subs: z.array(z.string()).default([]).extra('volatile', true),
   /** 下载视频时带账号 Cookie（默认关：匿名够用；开了才稳拿 720p/1080p） */
   useCookie: z.boolean().default(false).extra('volatile', true),
   /** ⭐ 每轮最多发几条评论（每条里 @ 一次下面那个人） */
@@ -159,6 +161,7 @@ export function apply(ctx, config) {
    */
   const DEFAULTS = {
     perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small', seeVideo: true, frameHeight: 480, frameCount: 9, useCookie: false,
+    subs: [],
     keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1,
   }
   const normalize = (src, base) => {
@@ -297,6 +300,14 @@ export function apply(ctx, config) {
     async execute(args) {
       return call('bili_comments', { bvid: String(args.bvid ?? ''), num: Math.max(1, Number(args.num) || 30) })
     },
+  })
+
+  tool({
+    name: 'bili_watch',
+    description: '点名看几条视频（BV 号或链接，逗号/换行都行）：读字幕 + 抽帧看画面 + 翻评论，'
+      + '写成一份 watch-*.md。**不占每天刷B站的名额**，也不进判重表。',
+    parameters: { items: { type: 'string', description: 'BV号或视频链接，多条用空格/逗号/换行隔开' } },
+    async execute(args) { return runWatch(args?.items) },
   })
 
   tool({
@@ -481,6 +492,37 @@ export function apply(ctx, config) {
     return { command: 'dsh', args: [], shell: true }
   }
 
+  /** 把使用者粘的订阅行解析成结构化的一项（纯正则，不打网络） */
+  const parseSub = (line) => {
+    const t = String(line || '').trim()
+    if (!t) return null
+    let m = /space\.bilibili\.com\/(\d+)/.exec(t)
+    if (m) {
+      const sid = /[?&]sid=(\d+)/.exec(t)
+      return sid
+        ? { kind: 'collection', uid: Number(m[1]), sid: Number(sid[1]), raw: t }
+        : { kind: 'up', mid: Number(m[1]), raw: t }
+    }
+    if ((m = /BV[0-9A-Za-z]{10}/.exec(t))) return { kind: 'video', bvid: m[0], raw: t }
+    if (/^\d{1,20}$/.test(t)) return { kind: 'up', mid: Number(t), raw: t }
+    return { kind: 'unknown', raw: t }
+  }
+
+  /** 订阅 → 给 agent 看的一行（结构化，省得它自己猜链接格式） */
+  const subsHint = () => {
+    const subs = (Array.isArray(cfg.subs) ? cfg.subs : []).map(parseSub).filter(Boolean)
+    if (!subs.length) return ''
+    const lines = subs.slice(0, 30).map((x) => {
+      if (x.kind === 'up') return `- UP mid=${x.mid}`
+      if (x.kind === 'collection') return `- 合集 uid=${x.uid} sid=${x.sid}`
+      if (x.kind === 'video') return `- 视频 ${x.bvid}（先用 bili_video_info 拿 owner_mid，再当 UP 订阅）`
+      return ''
+    }).filter(Boolean)
+    return `⭐ **订阅**（这些优先看，先于关键词搜索）：\n${lines.join('\n')}\n`
+      + `  · UP：调 bili_up_videos(mid, 10) 取最近发布的，挑 days_ago ≤ 7 的；\n`
+      + `  · 合集：调 bili_collection_videos(uid, sid, 20)，同样按 days_ago 筛。\n`
+  }
+
   const promptFor = () => {
     // ⭐ 章程取哪一份：**插件里那份（永远跟版本一致）**；但家里那份如果**比它新**，说明使用者自己改过 ⇒ 听使用者的。
     const shipped = join(pluginDir, 'prompts', 'duty.md')
@@ -515,6 +557,7 @@ export function apply(ctx, config) {
           ? `这一轮不要写日报文件，也别生成任何报告；只有真发了评论就一句话记下。`
           : `把报告写到 ${join(outDir, `${dayKey()}.md`)}。`)
       + `今天最多挑 ${cfg.perDay} 条；关键词${kws.length ? `用这些：${kws.join('、')}` : '用章程里的默认那几组'}。`
+      + subsHint()
       + `本地转写：${cfg.transcribe
         ? (asrReadyNow()
           ? '开着，而且装好了（没字幕的视频用家里那份 asr.py 转，命令见章程）'
@@ -614,13 +657,13 @@ export function apply(ctx, config) {
     } catch (e) { log(`补占位报告失败：${e?.message ?? e}`) }
   }
 
-  const runDuty = (why = 'window') => {
+  const runDuty = (why = 'window', promptOverride = null) => {
    try {
     const dsh = resolveDsh()
     const overlay = ensureOverlay()
     const args = [...dsh.args, '--profile', cfg.headlessProfile || 'headless']
     if (overlay) args.push('--patch', overlay)
-    args.push(promptFor())
+    args.push(promptOverride || promptFor())
     // ⭐ 这一轮的工作目录 = 使用者（或别的用户）的**工作区** —— 只有这样它的 `AGENTS.md` 才会自动加载。
     // ⭐ 工作目录 = **插件家**：那一轮**被沙箱关着**，只写得了自己工作目录里的东西 ✗
     //    （2026-10-14 教训：为了让它读工作区里的 AGENTS.md 把 cwd 改成工作区 ⇒
@@ -654,6 +697,41 @@ export function apply(ctx, config) {
     log(`刷B站开跑失败（${why}）：${e?.stack ?? e}`)
     return { started: false, why, error: String(e?.message ?? e) }
    }
+  }
+
+  /* ─────────────── 「点名看这几条」（不算日常额度） ─────────────── */
+
+  const watchFile = () => {
+    const d = new Date()
+    const pad = (n) => String(n).padStart(2, '0')
+    return join(outDir, `watch-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}.md`)
+  }
+
+  const watchPrompt = (bvids, file) => `这一轮**不是**日常刷B站，是使用者点名让你看这几条：${bvids.join('、')}。
+
+规矩（和日常那一轮不一样，别混）：
+- **只处理这几条**：不要搜索、不要自己加别的视频。
+- **不占每日额度**：别去动今天"已挑几条"的计数 —— 那是日常一轮的账。
+- **不进判重表**：这几条是点名看的，seen.md 一个字都别写。
+- **不发评论**（除非使用者当场让你发）。
+
+每条依次来，看完一条再下一条：
+1. \`bili_video_info\` —— 标题 / UP / 播放 / days_ago
+2. \`bili_subtitle\` 读字幕原文；没字幕就记一笔"无字幕"，别去转写
+3. \`bili_frames\` + \`read_image\` 看画面（设置里关掉了就跳过）
+4. \`bili_comments\` 翻一眼
+
+产物写到这个绝对路径（别写别处）：\`${file}\`
+每条一段：**标题 / UP / 链接 / 播放量 / 它到底讲了什么（画面+字幕）/ 值不值得占用使用者一次注意力**。
+哪条失败就记一笔继续下一条，别卡住。最后用一句话汇报。`
+
+  const runWatch = (items) => {
+    const bvids = [...new Set(String(items || '').match(/BV[0-9A-Za-z]{10}/g) || [])]
+    if (!bvids.length) return { started: false, error: '没认出 BV 号 —— 粘 BV1xxxxxxxxx 或整条视频链接都行' }
+    if (bvids.length > 10) return { started: false, error: '一次最多 10 条，分几批来吧' }
+    const file = watchFile()
+    log(`点名看：${bvids.join(',')} → ${file}`)
+    return { ...runDuty('watch', watchPrompt(bvids, file)), bvids, file }
   }
 
   /* ─────────────── 谷时定时器 ───────────────
@@ -964,18 +1042,25 @@ export function apply(ctx, config) {
       for (const k of ['perDay', 'peakValley', 'noon', 'night', 'autoComment', 'transcribe', 'asrModel',
         'seeVideo', 'frameHeight', 'frameCount', 'useCookie',
         'commentPerRound', 'mentionName',
-        'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound']) {
+        'keywords', 'subs', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound']) {
         if (k in body) patch[k] = body[k]
       }
       if ('perDay' in patch) patch.perDay = Math.max(0, Math.min(Number(patch.perDay) || 0, 50))
       if ('frameHeight' in patch) patch.frameHeight = [480, 720, 1080].includes(Number(patch.frameHeight)) ? Number(patch.frameHeight) : 480
       if ('frameCount' in patch) patch.frameCount = Math.max(4, Math.min(Number(patch.frameCount) || 9, 16))
+      if ('subs' in patch) patch.subs = (Array.isArray(patch.subs) ? patch.subs : [])
+        .map((x) => String(x ?? '').trim()).filter(Boolean).slice(0, 30)
       if ('reportLevel' in patch) patch.reportLevel = ['full', 'brief', 'off'].includes(String(patch.reportLevel)) ? String(patch.reportLevel) : 'full'
       if ('replyToComments' in patch) patch.replyToComments = Boolean(patch.replyToComments)
       if ('replyPerRound' in patch) patch.replyPerRound = Math.max(1, Math.min(Number(patch.replyPerRound) || 1, 10))
       saveCfg(patch)
       log(`设置已更新：${JSON.stringify(patch)}`)
       return sendJson(res, 200, { ok: true, config: cfg })
+    }
+
+    if (req.method === 'POST' && path === '/api/bili-duty/watch') {
+      const body = await readBody(req)
+      return sendJson(res, 200, { ok: true, ...runWatch(body?.items) })
     }
 
     if (req.method === 'POST' && path === '/api/bili-duty/run') {

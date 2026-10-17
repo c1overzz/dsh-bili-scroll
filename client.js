@@ -135,6 +135,9 @@ window.__ModuleLoader__.load({
       const [msg, setMsg] = React.useState('')
       const [msgTone, setMsgTone] = React.useState('')
       const [kws, setKws] = React.useState(null)
+      const [subsText, setSubsText] = React.useState(null)
+      const [watchText, setWatchText] = React.useState('')
+      const [watchMsg, setWatchMsg] = React.useState('')
       const [ws, setWs] = React.useState(null)
       const [rl, setRl] = React.useState(null)
       const [newVer, setNewVer] = React.useState('')       // 发现的新版本号（空 = 没发现）          // 日报形态：full / brief / off
@@ -153,6 +156,7 @@ window.__ModuleLoader__.load({
       const cfg = st?.config
       React.useEffect(() => {
         if (cfg && kws === null) setKws((cfg.keywords || []).join('\n'))
+        if (cfg && subsText === null) setSubsText((cfg.subs || []).join('\n'))
         if (cfg && ws === null) setWs(cfg.workspace || '')
         if (cfg && rl === null) setRl(cfg.reportLevel || 'full')
         if (cfg && perDay === null) setPerDay(String(cfg.perDay ?? 5))
@@ -315,6 +319,23 @@ window.__ModuleLoader__.load({
       const onSaveText = async () => {
         const list = String(kws || '').split('\n').map((s) => s.trim()).filter(Boolean)
         await patch({ keywords: list, workspace: String(ws || '').trim() }, '关键词与工作区')
+      }
+
+      const onWatch = async () => {
+        setBusy('watch'); setWatchMsg('')
+        try {
+          const r = await jpost('/watch', { items: watchText })
+          if (r?.started) {
+            const n = (r.bvids || []).length
+            setWatchMsg(`已经在看了（${n} 条）→ ${r.file}`)
+            say(`点名看 ${n} 条：结果会写到 ${r.file}`, 'good')
+          } else { setWatchMsg('没起来：' + (r?.error || '未知原因')); say(String(r?.error || '没起来'), 'warn') }
+        } catch (e) { setWatchMsg(String(e?.message ?? e)) } finally { setBusy('') }
+      }
+
+      const onSaveSubs = async () => {
+        const list = String(subsText || '').split('\n').map((x) => x.trim()).filter(Boolean)
+        await patch({ subs: list }, '订阅')
       }
 
       if (!cfg) {
@@ -495,6 +516,33 @@ window.__ModuleLoader__.load({
               h('br'),
               '钱其实很便宜（每条不到一分钱）；真代价是这些图会在上下文里一直占着，一轮下来上下文明显变长。')
           ) : h('div', { 'data-bd-note': '' }, '关着：只读字幕。便宜、快，但看不出「真人 / PPT 播报 / 录屏 / 剪辑」这种字幕永远说不清的事。')),
+
+        /* ── 额外看这些 / 订阅 ── */
+        h('div', { 'data-bd-sec': '' },
+          h('div', { 'data-bd-h': '' }, '额外看这些（不算每日额度）'),
+          h('div', { 'data-bd-note': '' }, '粘 BV 号或视频链接，一行一个。点名看的不占每天那几条，也不进判重表。'),
+          h('textarea', {
+            'data-bd-input': '', rows: 3,
+            placeholder: 'BV1awJX6HEDM\nhttps://www.bilibili.com/video/BV1p4pn6REh7',
+            value: watchText, onChange: (e) => setWatchText(e.target.value),
+          }),
+          h('div', { 'data-bd-row': '' },
+            h('button', { 'data-bd-btn': '', disabled: busy === 'watch', onClick: onWatch }, '看这些'),
+            watchMsg ? h('div', { 'data-bd-note': '' }, watchMsg) : null),
+          h('div', { 'data-bd-note': '' }, '结果写到 out/watch-<时间>.md；一次最多 10 条。')),
+
+        h('div', { 'data-bd-sec': '' },
+          h('div', { 'data-bd-h': '' }, '订阅（每一轮优先看）'),
+          h('div', { 'data-bd-note': '' },
+            '一行一个：UP 空间链接（space.bilibili.com/123）、合集链接（…/collectiondetail?sid=456）、'
+            + '或他的任意一条视频链接。一轮里先看订阅的新片，再搜关键词。'),
+          h('textarea', {
+            'data-bd-input': '', rows: 3,
+            placeholder: 'space.bilibili.com/3691011358329713',
+            value: subsText ?? '', onChange: (e) => setSubsText(e.target.value),
+          }),
+          h('div', { 'data-bd-row': '' },
+            h('button', { 'data-bd-btn': '', disabled: busy === 'subs', onClick: onSaveSubs }, '保存订阅'))),
 
         /* ── 关注什么 / 在哪儿刷 ── */
         h('div', { 'data-bd-sec': '' },
