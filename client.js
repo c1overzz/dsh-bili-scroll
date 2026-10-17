@@ -130,7 +130,7 @@ window.__ModuleLoader__.load({
     /* ────────────── 设置页正文 ────────────── */
 
     function Panel() {
-      const [st, setSt] = useStatus(5000)
+      const [st, setSt] = useStatus(3000)
       const [busy, setBusy] = React.useState('')
       const [msg, setMsg] = React.useState('')
       const [msgTone, setMsgTone] = React.useState('')
@@ -374,6 +374,7 @@ window.__ModuleLoader__.load({
       }
 
       const sw = (k) => Boolean(cfg[k])
+      const mmss = (s) => (s < 60 ? `${s} 秒` : `${Math.floor(s / 60)} 分 ${s % 60} 秒`)
       /* 模型下拉：优先用 DSH 报上来的目录；拿不到就退回内置已知的那几个 */
       const FALLBACK_MODELS = [
         { provider: 'deepseek-official', id: 'deepseek-flash', name: 'DeepSeek-V41-Flash' },
@@ -646,6 +647,13 @@ window.__ModuleLoader__.load({
           h('div', { 'data-bd-row': '' },
             h('button', { 'data-bd-btn': '', disabled: busy === 'watch', onClick: onWatch }, '看这些'),
             watchMsg ? h('div', { 'data-bd-note': '' }, watchMsg) : null),
+          st.active
+            ? h('div', { 'data-bd-msg': '', 'data-good': '' },
+              `⏳ ${st.active.why === 'watch' ? '点名看' : '一轮'}进行中：${st.active.stage} · 已 ${mmss(st.active.elapsed)}`
+              + (st.active.quiet >= 20 ? ` · ${st.active.quiet} 秒无新输出` : '')
+              + (st.active.stalled ? ' ⚠️ 可能卡住了' : '')
+              + (st.active.bvids ? ` · ${st.active.bvids.join('、')}` : ''))
+            : null,
           st.lastExit && !st.lastExit.ok
             ? h('div', { 'data-bd-msg': '', 'data-warn': '' },
               `上一次跑（${st.lastExit.why || '一轮'}）失败：exit=${st.lastExit.code} —— 详情在 duty.log`)

@@ -23,7 +23,7 @@ const hostDeps = await loadHostDeps()
 const z = hostDeps.z
 const defineTool = hostDeps.defineTool
 import { spawn } from 'node:child_process'
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, statSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -794,7 +794,67 @@ export function apply(ctx, config) {
     return { BILI_DUTY_HOME: stateDir, ...(key ? { DEEPSEEK_API_KEY: key } : {}) }
   }
 
+
+  /** 只读日志尾部几 KB —— 别每 5 秒把整个 duty.log 读一遍 */
+  const readLogTail = (from, maxBytes = 8000) => {
+    try {
+      const size = statSync(logFile).size
+      const start = Math.max(0, Math.max(from || 0, size - maxBytes))
+      const len = size - start
+      if (len <= 0) return ''
+      const fd = openSync(logFile, 'r')
+      try {
+        const buf = Buffer.alloc(Math.min(len, maxBytes))
+        readSync(fd, buf, 0, buf.length, start)
+        return buf.toString('utf8')
+      } finally { closeSync(fd) }
+    } catch { return '' }
+  }
+
+  /** 从日志里猜"现在走到哪一步了" —— 取最后出现的那一个标记 */
+  const stageOf = (text) => {
+    const marks = [
+      ['bili_video_info', '查视频信息'],
+      ['bili_subtitle', '读字幕'],
+      ['bili_frames', '抽帧看画面'],
+      ['read_image', '看画面'],
+      ['bili_comments', '翻评论'],
+    ]
+    let best = -1
+    let name = ''
+    for (const [key, label] of marks) {
+      const i = text.lastIndexOf(key)
+      if (i > best) { best = i; name = label }
+    }
+    return name
+  }
+
+  const activeInfo = () => {
+    if (!activeRun) return null
+    const elapsed = Math.round((Date.now() - activeRun.startedAt) / 1000)
+    const tail = readLogTail(activeRun.logStart)
+    let quiet = elapsed
+    try {
+      quiet = Math.max(0, Math.round((Date.now() - statSync(logFile).mtimeMs) / 1000))
+    } catch { /* 读不到就按 elapsed 算 */ }
+    let stage = stageOf(tail)
+    if (activeRun.file && existsSync(activeRun.file)) stage = '写报告 / 收尾'
+    if (!stage) stage = elapsed < 8 ? '启动中' : '在跑（还没调工具）'
+    return {
+      why: activeRun.why,
+      pid: activeRun.pid,
+      startedAt: activeRun.startedAt,
+      elapsed,
+      stage,
+      quiet,
+      stalled: quiet > 60,
+      bvids: activeRun.bvids || null,
+      file: activeRun.file || null,
+    }
+  }
+
   let lastExitInfo = null
+  let activeRun = null
 
   const runDuty = (why = 'window', promptOverride = null) => {
    try {
@@ -819,10 +879,15 @@ export function apply(ctx, config) {
       //    中文 / emoji 打进管道会炸（用户反馈过 UnicodeDecodeError），一律按 UTF-8 来
       env: pyEnv(dutyEnv()),
     })
+    let logStart = 0
+    try { logStart = statSync(logFile).size } catch { /* 第一次跑还没有日志 */ }
+    activeRun = { why, pid: child.pid, startedAt: Date.now(), logStart, file: null, bvids: null }
+
     const pick = (buf) => appendFileSync(logFile, String(buf), 'utf8')
     child.stdout?.on('data', pick)
     child.stderr?.on('data', pick)
     child.on('exit', (code) => {
+      if (activeRun && activeRun.pid === child.pid) activeRun = null
       lastExitInfo = { why, code, at: Date.now(), ok: code === 0 }
       log(`刷B站结束（${why}，code=${code}）`)
       stubReportIfMissing(code)   // ⭐ 没写报告就补一份占位 —— 别让使用者什么都看不到
@@ -871,7 +936,9 @@ export function apply(ctx, config) {
     if (bvids.length > 10) return { started: false, error: '一次最多 10 条，分几批来吧' }
     const file = watchFile()
     log(`点名看：${bvids.join(',')} → ${file}`)
-    return { ...runDuty('watch', watchPrompt(bvids, file)), bvids, file }
+    const r = runDuty('watch', watchPrompt(bvids, file))
+    if (activeRun) { activeRun.file = file; activeRun.bvids = bvids }
+    return { ...r, bvids, file }
   }
 
   /* ─────────────── 谷时定时器 ───────────────
@@ -1148,6 +1215,7 @@ export function apply(ctx, config) {
       ranToday: st.day === today ? Number(st.count || 0) : 0,
       lastRunAt: st.lastRunAt || null,
       lastExit: lastExitInfo,
+      active: activeInfo(),
       lastWhy: st.lastWhy || null,
       loggedIn: hasCredential(),
       venvReady: venvReadyNow(),
