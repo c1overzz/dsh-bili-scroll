@@ -29,7 +29,11 @@ import { fileURLToPath } from 'node:url'
 import { McpClient } from './lib/mcp.mjs'
 import { verifyRecent, appendVerifyToReport } from './lib/verify.mjs'
 import { parseReport } from './lib/report.mjs'
-import { WINDOWS, stateDirOf, readJson, writeJson, ensureHomeFiles, inWindow, dayKey } from './lib/state.mjs'
+import {
+  WINDOWS, stateDirOf, readJson, writeJson, ensureHomeFiles, inWindow, dayKey,
+  // ⭐ 自定义时段（2026-10-18）：存的是字符串数组，这里是解析 / 体检 / 定窗口那套工具
+  normWindows, windowText, analyzeWindows, effectiveWindows, windowBlocks, blockAt, nextRunAt,
+} from './lib/state.mjs'
 import { loginStart, loginPoll, saveCredential, renderQrPng } from './lib/login.mjs'
 import { ensureUv } from './lib/uvfetch.mjs'
 
@@ -49,9 +53,16 @@ export const Config = !z ? undefined : z.object({
   perDay: z.natural().default(5).extra('volatile', true),
   /** 峰谷自动刷（总开关） */
   peakValley: z.boolean().default(false).extra('volatile', true),
-  /** 峰谷子开关：中午 / 晚上 */
+  /** 峰谷子开关：中午 / 晚上（⭐ 只在**没有**自定义时段时才有意义，见 cfg.windows） */
   noon: z.boolean().default(true).extra('volatile', true),
   night: z.boolean().default(true).extra('volatile', true),
+  /**
+   * ⭐ 自定义时段（2026-10-18 加）：一个字符串数组，每条 `"HH:MM-HH:MM"`（24 小时制）。
+   * **非空就完全接管** —— 内置的中午 / 夜间两组就此让位（noon / night 两个开关同时失效）。
+   * 可以写成跨零点的（`"18:00-09:00"`），也可以起止相同表示"全天"（`"00:00-00:00"`）。
+   * 时段之间允许重叠：调度器会把"此刻命中的每一条"一起记为已跑，所以只会少跑、不会多跑 ✓。
+   */
+  windows: z.array(z.string()).default([]).extra('volatile', true),
   /** 自动评论 @ 使用者（默认关 —— 会拿用户的号说话，必须他自己开） */
   autoComment: z.boolean().default(false).extra('volatile', true),
   /** ⭐ 私信投递：off=只发评论（现状）· only=只私信（完全不公开评论）· both=评论 + 私信 */
@@ -161,7 +172,7 @@ export function apply(ctx, config) {
    *     ② **定时器回调里绝不让异常外冒**（见 tick）—— 未捕获异常会杀掉整个宿主进程。
    */
   const DEFAULTS = {
-    perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
+    perDay: 5, peakValley: false, noon: true, night: true, windows: [], autoComment: false, transcribe: false, asrModel: 'small',
     dmMode: 'off', dmUid: 0, aiReply: true, aiKeywords: [],
     keywords: [], commentPerRound: 1, mentionName: '', mentionNames: [], pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1,
   }
@@ -187,6 +198,18 @@ export function apply(ctx, config) {
   }
   /** 要 @ 的那串标签：`@A @B`（⚠️ 每个 @ 后面都带一个空格，B站 才认得出这个 @） */
   const mentionTag = (c = cfg) => mentionList(c).map((m) => `@${m}`).join(' ')
+
+
+  /** ⭐ 真正生效的时段表：自定义优先，空了才回落到内置的中午 / 夜间 */
+  const winList = (c = cfg) => effectiveWindows(c)
+
+  /** 时段体检（设置页要显示"哪两条重叠了"） */
+  const winCheck = (c = cfg) => {
+    const custom = normWindows(c?.windows)
+    return custom.length
+      ? { custom: true, windows: custom.map(windowText), issues: analyzeWindows(custom).issues }
+      : { custom: false, windows: [], issues: [] }
+  }
 
   /**
    * ⭐ 写配置，并把「**没写进去的键**」报出来（2026-10-17 加）。
@@ -368,11 +391,19 @@ export function apply(ctx, config) {
         today: dayKey(now),
         ranToday: st.day === dayKey(now) ? Number(st.count || 0) : 0,
         perDay: cfg.perDay,
-        windows: Object.fromEntries(Object.entries(WINDOWS).map(([k, w]) => [k, {
+        // ⭐ 给的是**生效的那张时段表**（配了自定义就是自定义，没配才是内置的中午/夜间）
+        windows: winList().map((w) => ({
           label: w.label, start: w.start, end: w.end,
-          switchOn: Boolean(cfg[k]),
           opening: inWindow(now, w),
-        }])),
+        })),
+        customWindows: winCheck().windows,
+        windowIssues: winCheck().issues.map((x) => x.text),
+        // 今天已经跑过哪几场（覆盖块 key）+ 下一次什么时候跑
+        roundsDone: Object.keys(st.windows || {}),
+        nextRunAt: (() => {
+          const d = nextRunAt(now, winList(), Object.keys(st.windows || {}))
+          return d ? d.toISOString() : null
+        })(),
         peakValley: cfg.peakValley,
         autoComment: cfg.autoComment,
         // ⭐ 实际会 @ 的名单（mentionNames 优先，回落到老的 mentionName）
@@ -465,7 +496,10 @@ export function apply(ctx, config) {
   tool({
     name: 'bili_config',
     description: '读 / 改「刷B站」的设置。不给 `patch` 就是读；给了就改（只认 schema 里的字段）。\n'
-      + '例：`{"perDay":5,"peakValley":true,"noon":true,"night":true,"autoComment":false,"transcribe":false,"keywords":["DeepSeek Harness"]}`；'
+      + '例：`{"perDay":5,"peakValley":true,"autoComment":false,"transcribe":false,"keywords":["DeepSeek Harness"]}`；'
+      + '⭐ **自定义时段**（24 小时制，可多条）：`{"windows":["12:00-14:00","18:00-09:00","07:30-08:15"]}` —— '
+      + '**非空就完全接管**（内置的中午 `noon` / 夜间 `night` 两个开关就此失效），清成 `[]` 才回到内置那两组；'
+      + '跨零点照写（`"18:00-09:00"`）、起止相同 = 全天（`"00:00-00:00"`）；时段之间**允许重叠**，允许但会告警。'
       + '私信投递：`{"dmMode":"only","dmUid":10967510}`（dmMode = off / only / both）；'
       + '楼中楼开关 `{"aiReply":false}`；自定义 AI 识别词 `{"aiKeywords":["XX助手","YBot"]}`（**补充**内置那批，不是替换）；'
       + '要 @ 的名单 `{"mentionNames":["某人","另一个人"]}`（按顺序全部 @ 上；老的单个 `mentionName` 仍然认，但名单优先）。',
@@ -475,6 +509,10 @@ export function apply(ctx, config) {
       if (args?.patch && typeof args.patch === 'object' && !Array.isArray(args.patch)) notApplied = saveCfg(args.patch)
       return {
         ok: true, config: cfg, windows: WINDOWS, home: stateDir, venvReady: venvReadyNow(),
+        // ⭐ 生效的时段表 + 重叠告警（跟设置页显示的是同一份判断）
+        effectiveWindows: winList(),
+        customWindows: winCheck().windows,
+        windowIssues: winCheck().issues.map((x) => x.text),
         // ⭐ 报出"没写进去的键"：多半是字段名拼错、或插件加了新字段但**服务端那半没重载**（重启 dsh 即可）
         ...(notApplied.length
           ? { notApplied, note: `⚠️ 这些字段没生效：${notApplied.join(', ')} —— 检查拼写；如果确认没拼错，多半是插件没重载（重启一次 dsh 即可）` }
@@ -905,15 +943,18 @@ export function apply(ctx, config) {
       const today = dayKey(now)
       const count = st.day === today ? Number(st.count || 0) : 0
       if (count >= Number(cfg.perDay || 0)) return
-      for (const k of ['noon', 'night']) {
-        if (!cfg[k]) continue
-        if (!inWindow(now, WINDOWS[k])) continue
-        const key = `${today}:${k}`
-        if (st.windows?.[key]) continue
-        bumpState({ windows: { ...(st.windows || {}), [key]: true }, lastRunAt: now.toISOString(), lastWhy: k })
-        runDuty(`window:${k}`)
-        return
-      }
+      /* ⭐ 自定义时段（2026-10-18）：生效的那张表由 winList() 给 —— 配了自定义就用自定义，
+       *    没配才回落到内置的中午/夜间。**判"这一场跑过没有"靠的是覆盖块**（见 state.mjs 里那段长注释）：
+       *    互相重叠的时段算同一场，跨零点的算作开始那天那一场 —— 否则重叠会一小时刷两轮、
+       *    跨零点会在凌晨多刷一轮 ✗ */
+      const at = blockAt(now, windowBlocks(winList()))
+      if (!at || st.windows?.[at.key]) return
+      bumpState({
+        windows: { ...(st.windows || {}), [at.key]: true },
+        lastRunAt: now.toISOString(),
+        lastWhy: at.labels.join(' + '),
+      })
+      runDuty(`window:${at.key}`)
     } catch (e) {
       log(`定时器这一跳出错（已兜住，不影响宿主）：${e?.stack ?? e}`)
     }
@@ -1156,11 +1197,27 @@ export function apply(ctx, config) {
   const status = () => {
     const st = readJson(dutyStateFile, {})
     const today = dayKey()
+    const now = new Date()
+    const wins = winList()
+    const check = winCheck()
     return {
       ok: true,
       home: stateDir,
       config: cfg,
-      windows: WINDOWS,
+      // ⭐ 时段那套（2026-10-18）：给的是**生效的那张表**（配了自定义就是自定义），
+      //    外加体检告警与"下次什么时候跑" —— 设置页直接显示，不用自己再算一遍
+      windows: wins.map((w) => ({
+        key: w.key, label: w.label, start: w.start, end: w.end,
+        opening: inWindow(now, w),
+      })),
+      windowsCustom: check.custom,
+      windowsText: check.windows,
+      windowIssues: check.issues,
+      nextRunAt: (() => {
+        const d = nextRunAt(now, wins, Object.keys(st.windows || {}))
+        return d ? d.toISOString() : null
+      })(),
+      builtinWindows: WINDOWS,
       today,
       ranToday: st.day === today ? Number(st.count || 0) : 0,
       lastRunAt: st.lastRunAt || null,
@@ -1190,18 +1247,27 @@ export function apply(ctx, config) {
     if (req.method === 'GET' && path === '/api/bili-duty/status') return sendJson(res, 200, status())
 
     if (req.method === 'GET' && path === '/api/bili-duty/config') {
-      return sendJson(res, 200, { ok: true, config: cfg, windows: WINDOWS, home: stateDir })
+      return sendJson(res, 200, {
+        ok: true, config: cfg, windows: WINDOWS, home: stateDir,
+        effectiveWindows: winList(),
+        // ⭐ 自定义时段体检：设置页要拿它显示"哪两条重叠了"
+        customWindows: winCheck().windows,
+        windowIssues: winCheck().issues,
+      })
     }
 
     if (req.method === 'POST' && path === '/api/bili-duty/config') {
       const body = await readBody(req)
       const patch = {}
-      for (const k of ['perDay', 'peakValley', 'noon', 'night', 'autoComment', 'transcribe', 'asrModel',
+      for (const k of ['perDay', 'peakValley', 'noon', 'night', 'windows', 'autoComment', 'transcribe', 'asrModel',
         'commentPerRound', 'mentionName', 'mentionNames', 'dmMode', 'dmUid', 'aiReply', 'aiKeywords',
         'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound']) {
         if (k in body) patch[k] = body[k]
       }
       if ('perDay' in patch) patch.perDay = Math.max(0, Math.min(Number(patch.perDay) || 0, 50))
+      // ⭐ 自定义时段：统一走 normWindows 规范化（丢掉看不懂的、压成 "HH:MM-HH:MM"、上限 12 条）。
+      //    ⚠️ 不在这一层拒绝"重叠" —— 重叠是允许的（调度器会把命中的每条一起记账），只是要告警 ✓
+      if ('windows' in patch) patch.windows = normWindows(patch.windows).map(windowText)
       if ('dmMode' in patch) patch.dmMode = ['off', 'only', 'both'].includes(String(patch.dmMode)) ? String(patch.dmMode) : 'off'
       if ('dmUid' in patch) patch.dmUid = Math.max(0, Math.min(Number(patch.dmUid) || 0, Number.MAX_SAFE_INTEGER))
       if ('aiReply' in patch) patch.aiReply = Boolean(patch.aiReply)
@@ -1219,7 +1285,19 @@ export function apply(ctx, config) {
       const dropped = saveCfg(patch)
       const notApplied = [...new Set([...ignored.filter((k) => !(k in cfg)), ...dropped])]
       log(`设置已更新：${JSON.stringify(patch)}${notApplied.length ? ` ⚠️ 没生效：${notApplied.join(', ')}` : ''}`)
-      return sendJson(res, 200, { ok: true, config: cfg, notApplied })
+      // ⭐ 顺手把"时段体检 + 下次什么时候跑"带回去（2026-10-18）：
+      //    设置页改完一条时段**立刻**就能看到"这两条重叠了"，不用等 5 秒轮询，
+      //    也不用在浏览器那半再复刻一遍重叠判断（复刻就迟早会两边不一致 ✗）。
+      const st0 = readJson(dutyStateFile, {})
+      const wins0 = winList()
+      const next0 = nextRunAt(new Date(), wins0, Object.keys(st0.windows || {}))
+      return sendJson(res, 200, {
+        ok: true, config: cfg, notApplied,
+        customWindows: winCheck().windows,
+        windowIssues: winCheck().issues,
+        effectiveWindows: wins0,
+        nextRunAt: next0 ? next0.toISOString() : null,
+      })
     }
 
     if (req.method === 'POST' && path === '/api/bili-duty/run') {

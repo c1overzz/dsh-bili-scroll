@@ -86,6 +86,22 @@ window.__ModuleLoader__.load({
 [data-bd-grow2]{flex:1;min-width:0;}
 [data-bd-dim]{opacity:.5;}
 [data-bd-note][data-warn]{color:#f59e0b;}
+/* ── 时段编辑器（2026-10-18）── */
+[data-bd-wins]{display:flex;flex-direction:column;gap:8px;}
+[data-bd-win]{display:flex;flex-wrap:wrap;gap:8px;align-items:center;}
+[data-bd-win-n]{flex:none;width:18px;height:18px;border-radius:50%;font-size:11px;line-height:18px;text-align:center;
+  background:var(--dsw-alias-bg-overlay,rgba(128,128,128,.2));
+  color:var(--dsw-alias-label-tertiary,#9aa0a6);}
+[data-bd-win][data-bad] [data-bd-win-n]{background:rgba(245,158,11,.25);color:#f59e0b;}
+[data-bd-win-dash]{flex:none;font-size:12px;color:var(--dsw-alias-label-tertiary,#9aa0a6);}
+[data-bd-time]{flex:1;min-width:96px;box-sizing:border-box;padding:6px 8px;border-radius:8px;font-size:12px;
+  font-family:inherit;color:inherit;
+  border:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.14));
+  background:var(--dsw-alias-bg-overlay,rgba(128,128,128,.12));}
+[data-bd-time]:focus{outline:none;border-color:#3b82f6;}
+[data-bd-btn][data-bd-tiny]{flex:none;padding:6px 10px;}
+[data-bd-warn]{font-size:11px;line-height:17px;padding:7px 9px;border-radius:8px;color:#f59e0b;
+  background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.3);}
 [data-bd-tally]{font-size:11px;font-weight:400;color:var(--dsw-alias-label-tertiary,#9aa0a6);}
 [data-bd-tally][data-soft]{opacity:.7;}
 [data-bd-tabs]{position:sticky;top:0;z-index:5;display:flex;gap:4px;padding:4px 0 10px;overflow-x:auto;-webkit-overflow-scrolling:touch;}
@@ -203,6 +219,48 @@ window.__ModuleLoader__.load({
         label ? h('div', { 'data-bd-label': '' }, label) : null,
         children,
         note ? h('div', { 'data-bd-note': '' }, note) : null)
+    }
+
+    /* ────────────── 时段编辑器（2026-10-18）──────────────
+     * ⚠️ 这里**故意复刻**了 lib/state.mjs 里那几个解析函数（浏览器这半没法 import 那个模块）。
+     *    两边都要认 `HH:MM-HH:MM`、都要容忍 ~ ～ – — 这些分隔符 —— **改一边记得改另一边**。
+     */
+    const WIN_SEP = /^(\d{1,2}:\d{2})\s*[-~～–—]\s*(\d{1,2}:\d{2})$/
+    const winParts = (s) => {
+      const m = WIN_SEP.exec(String(s || '').trim())
+      return m ? { s: m[1], e: m[2] } : { s: '', e: '' }
+    }
+    const winText = (p) => `${p.s}-${p.e}`
+
+    /** 一条时段：左边 起 – 止 两个原生时间选择器（原生就是 24 小时制、手机上也好点），右边删除 */
+    function WinRow({ idx, text, onSet, onDel }) {
+      const p = winParts(text)
+      const bad = !p.s || !p.e
+      return h('div', { 'data-bd-win': '', 'data-bad': bad ? '' : undefined },
+        h('span', { 'data-bd-win-n': '' }, idx + 1),
+        h('input', {
+          'data-bd-time': '', type: 'time', value: p.s,
+          onChange: (e) => { const s = e.target.value; if (s) onSet(idx, winText({ s, e: p.e || s })) },
+        }),
+        h('span', { 'data-bd-win-dash': '' }, '→'),
+        h('input', {
+          'data-bd-time': '', type: 'time', value: p.e,
+          onChange: (e) => { const x = e.target.value; if (x) onSet(idx, winText({ s: p.s || x, e: x })) },
+        }),
+        h('button', { 'data-bd-btn': '', 'data-bd-tiny': '', title: '删掉这个时段', onClick: () => onDel(idx) }, '✕'))
+    }
+
+    /** 现在几点几分 → 'HH:MM'，也给"下次什么时候跑"用 */
+    const hhmmOf = (d) => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+
+    /** 把一个 Date 说成人话：今天 / 明天 / 几月几号 + HH:MM */
+    function whenText(d) {
+      if (!d) return ''
+      const now = new Date()
+      const day = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime()
+      const diff = Math.round((day(d) - day(now)) / 86400000)
+      const label = diff === 0 ? '今天' : diff === 1 ? '明天' : `${d.getMonth() + 1} 月 ${d.getDate()} 日`
+      return `${label} ${hhmmOf(d)}`
     }
 
     function useStatus(intervalMs) {
@@ -519,7 +577,8 @@ window.__ModuleLoader__.load({
 
         showRaw ? h('div', null,
           h('div', { 'data-bd-note': '' }, '原始日志尾部：' + d.logFile),
-          h('pre', { 'data-bd-pre': '', 'data-tall': '' }, d.logTail || '（空）')) : null)
+          h('pre', { 'data-bd-pre': '', 'data-tall': '' }, d.logTail || '（空）')) : null,
+)
     }
 
     /* ────────────── 设置页正文 ────────────── */
@@ -543,6 +602,7 @@ window.__ModuleLoader__.load({
       const [dmMode, setDmMode] = React.useState(null)      // 投递方式：off / only / both
       const [aiKw, setAiKw] = React.useState(null)          // 自定义 AI 识别词（本地草稿，一行一个）
       const [mention, setMention] = React.useState(null)
+      const [wins, setWins] = React.useState(null)          // 自定义时段（"HH:MM-HH:MM"）
       const [login, setLogin] = React.useState(null)
       const [report, setReport] = React.useState(null)        // 非 null = 报告已展开
       const [loginState, setLoginState] = React.useState('')
@@ -564,9 +624,14 @@ window.__ModuleLoader__.load({
         if (cfg && dmUid === null) setDmUid(cfg.dmUid ? String(cfg.dmUid) : '')
         if (cfg && dmMode === null) setDmMode(cfg.dmMode || 'off')
         if (cfg && aiKw === null) setAiKw((cfg.aiKeywords || []).join('\n'))
+        if (cfg && wins === null) setWins(Array.isArray(cfg.windows) ? cfg.windows.filter(Boolean) : [])
       }, [cfg])
 
-      const win = { ...DEFAULT_WINDOWS, ...(st?.windows || {}) }
+      // ⚠️ 注意：服务端的 `st.windows` 从 2026-10-18 起是**生效的时段表**（数组，配了自定义就是自定义），
+      //    不再是内置那两组的字典 ⇒ 内置的文案从 st.builtinWindows 取，常量只做兜底。
+      const win = { ...DEFAULT_WINDOWS, ...(st?.builtinWindows || {}) }
+      /** ⭐ 自定义时段（本地草稿数组；空的 = 用内置那两组） */
+      const winList = Array.isArray(wins) ? wins : []
 
       /** ⭐ 全页唯一的反馈出口：按钮 / 保存 / 复核的结果都走这里，只在状态条下面显示一处 */
       const say = (text, tone) => setNote(text ? { t: text, tone: tone || '' } : null)
@@ -575,7 +640,11 @@ window.__ModuleLoader__.load({
         setBusy(JSON.stringify(p))
         try {
           const r = await jpost('/config', p)
-          if (r?.config) setSt((old) => ({ ...old, config: r.config }))
+          // ⭐ 服务端顺手带回来的"时段体检 + 下次什么时候跑"（改一下立刻生效，不用等轮询）
+          const extra = (r && ('windowIssues' in r))
+            ? { windowIssues: r.windowIssues, customWindows: r.customWindows, nextRunAt: r.nextRunAt }
+            : {}
+          if (r?.config) setSt((old) => ({ ...old, config: r.config, ...extra }))
           // ⭐ 兜底自检（2026-10-17 加）：把"我发出去的"和"服务端回给我的"对一遍。
           //    起因：服务端那半没重载时，新字段会被**静默丢掉** ——
           //    界面显示"已保存"，可刷新就变回默认，使用者完全无从排查 ✗。
@@ -817,19 +886,63 @@ window.__ModuleLoader__.load({
         h('div', { 'data-bd-sec': '' },
           h('div', { 'data-bd-h': '' }, '什么时候自己跑'),
           h(ToggleRow, {
-            label: '峰谷时段自动刷',
-            note: '只在谷时跑：工作日 12–14 点、18 点以后，周末全天',
+            label: '到点自动刷',
+            note: '只在下面这些时段里自动跑；关着就只能手动点「现在跑一轮」',
             on: sw('peakValley'),
-            onChange: (v) => patch({ peakValley: v }, '峰谷时段自动刷'),
+            onChange: (v) => patch({ peakValley: v }, '自动刷'),
           }),
           sw('peakValley') ? h('div', { 'data-bd-sub': '' },
-            ...['noon', 'night'].map((k) => h(ToggleRow, {
-              key: k,
-              label: win[k].label,
-              note: `${win[k].start} – ${win[k].end}`,
-              on: sw(k),
-              onChange: (v) => patch({ [k]: v }, win[k].label),
-            }))) : null,
+            /* ⭐ 时段表（2026-10-18）：可以自己定，任意多条、24 小时制、跨零点也行。
+             *   没配自定义时显示内置那两组开关；**一加自定义就整个接管**（那两条开关随之让位） */
+            winList.length === 0
+              ? h('div', { 'data-bd-field': '' },
+                h('div', { 'data-bd-label': '' }, '用内置的谷时时段'),
+                ...['noon', 'night'].map((k) => h(ToggleRow, {
+                  key: k,
+                  label: win[k].label,
+                  note: `${win[k].start} – ${win[k].end}`,
+                  on: sw(k),
+                  onChange: (v) => patch({ [k]: v }, win[k].label),
+                })),
+                h('div', { 'data-bd-note': '' },
+                  '内置口径：工作日 12–14 点、18 点以后，周末全天都便宜'),
+                // ⭐ 这个按钮内置模式下也得在 —— 不然用户根本切不到自定义去 ✗
+                h('div', { 'data-bd-row': '' },
+                  h('button', {
+                    'data-bd-btn': '',
+                    onClick: () => { const n = ['12:00-14:00']; setWins(n); patch({ windows: n }, '时段') },
+                  }, '＋ 自己定时段')))
+              : h('div', { 'data-bd-field': '' },
+                h('div', { 'data-bd-label': '' }, '在哪些时段跑'),
+                h('div', { 'data-bd-wins': '' },
+                  ...winList.map((t, i) => h(WinRow, {
+                    key: i, idx: i, text: t,
+                    onSet: (j, v) => { const n = winList.slice(); n[j] = v; setWins(n); patch({ windows: n }, '时段') },
+                    onDel: (j) => { const n = winList.filter((_, k) => k !== j); setWins(n); patch({ windows: n }, '时段') },
+                  }))),
+                h('div', { 'data-bd-note': '' },
+                  '24 小时制 · 起晚于止 = 跨到第二天（18:00 → 09:00 就是一整晚）· 一个时段跑一轮'),
+                h('div', { 'data-bd-row': '' },
+                  h('button', {
+                    'data-bd-btn': '',
+                    onClick: () => { const n = [...winList, '12:00-14:00']; setWins(n); patch({ windows: n }, '时段') },
+                  }, '＋ 再加一个时段'),
+                  h('button', {
+                    'data-bd-btn': '',
+                    title: '清掉自定义时段，回到内置的中午 / 夜间',
+                    onClick: () => { setWins([]); patch({ windows: [] }, '时段') },
+                  }, '清空 · 回内置'))),
+            // ⭐ 重叠 / 重复 / 全天 —— 服务端算的，改一下立刻回来。**只告警不拦**（重叠也会正确地只跑一轮）
+            (st.windowIssues || []).length
+              ? h('div', { 'data-bd-warn': '' },
+                '⚠️ ' + st.windowIssues.map((x) => x.text || x).join('；')
+                + ' —— 重叠的两条会并成一段，只跑一轮（想跑两次就把时间错开）')
+              : null,
+            st.nextRunAt
+              ? h('div', { 'data-bd-note': '' }, `下次自动跑：${whenText(new Date(st.nextRunAt))}`)
+              : (winList.length || ['noon', 'night'].some((k) => sw(k))
+                ? h('div', { 'data-bd-note': '' }, '下次自动跑：今天的时段都过了，明天见')
+                : null)) : null,
           h(NumRow, {
             label: '每天最多挑几条',
             note: '0 = 不自动刷（手动跑不受限）',
@@ -837,7 +950,7 @@ window.__ModuleLoader__.load({
             onInput: setPerDay,
             onDone: (n) => patch({ perDay: n }, '每天挑几条'),
           }),
-          st.lastRunAt ? h('div', { 'data-bd-note': '' }, `上次跑：${new Date(st.lastRunAt).toLocaleString('zh-CN')}`) : null),
+          st.lastRunAt ? h('div', { 'data-bd-note': '' }, `上次跑：${new Date(st.lastRunAt).toLocaleString('zh-CN')}${st.lastWhy ? `（${st.lastWhy}）` : ''}`) : null),
 
         /* ── ② 它替你说话吗 ── */
         h('div', { 'data-bd-sec': '' },
