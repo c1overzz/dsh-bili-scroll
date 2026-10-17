@@ -305,6 +305,14 @@ ok('中文文件名走 filename*（不然会被丢掉）',
   /filename\*=UTF-8''/.test(String(d1.headers['content-disposition'] || '')))
 ok('非法文件名的下载被拒', (await call('GET', '/api/bili-duty/download?what=out&name=..%2f..%2fx')).code === 400)
 
+/* ⑬′ 需要的话，把**真接口的响应** dump 出来给前端烟测当夹具（焊接缝用） */
+if (process.env.DUMP_FILES) {
+  const md = (fl.json.entries || []).find((e) => /\.md$/.test(e.name))
+  const one = md ? await call('GET', '/api/bili-duty/file?what=out&name=' + encodeURIComponent(md.name)) : null
+  writeFileSync(process.env.DUMP_FILES, JSON.stringify({ files: fl.json, file: one && one.json }, null, 2))
+  console.log(`（真接口输出已 dump 到 ${process.env.DUMP_FILES}）`)
+}
+
 /* ⑭ 收拾干净 —— 沙箱里的配置别留给下一次跑 */
 await call('POST', '/api/bili-duty/config', { windows: [], noSubtitlePick: false, dmUids: [], dmUid: 0 })
 

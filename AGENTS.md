@@ -46,6 +46,9 @@
 - `vendor/bilibili-mcp/` —— 内置的 Python MCP（MIT，AGI_Ananas）
 - `selfcheck.mjs` + `tools/` —— 本地预检：`node selfcheck.mjs`（**现在不用解析钩子了**；`tools/register.mjs` 那条还留着当备份）
 - `window-smoke.mjs` / `route-smoke.mjs` —— 时段工具的单测、以及把宿主端那几条 HTTP 路由**真调一遍**
+  · ⭐ **接缝也要验**：`DUMP_FILES=<路径> node route-smoke.mjs` 把真响应写出来，
+    再 `FILES_JSON=<那份> node ui-smoke.mjs client.js` 让前端吃**真数据** ——
+    光验前端（假夹具）+ 光验后端（真路由）是不够的 ✗
 
 ## 跨平台（**这个插件两头都要能用**）
 
