@@ -57,6 +57,14 @@ export const Config = !z ? undefined : z.object({
   transcribe: z.boolean().default(false).extra('volatile', true),
   /** 本地转写用哪个 Whisper 模型（tiny / base / small / medium） */
   asrModel: z.string().default('small').extra('volatile', true),
+  /** ⭐ 看画面：抽关键帧拼图交给多模态模型"看"（默认开；关掉只读字幕） */
+  seeVideo: z.boolean().default(true).extra('volatile', true),
+  /** 抽帧清晰度：480 / 720 / 1080（越高越清楚、下载越慢） */
+  frameHeight: z.natural().default(480).extra('volatile', true),
+  /** 每条视频抽几帧（9 = 3×3 九宫格） */
+  frameCount: z.natural().default(9).extra('volatile', true),
+  /** 下载视频时带账号 Cookie（默认关：匿名够用；开了才稳拿 720p/1080p） */
+  useCookie: z.boolean().default(false).extra('volatile', true),
   /** ⭐ 每轮最多发几条评论（每条里 @ 一次下面那个人） */
   commentPerRound: z.natural().default(1).extra('volatile', true),
   /** ⭐ 要 @ 谁（B站 昵称）；**留空 = 不发评论** —— 评论存在的意义就是 @ 那一下 */
@@ -150,7 +158,7 @@ export function apply(ctx, config) {
    *     ② **定时器回调里绝不让异常外冒**（见 tick）—— 未捕获异常会杀掉整个宿主进程。
    */
   const DEFAULTS = {
-    perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
+    perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small', seeVideo: true, frameHeight: 480, frameCount: 9, useCookie: false,
     keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1,
   }
   const normalize = (src, base) => {
@@ -491,6 +499,9 @@ export function apply(ctx, config) {
           ? '开着，而且装好了（没字幕的视频用家里那份 asr.py 转，命令见章程）'
           : '**开着、但依赖没装好** ⇒ 这一轮没字幕的视频只能跳过')
         : '关着（没字幕的视频就跳过）'}；`
+      + `看画面：${cfg.seeVideo
+        ? `开着（挑中的每条调 bili_frames 再 read_image 看拼图；清晰度 ${cfg.frameHeight}p、每条 ${cfg.frameCount} 帧、下载${cfg.useCookie ? '带' : '不带'}账号 Cookie —— 这些都以设置页为准，别自己传参）`
+        : '关着（只看字幕，别调 bili_frames）'}；`
       + `⭐ 不管哪种情况，**报告里都要写一行「因无字幕跳过 N 条」**（N=0 也写）—— 别让它悄悄少几条。`
       + `判重表 = ${join(stateDir, 'seen.md')}（**就是这个绝对路径**，别写到家目录 ~、也别写到别处）；`
       + `⚠️ 它读不出来或写不进去，**必须在报告里明说** —— 那一轮宁可不发评论，也别当成"没有记录"重发一遍。`
@@ -930,11 +941,14 @@ export function apply(ctx, config) {
       const body = await readBody(req)
       const patch = {}
       for (const k of ['perDay', 'peakValley', 'noon', 'night', 'autoComment', 'transcribe', 'asrModel',
+        'seeVideo', 'frameHeight', 'frameCount', 'useCookie',
         'commentPerRound', 'mentionName',
         'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound']) {
         if (k in body) patch[k] = body[k]
       }
       if ('perDay' in patch) patch.perDay = Math.max(0, Math.min(Number(patch.perDay) || 0, 50))
+      if ('frameHeight' in patch) patch.frameHeight = [480, 720, 1080].includes(Number(patch.frameHeight)) ? Number(patch.frameHeight) : 480
+      if ('frameCount' in patch) patch.frameCount = Math.max(4, Math.min(Number(patch.frameCount) || 9, 16))
       if ('reportLevel' in patch) patch.reportLevel = ['full', 'brief', 'off'].includes(String(patch.reportLevel)) ? String(patch.reportLevel) : 'full'
       if ('replyToComments' in patch) patch.replyToComments = Boolean(patch.replyToComments)
       if ('replyPerRound' in patch) patch.replyPerRound = Math.max(1, Math.min(Number(patch.replyPerRound) || 1, 10))

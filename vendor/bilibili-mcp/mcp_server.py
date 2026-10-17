@@ -11,7 +11,9 @@ import asyncio
 import json
 import base64
 import os
+import sys
 import tempfile
+import time
 from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
@@ -266,6 +268,9 @@ async def bili_search(keyword: str, num: int = 10, order: str = "totalrank") -> 
             "review": item.get("review", 0),
             "danmaku": item.get("video_review", 0),
             "duration": item.get("duration", ""),
+            "pubdate": item.get("pubdate", 0),
+            "days_ago": (round((time.time() - item["pubdate"]) / 86400, 1)
+                         if item.get("pubdate") else None),
             "description": item.get("description", "")[:200],
         })
 
@@ -451,6 +456,10 @@ async def bili_video_info(bvid: str) -> str:
         "description": info.get("desc"),
         "author": info.get("owner", {}).get("name"),
         "duration": info.get("duration"),
+        "pubdate": info.get("pubdate"),
+        "days_ago": (round((time.time() - info["pubdate"]) / 86400, 1)
+                     if info.get("pubdate") else None),
+        "cover": info.get("pic"),
         "pages": len(info.get("pages", [])),
         "tags": [t.get("tag_name") for t in info.get("tag", []) if t.get("tag_name")],
         "stat": {
@@ -1357,6 +1366,95 @@ async def bili_received_at_and_likes() -> str:
     except Exception as e:
         result["likes_error"] = str(e)
     return json.dumps(result, ensure_ascii=False)
+
+
+# ========== Tool: 看画面（抽关键帧拼图）==========
+
+FRAMES_SCRIPT = Path(__file__).parent / "frames.py"
+CONFIG_FILE = Path(__file__).parent / "config.json"
+
+
+def frame_settings() -> dict:
+    """设置页里那几个「看不看画面」的开关 —— 插件写在家目录的 config.json 里。"""
+    try:
+        with open(CONFIG_FILE) as f:
+            c = json.load(f)
+    except Exception:
+        c = {}
+    h = c.get("frameHeight", 480)
+    try:
+        h = int(h)
+    except Exception:
+        h = 480
+    if h not in (480, 720, 1080):
+        h = 480
+    try:
+        cnt = int(c.get("frameCount", 9))
+    except Exception:
+        cnt = 9
+    return {
+        "seeVideo": bool(c.get("seeVideo", True)),
+        "height": h,
+        "count": max(4, min(cnt, 16)),
+        "cookie": bool(c.get("useCookie", False)),
+    }
+
+
+@mcp.tool()
+async def bili_frames(bvid: str, n: int = 0, height: int = 0) -> str:
+    """
+    把视频画面抽成一张「关键帧拼图」，返回图片路径 —— 之后用 read_image 真正"看"它。
+
+    清晰度/帧数/要不要带 Cookie 都跟设置页里的「看不看画面」走，一般不用传参数。
+
+    Args:
+        bvid: 视频BV号，如"BV1awJX6HEDM"
+        n: 抽几帧（0 = 用设置页里的，默认 9；最多 16）
+        height: 清晰度 480/720/1080（0 = 用设置页里的，默认 480）
+
+    Returns:
+        JSON：sheet=拼图绝对路径（拿去 read_image）、duration、pubdate、days_ago、
+        times=每格对应的时间点、note=怎么读这张图
+    """
+    import subprocess
+
+    cfg = frame_settings()
+    if not cfg["seeVideo"]:
+        return json.dumps({"ok": False, "skipped": True,
+                           "error": "设置页里关掉了「看视频画面」—— 这一轮只读字幕，别抽帧"},
+                          ensure_ascii=False)
+    if not FRAMES_SCRIPT.exists():
+        return json.dumps({"ok": False, "error": f"家目录里没有 frames.py：{FRAMES_SCRIPT}"},
+                          ensure_ascii=False)
+    try:
+        n = max(4, min(int(n) or cfg["count"], 16))
+    except Exception:
+        n = cfg["count"]
+    try:
+        h = int(height) or cfg["height"]
+    except Exception:
+        h = cfg["height"]
+    if h not in (480, 720, 1080):
+        h = cfg["height"]
+
+    args = [sys.executable, str(FRAMES_SCRIPT), bvid, "--n", str(n), "--height", str(h)]
+    if cfg["cookie"]:
+        args.append("--cookie")
+
+    def run():
+        return subprocess.run(args, capture_output=True, text=True, timeout=300)
+
+    try:
+        r = await asyncio.to_thread(run)
+    except Exception as e:
+        return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
+
+    lines = [ln for ln in (r.stdout or "").strip().splitlines() if ln.strip()]
+    last = lines[-1] if lines else ""
+    if r.returncode != 0 or not last.startswith("{"):
+        err = (r.stderr or "").strip()[-400:] or (r.stdout or "").strip()[-400:] or "抽帧失败"
+        return json.dumps({"ok": False, "bvid": bvid, "error": err}, ensure_ascii=False)
+    return last
 
 
 # ========== 启动 ==========

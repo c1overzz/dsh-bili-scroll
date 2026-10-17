@@ -321,6 +321,20 @@ window.__ModuleLoader__.load({
 
       const sw = (k) => Boolean(cfg[k])
 
+      /* 看画面：按"格子数 × 清晰度"算一张拼图多大，再折算走图的 token（估算，量级对就行） */
+      const fgrid = ({ 4: [2, 2], 9: [3, 3], 16: [4, 4] })[Number(cfg.frameCount) || 9] || [3, 3]
+      const fw = Number(cfg.frameHeight) || 480
+      const fh = Math.round(fw * 9 / 16)
+      const sheetW = fgrid[1] * fw + (fgrid[1] + 1) * 6
+      const sheetH = fgrid[0] * (fh + 22) + (fgrid[0] + 1) * 6
+      // 模型那边一般会把长边缩到 1400 上下再切 patch ⇒ 清晰度对 token 影响很小，算"缩放后"的尺寸
+      const scl = Math.min(1, 1400 / Math.max(sheetW, sheetH))
+      const effW = Math.round(sheetW * scl)
+      const effH = Math.round(sheetH * scl)
+      const tokPer = Math.ceil(effW * effH / 800 / 100) * 100      // 大约 1 token / 800 像素
+      const nPerDay = Number(cfg.perDay) || 0
+      const tokPerDay = sw('seeVideo') ? tokPer * nPerDay : 0
+
       return h('div', { 'data-bd-page': '' },
 
         /* ── 今天 ── */
@@ -432,6 +446,53 @@ window.__ModuleLoader__.load({
             st.asrTail ? h('div', null,
               h('div', { 'data-bd-note': '' }, st.asrInstalling ? '正在装转写依赖（进度）：' : '转写依赖的日志（末尾）—— 只有「没字幕的视频」用得到它：'),
               h('pre', { 'data-bd-pre': '' }, st.asrTail)) : null) : null),
+
+        /* ── 看不看画面 ── */
+        h('div', { 'data-bd-sec': '' },
+          h('div', { 'data-bd-h': '' }, '看不看画面'),
+          h(ToggleRow, {
+            label: '看视频画面（抽关键帧）',
+            note: '默认开。只下 480p 纯视频轨、把几帧拼成一张九宫格让模型"看"；关掉 = 只读字幕',
+            on: sw('seeVideo'),
+            onChange: (v) => patch({ seeVideo: v }, '看画面'),
+          }),
+          sw('seeVideo') ? h('div', { 'data-bd-sub': '' },
+            h('div', { 'data-bd-row': '' },
+              h('div', { 'data-bd-grow': '' },
+                h('div', { 'data-bd-label': '' }, '清晰度'),
+                h('div', { 'data-bd-note': '' }, '480p 读大字够用；720p 读小字和表格；1080p 更清楚，但基本要 Cookie')),
+              h('select', {
+                'data-bd-input': '', value: String(cfg.frameHeight ?? 480),
+                onChange: (e) => patch({ frameHeight: Number(e.target.value) }, '清晰度'),
+              },
+                h('option', { value: '480' }, '480p'),
+                h('option', { value: '720' }, '720p'),
+                h('option', { value: '1080' }, '1080p'))),
+            h('div', { 'data-bd-row': '' },
+              h('div', { 'data-bd-grow': '' },
+                h('div', { 'data-bd-label': '' }, '每条抽几帧'),
+                h('div', { 'data-bd-note': '' }, '9 帧 = 3×3 九宫格（默认）；16 帧更不容易漏，但一张图更大')),
+              h('select', {
+                'data-bd-input': '', value: String(cfg.frameCount ?? 9),
+                onChange: (e) => patch({ frameCount: Number(e.target.value) }, '抽几帧'),
+              },
+                h('option', { value: '4' }, '4 帧'),
+                h('option', { value: '9' }, '9 帧'),
+                h('option', { value: '16' }, '16 帧'))),
+            h(ToggleRow, {
+              label: '下载时用账号 Cookie',
+              note: '默认关：匿名就能下 480p，完全不碰你的号。开了才稳拿 720p/1080p，但下载请求会挂在账号上',
+              on: sw('useCookie'),
+              onChange: (v) => patch({ useCookie: v }, '下载用 Cookie'),
+            }),
+            h('div', { 'data-bd-note': '' },
+              `预估多花的 token：每条一张拼图（${effW}×${effH}，${fgrid[0]}×${fgrid[1]} 格 / ${fw}p）≈ ${tokPer.toLocaleString()} tokens；`,
+              nPerDay > 0
+                ? `按每天 ${nPerDay} 条算 ≈ ${(tokPerDay / 1000).toFixed(1)}k tokens／天。`
+                : '每天挑 0 条的话不额外花。',
+              h('br'),
+              '钱其实很便宜（每条不到一分钱）；真代价是这些图会在上下文里一直占着，一轮下来上下文明显变长。')
+          ) : h('div', { 'data-bd-note': '' }, '关着：只读字幕。便宜、快，但看不出「真人 / PPT 播报 / 录屏 / 剪辑」这种字幕永远说不清的事。')),
 
         /* ── 关注什么 / 在哪儿刷 ── */
         h('div', { 'data-bd-sec': '' },
