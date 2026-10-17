@@ -41,7 +41,7 @@ window.__ModuleLoader__.load({
     })).json()
 
     const CSS = `
-[data-bd-page]{display:flex;flex-direction:column;gap:18px;padding:2px 2px 8px;max-width:640px;}
+[data-bd-page]{display:flex;flex-direction:column;gap:18px;padding:2px 2px 8px;max-width:1080px;}
 [data-bd-sec]{display:flex;flex-direction:column;gap:8px;}
 [data-bd-h]{font-size:11px;font-weight:600;letter-spacing:.04em;color:var(--dsw-alias-label-tertiary,#9aa0a6);}
 [data-bd-row]{display:flex;align-items:center;gap:10px;}
@@ -85,6 +85,75 @@ window.__ModuleLoader__.load({
 [data-bd-field]{display:flex;flex-direction:column;gap:6px;}
 [data-bd-grow2]{flex:1;min-width:0;}
 [data-bd-dim]{opacity:.5;}
+[data-bd-note][data-warn]{color:#f59e0b;}
+[data-bd-tally]{font-size:11px;font-weight:400;color:var(--dsw-alias-label-tertiary,#9aa0a6);}
+[data-bd-tally][data-soft]{opacity:.7;}
+[data-bd-tabs]{position:sticky;top:0;z-index:5;display:flex;gap:4px;padding:4px 0 10px;overflow-x:auto;-webkit-overflow-scrolling:touch;}
+[data-bd-tab]{flex:none;padding:6px 16px;border-radius:8px;font-size:13px;cursor:pointer;border:0;font-family:inherit;
+  background:transparent;color:var(--dsw-alias-label-tertiary,#9aa0a6);}
+[data-bd-tab]:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.16));}
+[data-bd-tab][data-on]{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.24));color:inherit;font-weight:600;}
+[data-bd-pane-settings]{display:flex;flex-direction:column;gap:18px;max-width:640px;}
+[data-bd-pane-report],[data-bd-pane-debug]{display:flex;flex-direction:column;gap:14px;}
+[data-bd-sum]{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px;}
+[data-bd-stat]{padding:9px 12px;border-radius:10px;background:var(--dsw-alias-bg-overlay,rgba(128,128,128,.1));}
+[data-bd-stat] b{display:block;font-size:19px;line-height:25px;font-weight:600;}
+[data-bd-stat][data-tone="ok"] b{color:#22c55e;}
+[data-bd-stat] span{font-size:11px;color:var(--dsw-alias-label-tertiary,#9aa0a6);}
+[data-bd-chips]{display:flex;gap:6px;overflow-x:auto;padding:2px 0 6px;-webkit-overflow-scrolling:touch;}
+[data-bd-chip]{flex:none;padding:5px 10px;border-radius:8px;font-size:12px;cursor:pointer;font-family:inherit;color:inherit;
+  border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.22));background:transparent;}
+[data-bd-chip][data-on]{background:#3b82f6;border-color:#3b82f6;color:#fff;font-weight:600;}
+[data-bd-round]{display:flex;flex-direction:column;gap:10px;}
+[data-bd-fold]{border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.18));border-radius:10px;overflow:hidden;}
+[data-bd-sec-head]{display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none;padding:9px 12px;
+  font-size:13px;font-weight:600;background:var(--dsw-alias-bg-overlay,rgba(128,128,128,.06));}
+[data-bd-sec-head]:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.14));}
+[data-bd-sec-head] i{font-style:normal;font-size:10px;opacity:.55;transition:transform .15s;display:inline-block;}
+[data-bd-sec-head][data-open] i{transform:rotate(90deg);}
+[data-bd-fold-body]{display:flex;flex-direction:column;gap:8px;padding:10px 12px;}
+[data-bd-card]{border:1px solid var(--dsw-alias-border-l2,rgba(128,128,128,.16));border-radius:9px;padding:9px 11px;
+  display:flex;flex-direction:column;gap:5px;}
+[data-bd-card] a{color:#3b82f6;text-decoration:none;font-weight:600;font-size:13px;line-height:18px;}
+[data-bd-card] a:hover{text-decoration:underline;}
+[data-bd-meta]{display:flex;gap:10px;flex-wrap:wrap;font-size:11px;color:var(--dsw-alias-label-tertiary,#9aa0a6);align-items:center;}
+[data-bd-bv]{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;padding:1px 5px;border-radius:4px;
+  background:var(--dsw-alias-bg-overlay,rgba(128,128,128,.16));color:var(--dsw-alias-label-secondary,#c9ccd1);text-decoration:none;}
+[data-bd-quote]{font-size:12px;line-height:17px;padding-left:8px;border-left:2px solid #3b82f6;color:var(--dsw-alias-label-secondary,#c9ccd1);}
+[data-bd-prose]{font-size:12px;line-height:18px;white-space:pre-wrap;word-break:break-word;color:var(--dsw-alias-label-secondary,#c9ccd1);}
+[data-bd-li]{display:flex;gap:8px;align-items:baseline;font-size:12px;line-height:17px;padding:3px 0;flex-wrap:wrap;}
+[data-bd-kvrow]{font-size:12px;line-height:18px;display:flex;gap:8px;flex-wrap:wrap;}
+[data-bd-kvkey]{flex:none;color:var(--dsw-alias-label-tertiary,#9aa0a6);}
+[data-bd-feed]{display:flex;flex-direction:column;gap:2px;max-height:380px;overflow:auto;font-size:12px;
+  background:var(--dsw-alias-bg-overlay,rgba(0,0,0,.16));border-radius:9px;padding:6px;}
+[data-bd-ev]{display:flex;gap:8px;align-items:baseline;padding:3px 6px;border-radius:6px;flex-wrap:wrap;}
+[data-bd-ev][data-bad]{background:rgba(239,68,68,.13);}
+[data-bd-ev][data-round]{background:rgba(59,130,246,.14);}
+[data-bd-ev] time{flex:none;font-size:11px;opacity:.55;font-family:ui-monospace,monospace;}
+[data-bd-ev][data-mono] span{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;}
+[data-bd-pill]{flex:none;font-size:10px;padding:1px 6px;border-radius:999px;line-height:15px;
+  background:var(--dsw-alias-bg-overlay,rgba(128,128,128,.2));}
+[data-bd-pill][data-ok]{background:rgba(34,197,94,.18);color:#22c55e;}
+[data-bd-pill][data-bad]{background:rgba(239,68,68,.2);color:#f87171;}
+[data-bd-pill][data-run]{background:rgba(59,130,246,.2);color:#60a5fa;}
+[data-bd-pre][data-tall]{max-height:520px;}
+[data-bd-narrow]{width:auto;max-width:200px;}
+
+/* ⭐ 窄屏（手机）：少几列、字号小一点、按钮挤一挤 —— 别横向溢出 */
+@media (max-width:640px){
+  [data-bd-page]{gap:14px;padding:0 0 10px;}
+  [data-bd-pane-settings]{gap:16px;}
+  [data-bd-sum]{grid-template-columns:repeat(3,1fr);gap:6px;}
+  [data-bd-stat]{padding:7px 9px;}
+  [data-bd-stat] b{font-size:16px;line-height:21px;}
+  [data-bd-stat] span{font-size:10px;}
+  [data-bd-row]{gap:8px;}
+  [data-bd-btn]{padding:6px 9px;font-size:11px;}
+  [data-bd-tab]{padding:6px 12px;}
+  [data-bd-num]{width:70px;}
+  [data-bd-narrow]{max-width:130px;}
+  [data-bd-feed]{max-height:300px;}
+}
 `
 
     // ⚠️ 与 lib/state.mjs 的 WINDOWS 保持一致（官方口径：工作日 9–12、14–18 是高峰，其余都是谷时）
@@ -153,6 +222,306 @@ window.__ModuleLoader__.load({
       return [st, setSt]
     }
 
+/* ────────────── 报告页 / 调试页（2026-10-17 加） ──────────────
+     * 起因：原来「看今天的报告」就是把 80 多 KB 的 markdown 原样塞进一个 `<pre>` ——
+     *   十几轮全糊在一起，翻都翻不动，想找"这轮到底收了哪几条"基本靠肉眼 ✗。
+     * 现在**宿主那边**已经把它解析成结构化对象了（`lib/report.mjs`），这一页只管摆好看 ✓
+     * 解析失败也不会白屏：`parsed` 为空就退回原文，永远有东西看 ✓
+     */
+
+    /** MCP 工具名的中文标签（没列举到的去掉 `bili_` 前缀直接用，别让它显示成一串英文） */
+    const TOOL_CN = {
+      bili_search: '搜视频', bili_subtitle: '取字幕', bili_comments: '看评论', bili_danmaku: '看弹幕',
+      bili_video_info: '看视频详情', bili_reply: '发评论', bili_send_message: '发私信',
+      bili_note_picks: '报账', bili_login: '出登录码', bili_login_check: '查登录',
+      bili_check_credential: '验登录', bili_whoami: '看当前账号', bili_crawl: '抓取',
+      bili_send_dynamic: '发动态', bili_send_opus: '发专栏', bili_upload_video: '投稿',
+      bili_upload_video_multi: '投稿（分P）', bili_hot_videos: '看热门', bili_hot_buzzwords: '看热词',
+      bili_weekly_hot: '看每周必看', bili_rank: '看排行', bili_video_zones: '看分区',
+      bili_user_info: '看用户', bili_user_videos: '看用户投稿', bili_favorite_lists: '看法收藏夹',
+      bili_favorite_content: '看法收藏夹内容', bili_unread_messages: '看未读',
+      bili_received_replies: '看收到的回复', bili_received_at_and_likes: '看被 @ 和点赞',
+    }
+    const toolName = (t) => TOOL_CN[t] || String(t || '').replace(/^bili_/, '')
+
+    /** 毫秒 → 「1分23秒」/「820ms」 */
+    function fmtDur(ms) {
+      const n = Math.max(0, Number(ms) || 0)
+      if (n < 1000) return Math.round(n) + 'ms'
+      const s = Math.round(n / 1000)
+      if (s < 60) return s + ' 秒'
+      const m = Math.floor(s / 60)
+      if (m < 60) return m + ' 分 ' + (s % 60) + ' 秒'
+      return Math.floor(m / 60) + ' 小时 ' + (m % 60) + ' 分'
+    }
+
+    /* ── 报告页的小零件 ── */
+
+    function Stat({ v, label, tone }) {
+      return h('div', { 'data-bd-stat': '', 'data-tone': tone || undefined },
+        h('b', null, String(v)),
+        h('span', null, label))
+    }
+
+    /** 可折起来的一节 */
+    function Sec({ title, tally, open, onToggle, children }) {
+      return h('div', { 'data-bd-fold': '' },
+        h('div', { 'data-bd-sec-head': '', 'data-open': open ? '' : undefined, onClick: onToggle },
+          h('i', null, '▸'),
+          h('span', null, title),
+          tally ? h('span', { 'data-bd-tally': '' }, tally) : null),
+        open ? h('div', { 'data-bd-fold-body': '' }, children) : null)
+    }
+
+    /** 收了的一条 —— 做成卡片：标题可点、下面挂 UP / 播放 / 理由 / 一句话 */
+    function PickCard({ it }) {
+      const href = it.url || (it.bv ? 'https://www.bilibili.com/video/' + it.bv : '')
+      return h('div', { 'data-bd-card': '' },
+        href ? h('a', { href, target: '_blank', rel: 'noreferrer' }, it.title || '(没写标题)')
+          : h('b', null, it.title || '(没写标题)'),
+        h('div', { 'data-bd-meta': '' },
+          it.up ? h('span', null, 'UP ' + it.up) : null,
+          it.play ? h('span', null, '播放 ' + it.play) : null,
+          it.bv ? h('span', { 'data-bd-bv': '' }, it.bv) : null),
+        it.why ? h('div', { 'data-bd-note': '' }, it.why) : null,
+        it.one ? h('div', { 'data-bd-quote': '' }, it.one) : null,
+        it.comment ? h('div', { 'data-bd-note': '', 'data-warn': '' }, '评论：' + it.comment) : null)
+    }
+
+    /** 列表一行（看过未收 / 无字幕跳过） */
+    function ListRow({ it }) {
+      const href = it.bv ? 'https://www.bilibili.com/video/' + it.bv : ''
+      return h('div', { 'data-bd-li': '' },
+        it.bv ? (href ? h('a', { 'data-bd-bv': '', href, target: '_blank', rel: 'noreferrer' }, it.bv)
+          : h('span', { 'data-bd-bv': '' }, it.bv)) : null,
+        h('span', { 'data-bd-grow': '' }, it.title || it.text || ''),
+        it.up ? h('span', { 'data-bd-tally': '' }, it.up) : null,
+        it.why ? h('span', { 'data-bd-tally': '', 'data-soft': '' }, it.why) : null)
+    }
+
+    /** `- 键：值` 那种（评论 / 私信） */
+    function PairRow({ p }) {
+      return h('div', { 'data-bd-kvrow': '' },
+        h('b', { 'data-bd-kvkey': '' }, p.k),
+        h('span', null, p.v))
+    }
+
+    /** 复核一行 */
+    function VerifyRow({ it }) {
+      const pill = it.visible === true ? ['公开可见', 'ok'] : (it.visible === false ? ['没查到', 'bad'] : ['未核', ''])
+      return h('div', { 'data-bd-li': '' },
+        h('span', { 'data-bd-pill': '', ['data-' + pill[1]]: pill[1] ? '' : undefined }, pill[0]),
+        it.bv ? h('span', { 'data-bd-bv': '' }, it.bv) : null,
+        it.rpid ? h('span', { 'data-bd-tally': '' }, 'rpid ' + it.rpid) : null,
+        it.where ? h('span', { 'data-bd-tally': '' }, it.where) : null,
+        it.detail && it.visible !== true ? h('span', { 'data-bd-tally': '', 'data-soft': '' }, it.detail) : null)
+    }
+
+    /** 把一节按类型摊开 */
+    function renderSection(sec, key, open, setOpen) {
+      const k = 's' + key
+      const isOpen = open[k] === undefined ? sec.kind === 'picked' : open[k]
+      const toggle = () => setOpen((o) => ({ ...o, [k]: !isOpen }))
+      const tally = sec.count != null ? sec.count + ' 条' : null
+      const head = {
+        picked: '收了', seen: '看过未收', skipped: '无字幕跳过',
+        comments: '评论', dm: '私信', verify: '评论复核', summary: '总结', other: sec.title,
+      }[sec.kind] || sec.title
+
+      let body = null
+      if (sec.kind === 'picked') {
+        body = sec.items.length
+          ? sec.items.map((it) => h(PickCard, { key: it.i, it }))
+          : h('div', { 'data-bd-prose': '' }, sec.raw)
+      } else if (sec.kind === 'seen' || sec.kind === 'skipped') {
+        body = sec.items.length
+          ? sec.items.map((it, i) => h(ListRow, { key: i, it }))
+          : h('div', { 'data-bd-prose': '' }, sec.raw)
+      } else if (sec.kind === 'comments' || sec.kind === 'dm') {
+        body = (sec.pairs?.length || sec.prose?.length)
+          ? [].concat(
+            (sec.pairs || []).map((p, i) => h(PairRow, { key: 'p' + i, p })),
+            (sec.prose || []).map((t, i) => h('div', { key: 'x' + i, 'data-bd-prose': '' }, t)))
+          : h('div', { 'data-bd-prose': '' }, sec.raw)
+      } else if (sec.kind === 'verify') {
+        body = sec.items.length
+          ? sec.items.map((it, i) => h(VerifyRow, { key: i, it }))
+          : h('div', { 'data-bd-prose': '' }, sec.raw)
+      } else {
+        body = h('div', { 'data-bd-prose': '' }, sec.text || sec.raw)
+      }
+
+      return h(Sec, { key, title: head, tally, open: isOpen, onToggle: toggle }, body)
+    }
+
+    /* ── 报告页 ── */
+
+    function ReportView() {
+      const [day, setDay] = React.useState('')
+      const [data, setData] = React.useState(null)
+      const [err, setErr] = React.useState('')
+      const [busy, setBusy] = React.useState(false)
+      const [rawMode, setRawMode] = React.useState(false)
+      const [ri, setRi] = React.useState(0)
+      const [open, setOpen] = React.useState({})
+
+      const load = React.useCallback(async (d) => {
+        setBusy(true); setErr('')
+        try {
+          const r = await jget('/report' + (d ? '?day=' + encodeURIComponent(d) : ''))
+          // ⚠️ jget 不看 res.ok，所以 404 也会当正常 JSON 回来 ⇒ 这里必须自己判，
+          //    而且要把后端的 error 原样露出来（吞掉的话人只会看到一句没头没脑的"读不到"）
+          if (!r?.ok) { setErr(r?.error || '读不到报告'); return }
+          setData(r); setDay(r.day)
+          // 默认停在**最后一轮**（人打开报告多半是想看刚跑完那轮）
+          setRi(Math.max(0, (r.parsed?.rounds?.length || 1) - 1))
+          setOpen({})
+        } catch (e) { setErr(String(e?.message ?? e)) } finally { setBusy(false) }
+      }, [])
+      React.useEffect(() => { load('') }, [load])
+
+      if (!data) return h('div', { 'data-bd-note': '' }, busy ? '读报告…' : (err || '还没有报告'))
+
+      const p = data.parsed
+      const s = p?.stats
+      const r = p?.rounds?.[ri] || null
+      const days = data.days?.length ? data.days : [data.day]
+
+      return h('div', { 'data-bd-pane-report': '' },
+        h('div', { 'data-bd-row': '' },
+          h('select', {
+            'data-bd-input': '', 'data-bd-narrow': '', value: day,
+            onChange: (e) => load(e.target.value),
+          }, days.map((d) => h('option', { key: d, value: d }, d))),
+          h('div', { 'data-bd-grow': '' }),
+          h('button', { 'data-bd-btn': '', disabled: busy, onClick: () => load(day) }, busy ? '读取中…' : '刷新'),
+          h('button', { 'data-bd-btn': '', onClick: () => setRawMode(!rawMode) }, rawMode ? '看结构化' : '看原文'),
+          h('button', { 'data-bd-btn': '', onClick: () => copyText(data.file) }, '复制路径')),
+
+        err ? h('div', { 'data-bd-msg': '', 'data-warn': '' }, err) : null,
+        !data.exists ? h('div', { 'data-bd-note': '' }, '这一天还没有报告 —— 跑一轮就有了') : null,
+
+        // 解析不出来 / 主动切原文：退回纯文本（永远有东西看，不会白屏）
+        (rawMode || !p) && data.exists ? h('pre', { 'data-bd-pre': '', 'data-tall': '' }, data.text) : null,
+
+        (!rawMode && p) ? h('div', null,
+          /* 当日概览 */
+          h('div', { 'data-bd-sum': '' },
+            h(Stat, { v: s.rounds, label: '轮次' }),
+            h(Stat, { v: s.picks, label: '收了（条）', tone: 'ok' }),
+            h(Stat, { v: s.seen, label: '看过未收' }),
+            h(Stat, { v: s.skipped, label: '无字幕跳过' }),
+            h(Stat, { v: s.comments + s.dm, label: '评论 / 私信' }),
+            h(Stat, { v: s.verified + ' / ' + s.checked, label: '复核可见' })),
+
+          /* 轮次 */
+          p.rounds.length > 1 ? h('div', { 'data-bd-chips': '' },
+            ...p.rounds.map((x, i) => h('button', {
+              key: i, 'data-bd-chip': '', 'data-on': i === ri ? '' : undefined,
+              onClick: () => { setRi(i); setOpen({}) },
+            }, String(i + 1).padStart(2, '0') + ' · ' + (x.time || '--:--') + (x.mode === 'manual' ? ' ·手' : '')))) : null,
+
+          r ? h('div', { 'data-bd-round': '' },
+            h('div', { 'data-bd-note': '' },
+              '第 ' + r.n + ' 轮 · ' + (r.time || '') + (r.mode === 'manual' ? ' · 手动' : '') + (r.note ? ' · ' + r.note : '')),
+            ...r.sections.map((sec, i) => renderSection(sec, i, open, setOpen))) : null) : null)
+    }
+
+    /* ── 调试页 ── */
+
+    function EvRow({ ev }) {
+      const isRound = ev.tool === '__round__'
+      const tone = ev.phase === 'error' || ev.phase === 'fail' ? 'bad' : (ev.phase === 'ok' ? 'ok' : 'run')
+      const mark = ev.phase === 'start' ? '▸' : (ev.phase === 'ok' ? '✓' : '✗')
+      const args = ev.args && Object.keys(ev.args).length
+        ? Object.entries(ev.args).map(([k, v]) => k + '=' + v).join('，') : ''
+      return h('div', {
+        'data-bd-ev': '',
+        'data-bad': tone === 'bad' ? '' : undefined,
+        'data-round': isRound ? '' : undefined,
+      },
+        h('time', null, ev.at || ''),
+        isRound ? h('span', { 'data-bd-pill': '', 'data-run': '' }, '轮') : h('span', { 'data-bd-pill': '', ['data-' + tone]: '' }, mark),
+        h('span', { 'data-bd-grow': '' },
+          h('b', null, isRound ? (ev.label || '开始跑一轮') : toolName(ev.tool)),
+          args ? h('span', { 'data-bd-tally': '' }, ' ' + args) : null,
+          !isRound && ev.label ? h('span', { 'data-bd-tally': '', 'data-soft': '' }, ' ' + ev.label) : null,
+          ev.ms != null && ev.phase !== 'start' ? h('span', { 'data-bd-tally': '' }, ' · ' + fmtDur(ev.ms)) : null,
+          ev.error ? h('div', { 'data-bd-note': '', 'data-warn': '' }, '报错：' + ev.error) : null,
+          ev.phase === 'fail' && ev.note ? h('div', { 'data-bd-note': '', 'data-warn': '' }, ev.note) : null))
+    }
+
+    function DebugView({ onRun, busy }) {
+      const [d, setD] = React.useState(null)
+      const [err, setErr] = React.useState('')
+      const [showRaw, setShowRaw] = React.useState(false)
+
+      React.useEffect(() => {
+        let alive = true
+        const tick = async () => {
+          try {
+            const r = await jget('/debug')
+            if (!alive) return
+            if (r?.ok) { setD(r); setErr('') } else setErr(r?.error || '调试接口没响应')
+          } catch (e) { if (alive) setErr(String(e?.message ?? e)) }
+        }
+        tick()
+        // ⭐ 跑着的时候 1.2 秒一次（看进度），闲着 4 秒一次（省事）
+        const iv = setInterval(tick, 1500)
+        return () => { alive = false; clearInterval(iv) }
+      }, [])
+
+      // 宿主端还是旧的（没重启）时 /debug 会 404 —— 与其让人对着空页面发呆，不如直说
+      if (!d) {
+        return h('div', { 'data-bd-note': '' },
+          err || '读调试信息…',
+          err ? h('div', { 'data-bd-note': '', 'data-warn': '' },
+            '多半是宿主端还没重新挂载 —— 重启一次 dsh web 就有了（客户端这一半刷新页面即可）') : null)
+      }
+
+      const feed = (d.progress || []).slice().reverse()      // 新的在上面
+      const bads = feed.filter((x) => x.phase === 'error' || x.phase === 'fail')
+
+      return h('div', { 'data-bd-pane-debug': '' },
+        h('div', { 'data-bd-row': '' },
+          h('span', {
+            'data-bd-pill': '', 'data-run': d.running ? '' : undefined, 'data-ok': d.running ? undefined : '',
+          }, d.running ? '● 正在跑' : '空闲'),
+          d.running ? h('span', { 'data-bd-tally': '' },
+            '已跑 ' + fmtDur(d.elapsedMs) + (d.why ? '（' + d.why + '）' : '')) : null,
+          d.lastExit ? h('span', { 'data-bd-tally': '' },
+            '上次退出 code=' + d.lastExit.code) : null,
+          h('div', { 'data-bd-grow': '' }),
+          h('button', {
+            'data-bd-btn': '', 'data-primary': '', disabled: d.running || busy === 'run', onClick: onRun,
+          }, d.running ? '正在跑…' : '试跑一轮'),
+          h('button', { 'data-bd-btn': '', onClick: () => setShowRaw(!showRaw) },
+            showRaw ? '收起原始日志' : '看原始日志')),
+
+        err ? h('div', { 'data-bd-msg': '', 'data-warn': '' }, err) : null,
+        d.stats ? h('div', { 'data-bd-note': '' },
+          '今天：' + d.stats.rounds + ' 轮 · 收了 ' + d.stats.picks + ' 条 · 评论/私信 '
+          + (d.stats.comments + d.stats.dm) + ' · 复核可见 ' + d.stats.verified + '/' + d.stats.checked) : null,
+
+        bads.length ? h('div', { 'data-bd-msg': '', 'data-warn': '' },
+          '这一轮有 ' + bads.length + ' 处报错 —— 下面标红的就是') : null,
+
+        h('div', { 'data-bd-h': '' }, '实时进度（MCP 每次工具调用都上报）'),
+        feed.length ? h('div', { 'data-bd-feed': '' }, ...feed.map((ev, i) => h(EvRow, { key: i, ev })))
+          : h('div', { 'data-bd-note': '' }, '还没有进度 —— 点「试跑一轮」看看'),
+
+        h('div', { 'data-bd-h': '' }, '关键日志（从 duty.log 里挑出来的阶段 / 报错）'),
+        d.keyLines?.length ? h('div', { 'data-bd-feed': '' },
+          ...d.keyLines.slice().reverse().map((x, i) => h('div', {
+            key: i, 'data-bd-ev': '', 'data-bad': x.bad ? '' : undefined,
+          }, h('span', { 'data-bd-grow': '', 'data-mono': '' }, x.text))))
+          : h('div', { 'data-bd-note': '' }, '还没有关键日志'),
+
+        showRaw ? h('div', null,
+          h('div', { 'data-bd-note': '' }, '原始日志尾部：' + d.logFile),
+          h('pre', { 'data-bd-pre': '', 'data-tall': '' }, d.logTail || '（空）')) : null)
+    }
+
     /* ────────────── 设置页正文 ────────────── */
 
     function Panel() {
@@ -160,6 +529,7 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = React.useState('')
       // ⭐ 全页**唯一**的反馈位 —— 原来 msg / runNote 各存一份、上下各渲染一遍，同一句话出现两遍 ✗
       const [note, setNote] = React.useState(null)
+      const [tab, setTab] = React.useState('settings')   // 设置 / 报告 / 调试
       const [kws, setKws] = React.useState(null)
       const [ws, setWs] = React.useState(null)
       const [rl, setRl] = React.useState(null)
@@ -408,9 +778,11 @@ window.__ModuleLoader__.load({
       //    它整个不生效 —— 界面上要置灰 + 说清原因，而不是留个亮着却什么都不干的开关 ✗
       const canComment = sw('autoComment') && (dmMode || 'off') !== 'only'
 
-return h('div', { 'data-bd-page': '' },
+      const TABS = [['settings', '设置'], ['report', '报告'], ['debug', '调试']]
 
-        /* ── 顶部状态条 ── */
+      return h('div', { 'data-bd-page': '' },
+
+        /* ── 顶部状态条（三个标签页共用）── */
         h('div', { 'data-bd-row': '' },
           h('span', {
             'data-bd-badge': '',
@@ -430,6 +802,14 @@ return h('div', { 'data-bd-page': '' },
           'data-warn': note.tone === 'warn' ? '' : undefined,
         }, note.t) : null,
 
+        /* ── 标签页 ── */
+        h('div', { 'data-bd-tabs': '' },
+          ...TABS.map(([k, label]) => h('button', {
+            key: k, 'data-bd-tab': '', 'data-on': tab === k ? '' : undefined,
+            onClick: () => setTab(k),
+          }, label))),
+
+        tab !== 'settings' ? null : h('div', { 'data-bd-pane-settings': '' },
         h('div', { 'data-bd-note': '' },
           '开关和下拉**点了就生效**；文字框**改完自动存**（离开输入框也会存）—— 没有保存按钮'),
 
@@ -651,7 +1031,10 @@ return h('div', { 'data-bd-page': '' },
             h('button', { 'data-bd-btn': '', onClick: () => onOpenFolder('out') }, '打开报告文件夹'),
             h('button', { 'data-bd-btn': '', onClick: () => onOpenFolder('home') }, '打开家目录'),
             h('button', { 'data-bd-btn': '', onClick: () => copyText(st.report) }, '复制报告路径')),
-          report !== null ? h('pre', { 'data-bd-pre': '' }, report) : null),
+          report !== null ? h('pre', { 'data-bd-pre': '' }, report) : null)),
+
+        tab === 'report' ? h(ReportView) : null,
+        tab === 'debug' ? h(DebugView, { onRun, busy }) : null,
       )
     }
 
