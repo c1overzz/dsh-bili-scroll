@@ -12,7 +12,7 @@ import { mkdirSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
-const SANDBOX_HOME = join(tmpdir(), 'dsh-bili-duty-selfcheck')
+const SANDBOX_HOME = join(tmpdir(), 'dsh-bili-scroll-selfcheck')
 const fail = (msg, e) => {
   console.error(`\n✗ ${msg}`)
   if (e) console.error(`  ${e?.name}: ${e?.message}`)

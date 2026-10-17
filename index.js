@@ -1,5 +1,5 @@
 /**
- * dsh-bili-duty —— host 半端
+ * dsh-bili-scroll —— host 半端
  * ============================================================================
  * 它是什么：每天替你刷一轮 B站 的插件版。
  *   1. **插件内部起那份 Python MCP**（`vendor/bilibili-mcp/mcp_server.py`），把它的能力
@@ -23,13 +23,13 @@ const hostDeps = await loadHostDeps()
 const z = hostDeps.z
 const defineTool = hostDeps.defineTool
 import { spawn } from 'node:child_process'
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { McpClient } from './lib/mcp.mjs'
 import { verifyRecent, appendVerifyToReport } from './lib/verify.mjs'
-import { WINDOWS, stateDirOf, readJson, writeJson, ensureHomeFiles, inWindow, dayKey } from './lib/state.mjs'
+import { WINDOWS, stateDirOf, readJson, writeJson, ensureHomeFiles, ensureCharter, charterPath, inWindow, dayKey } from './lib/state.mjs'
 import { loginStart, loginPoll, saveCredential, renderQrPng } from './lib/login.mjs'
 import { ensureUv } from './lib/uvfetch.mjs'
 
@@ -40,7 +40,7 @@ export const inject = ['webServer', 'tools', 'settings']
  * 🔴 每个字段都要 `.extra('volatile', true)`：DSH 的 settings.update() 只认 volatile 字段
  *    （`volatileForm(schema)`，见 dsh-settings），没有这个标记写设置时会抛
  *    "Plugin entry … has no volatile fields"。另外两个条件是：
- *    **loader entry 的 id 必须等于命名空间名**（我们 patch 里就是 `bili-duty`）+ **本模块导出 Config**。
+ *    **loader entry 的 id 必须等于命名空间名**（我们 patch 里就是 `bili-scroll`）+ **本模块导出 Config**。
  */
 // ⚠️ schemastery 彻底拿不到时，这里会是 undefined —— **插件照常加载**，只是设置页降级
 //    （宁可少一个设置页，也不能因为一个 import 让整条插件不激活 ✗）
@@ -60,14 +60,14 @@ export const Config = !z ? undefined : z.object({
   asrModel: z.string().default('small').extra('volatile', true),
   /** ⭐ 看画面：抽关键帧拼图交给多模态模型"看"（默认开；关掉只读字幕） */
   seeVideo: z.boolean().default(true).extra('volatile', true),
-  /** 抽帧清晰度：480 / 720 / 1080（越高越清楚、下载越慢） */
+  /** 抽帧清晰度：480 / 720 / 1080（作为下载上限；格子宽度按帧数自动算） */
   frameHeight: z.natural().default(480).extra('volatile', true),
   /** 每条视频抽几帧（9 = 3×3 九宫格） */
   frameCount: z.natural().default(9).extra('volatile', true),
-  /** 订阅：UP 空间链接 / 合集链接 / 视频链接，一行一个（插件自己解析成 mid / sid） */
-  subs: z.array(z.string()).default([]).extra('volatile', true),
   /** 台词来源：auto=有字幕轨就用；always=总是本地转写音频（慢，但不受 UP 改字幕影响） */
   frameAudio: z.string().default('auto').extra('volatile', true),
+  /** 订阅：UP 空间链接 / 合集链接 / 视频链接，一行一个（插件自己解析成 mid / sid） */
+  subs: z.array(z.string()).default([]).extra('volatile', true),
   /** 刷一轮用哪个模型（留空 = 跟 headless profile 的默认） */
   headlessModel: z.string().default('').extra('volatile', true),
   /** provider（一般不用改） */
@@ -76,7 +76,9 @@ export const Config = !z ? undefined : z.object({
   headlessEffort: z.string().default('').extra('volatile', true),
   /** 下载视频时带账号 Cookie（默认关：匿名够用；开了才稳拿 720p/1080p） */
   useCookie: z.boolean().default(false).extra('volatile', true),
-  /** ⭐ 每轮最多发几条评论（每条里 @ 一次下面那个人） */
+  /** ⭐ 每轮最多发几条评论（每条里 @ 一次下面那个人）；**有效范围 0–20，口径见 clampPatch**（0 = 不发评论）
+   *  ⚠️ 这里故意**不加 `.max(20)`**：schema 校验不过 ⇒ cordis 拒收这条 entry ⇒ **整条插件不激活** ✗
+   *     （跟 schemastery 拿不到时的降级同一个道理）—— 范围一律由 clampPatch 在**写**和**读**两头钳。 */
   commentPerRound: z.natural().default(1).extra('volatile', true),
   /** ⭐ 要 @ 谁（B站 昵称）；**留空 = 不发评论** —— 评论存在的意义就是 @ 那一下 */
   mentionName: z.string().default('').extra('volatile', true),
@@ -185,24 +187,116 @@ export function apply(ctx, config) {
     }
     return out
   }
-  const cfg = normalize(readJson(cfgFile, {}), normalize(config, { ...DEFAULTS }))
+  /* ── 配置从哪来：DSH 自带的「插件设置」页 > 插件自己的 config.json > 默认值 ──
+   * 老代码是 `normalize(readJson(cfgFile, {}), normalize(config, DEFAULTS))` —— config.json 一刀切盖住宿主，
+   * 后果：用户在 DSH 自带的插件设置页里改了值，插件照旧读 config.json 的旧值 ⇒ **静默不生效** ✗。
+   * 判据用 describe() 给的 `user` 层（= 用户在原生设置页**显式设过**的键）：
+   *   设过的键 ⇒ 听宿主的；没设过 ⇒ 还是 config.json 说了算（老用户零回归 ✓）。
+   * 拿不到设置服务就完全退回老行为。
+   */
+  /* ⭐ 「设置里能写什么范围」收在一处 —— HTTP 接口、bili_config 工具、**读配置**三处都走它，
+   *    所以 perDay 0–50 / commentPerRound 0–20 这些数字**只有这一份**（schema 里不再写一遍）。
+   *    （2026-10-16 审查修：原来只有 HTTP 路径钳制，工具路径连 perDay 都能写任意值；
+   *      commentPerRound 两条路径都没钳，直接 POST 能写 9999）
+   *    （2026-10-17 复查补：DSH 原生设置页那条路我们钳不到**写** —— 用户能在那儿直接填 9999 ⇒
+   *      loadCfg 读回来也过一遍，写进去和读出来一个口径） */
+  const clampPatch = (patch) => {
+    const p = { ...patch }
+    if ('perDay' in p) p.perDay = Math.max(0, Math.min(Number(p.perDay) || 0, 50))
+    if ('reportLevel' in p) p.reportLevel = ['full', 'brief', 'off'].includes(String(p.reportLevel)) ? String(p.reportLevel) : 'full'
+    if ('replyToComments' in p) p.replyToComments = Boolean(p.replyToComments)
+    if ('replyPerRound' in p) p.replyPerRound = Math.max(1, Math.min(Number(p.replyPerRound) || 1, 10))
+    if ('commentPerRound' in p) p.commentPerRound = Math.max(0, Math.min(Number(p.commentPerRound) || 0, 20))
+    // 本分支新增的字段（看画面 / 订阅 / 模型）也在这里钳 —— 写和读两头都过 clampPatch
+    if ('frameHeight' in p) p.frameHeight = [480, 720, 1080].includes(Number(p.frameHeight)) ? Number(p.frameHeight) : 480
+    if ('frameCount' in p) p.frameCount = Math.max(4, Math.min(Number(p.frameCount) || 9, 16))
+    if ('frameAudio' in p) p.frameAudio = ['auto', 'always'].includes(String(p.frameAudio)) ? String(p.frameAudio) : 'auto'
+    if ('headlessEffort' in p) p.headlessEffort = ['', 'low', 'medium', 'high', 'max'].includes(String(p.headlessEffort ?? '')) ? String(p.headlessEffort ?? '') : ''
+    if ('headlessModel' in p) p.headlessModel = String(p.headlessModel ?? '').trim().slice(0, 60)
+    if ('headlessProvider' in p) p.headlessProvider = String(p.headlessProvider ?? '').trim().slice(0, 40) || 'deepseek-official'
+    if ('subs' in p) p.subs = (Array.isArray(p.subs) ? p.subs : []).map((x) => String(x ?? '').trim()).filter(Boolean).slice(0, 30)
+    return p
+  }
+
+  const hostCfg = () => normalize(config, { ...DEFAULTS })       // 宿主那份（schema 校验过、默认值已填）
+  const savedCfg = () => normalize(readJson(cfgFile, {}), { ...DEFAULTS })
+  const CFG_SIG = ['perDay', 'mentionName', 'replyToComments', 'overlayMcp']   // 靠这几个键认出"哪一行是我们"
+  let settingsRow = { at: 0, row: null }
+  /**
+   * 我们那一行设置表单（拿不到就返回 null ⇒ 一切按 config.json 来）。
+   * ⚠️ DSH 自带的「插件设置」页**不需要注册** —— 老代码那句 `ctx.settings.register(...)` 是个不存在的方法，
+   *    每次都抛 TypeError、被 catch 吞掉（2026-10-17 读宿主源码 @deepseek-ai/dsh-settings 才明白）：
+   *    describe() 自己扫 profile 里**带 volatile 字段**的条目列出来（lib/index.js:413-452），
+   *    命名空间 ns **等于 loader 条目的 id**（我们 cordis.patch.yml 里是 `bili-scroll`，不是老注释写的 bili-duty）。
+   * 另外两条同样要紧（都是读宿主源码得来的，别再想当然）：
+   *    ① `apply(ctx, config)` 收到的 config 就是 fiber.config 本体，volatile 字段一改宿主**就地**改它
+   *       （cordis-plugin-loader/src/config/entry.ts：`this.fiber._config = …` + `_commitVolatile()`）⇒
+   *       启动时快照的 cfg 永远看不到设置页的改动，用之前得 refreshCfg()。
+   *    ② describe() 每行给三层：value（生效值）/ base（继承层）/ user（用户在设置页显式设过的那层）。
+   */
+  const settingsDesc = (fresh = false) => {
+    const t = Date.now()
+    if (!fresh && t - settingsRow.at < 3000) return settingsRow.row   // 挡 UI 轮询：describe() 要扫所有条目
+    let row = null
+    try {
+      const rows = ctx.settings?.describe?.() || []
+      row = rows.find((r) => r?.value && CFG_SIG.every((k) => k in r.value)) || null
+    } catch (e) { log(`读 DSH 设置表单失败（不影响跑）：${e?.message ?? e}`) }
+    settingsRow = { at: t, row }
+    return row
+  }
+  const loadCfg = () => {
+    const saved = savedCfg()
+    const row = settingsDesc()
+    // ⭐ 读回来统一过一遍范围：原生设置页那边我们是钳不到写的（见 clampPatch 的注释）
+    if (!row) return clampPatch(saved)
+    const user = row.user || {}
+    const out = { ...hostCfg() }
+    for (const k of Object.keys(DEFAULTS)) if (user[k] === undefined) out[k] = saved[k]
+    return clampPatch(out)
+  }
+  const cfg = loadCfg()
+  // ⭐ 配置是"随时可能被设置页就地改掉"的东西 ⇒ 每个入口用之前重算一遍（cfg 这个对象要一直指向同一份）
+  const refreshCfg = () => { Object.assign(cfg, loadCfg()) }
   const saveCfg = (patch) => { Object.assign(cfg, normalize(patch, cfg)); writeJson(cfgFile, cfg) }
+  /**
+   * ⭐ 同时写一份到宿主：不写的话会出现死结 —— 某个键一旦在原生设置页设过就由宿主说了算，
+   *    插件页再改那个键就成了"改了没反应" ✗。写失败不算致命（config.json 那份还在），把话带回给用户。
+   */
+  const saveCfgHost = async (patch) => {
+    const attempt = async (fresh) => {
+      const row = settingsDesc(fresh)
+      if (!row?.ns || typeof ctx.settings?.update !== 'function') {
+        throw Object.assign(new Error('DSH 这边没有可写的设置表单（值只落在插件自己的 config.json 里）'), { noForm: true })
+      }
+      await ctx.settings.update(row.ns, patch, row.revision)
+      return row.ns
+    }
+    try { return { ok: true, ns: await attempt(false) } }
+    catch (e) {
+      if (!e?.noForm) {   // revision 过期（刚有别人改过）⇒ 重取一次再写
+        try { return { ok: true, ns: await attempt(true), retried: true } } catch (e2) { e = e2 }
+      }
+      log(`写 DSH 设置失败：${e?.message ?? e}`)
+      return { ok: false, error: String(e?.message ?? e) }
+    }
+  }
+  /**
+   * ⭐ 落配置的**唯一入口**：插件自己那份 config.json + DSH 原生设置页那份，钳完范围一起写。
+   *    （2026-10-17 复查修：`saveCfg` + `await saveCfgHost` 这对义务原来在三个调用点各抄一遍 ——
+   *      漏掉任何一处，正好就是「设置页改了没反应」那个 bug 本身 ⇒ 收成一个函数。）
+   */
+  const persistCfg = async (patch) => {
+    const clean = clampPatch(patch)
+    saveCfg(clean)
+    const host = await saveCfgHost(clean)
+    return { clean, host }
+  }
 
   ensureHomeFiles(pluginDir, stateDir, log)
 
-  /* ── 设置命名空间：让 DSH 自带的「插件设置」能编辑这份 Config ──
-   * 三个条件缺一不可（抄 qq-mode-console 的血泪注释）：
-   *   ① loader entry 的 id 必须**等于命名空间名** —— 我们 cordis.patch.yml 里就是 `bili-duty` ✓
-   *   ② 插件模块导出 `Config` ✓  ③ Config 里至少一个字段标 volatile ✓（我们都标了）
-   */
-  try {
-    if (typeof ctx.settings?.register === 'function') {
-      ctx.settings.register('bili-duty', Config, { base: {}, applies: 'live' })
-      log('已注册设置命名空间 bili-duty')
-    }
-  } catch (e) {
-    if (!/already registered/i.test(String(e?.message ?? e))) log(`注册设置命名空间失败：${e?.message ?? e}`)
-  }
+  // ⭐ 值班章程单独记账（跟 mcp_server.py 不一样：用户改过就得留着 —— 见 state.mjs 的 ensureCharter）
+  ensureCharter(pluginDir, stateDir, log)
 
   /* ─────────────── MCP（内部起那个 Python MCP） ─────────────── */
 
@@ -378,12 +472,14 @@ export function apply(ctx, config) {
     description: '看它今天的状态：跑了没跑、挑了几条、额度剩多少、报告在哪、登录过没有、下次窗口什么时候开。',
     parameters: {},
     async execute() {
+      refreshCfg()
       const st = readJson(join(stateDir, 'state.json'), {})
       const now = new Date()
       return {
         ok: true,
         today: dayKey(now),
         ranToday: st.day === dayKey(now) ? Number(st.count || 0) : 0,
+        pickedToday: countPickedToday(now),
         perDay: cfg.perDay,
         windows: Object.fromEntries(Object.entries(WINDOWS).map(([k, w]) => [k, {
           label: w.label, start: w.start, end: w.end,
@@ -454,8 +550,12 @@ export function apply(ctx, config) {
       + '例：`{"perDay":5,"peakValley":true,"noon":true,"night":true,"autoComment":false,"transcribe":false,"keywords":["DeepSeek Harness"]}`',
     parameters: { patch: { type: 'object', additionalProperties: true, description: '要改的字段（可省）' } },
     async execute(args) {
-      if (args?.patch && typeof args.patch === 'object' && !Array.isArray(args.patch)) saveCfg(args.patch)
-      return { ok: true, config: cfg, windows: WINDOWS, home: stateDir, venvReady: venvReadyNow() }
+      let host = null
+      if (args?.patch && typeof args.patch === 'object' && !Array.isArray(args.patch)) {
+        // ⭐ 设置页显式设过的键以宿主为准 ⇒ 必须跟着写一份，否则"改了没反应"（钳范围也在这里）
+        host = (await persistCfg(args.patch)).host
+      }
+      return { ok: true, config: cfg, windows: WINDOWS, home: stateDir, venvReady: venvReadyNow(), host }
     },
   })
 
@@ -465,9 +565,41 @@ export function apply(ctx, config) {
   const bumpState = (patch) => {
     const st = readJson(dutyStateFile, {})
     const today = dayKey()
-    if (st.day !== today) { st.day = today; st.count = 0; st.windows = {} }
+    if (st.day !== today) { st.day = today; st.count = 0; st.picked = 0; st.windows = {} }
     writeJson(dutyStateFile, { ...st, ...patch })
     return st
+  }
+
+  /* ⭐ 「定量刷」承诺的是**每天挑几条**（2026-10-16 审查修 H1：原来 st.count 从没自增过，
+   *   tick 那道 `count >= perDay` 的闸形同虚设 ⇒ noon + night 两个窗口各跑满一轮，
+   *   后一轮还会把前一轮的报告覆盖掉）。
+   *   数哪儿？数**今天的报告**里那些 `### BV号` 标题行（章程写死了这个格式）。
+   *   ⚠️ 为什么不数「报告里出现的所有 BV」（2026-10-17 复查修的）：报告里还会出现**没挑中**的 BV ——
+   *     「因无字幕跳过 N 条」那行、评论区里别人问起的视频、"判重表读不到"的说明 —— 全算进去的话，
+   *     perDay 默认 5 ⇒ 一轮里出现 5 个 BV 就把当天额度吃光 ⇒ **傍晚那轮直接不跑** ✗。
+   *   ⚠️ 围栏 ``` 里的内容一律不看：那一轮没写报告时 stubReportIfMissing 会把 duty.log 尾部贴进报告，
+   *     那里面的 BV 是"看过的"，不是"挑出来的"。
+   *   ⚠️ 数不出来（章程那条格式没照做）就当 0 条 —— 宁可少算（顶多多跑一轮、额度也写在提示词里），
+   *     也别把"提到过"算成"挑中"（那会让使用者当天再也拿不到内容）✓。 */
+  const PICK_RE = /^#{2,3}[ \t]*(BV[0-9A-Za-z]{10})/gm
+  const reportFileOf = (now = new Date()) => join(outDir, `${dayKey(now)}.md`)
+  const countPicks = (file) => {
+    try {
+      const text = readFileSync(file, 'utf8').replace(/```[\s\S]*?```/g, '')
+      const ids = new Set()
+      for (const m of text.matchAll(PICK_RE)) ids.add(m[1])
+      return ids.size
+    } catch { return 0 }
+  }
+  // 报告是事实来源；state 兜住"报告被删 / 手改"那一下（取两者里大的）
+  const countPickedToday = (now = new Date()) => {
+    const st = readJson(dutyStateFile, {})
+    const fromState = st.day === dayKey(now) ? Number(st.picked || 0) : 0
+    return Math.max(fromState, countPicks(reportFileOf(now)))
+  }
+  const roundsToday = (now = new Date()) => {
+    const st = readJson(dutyStateFile, {})
+    return st.day === dayKey(now) ? Number(st.count || 0) : 0
   }
 
   // ⭐ 一键升级：由宿主自己跑 `dsh plugin --profile web add dsh-bili-scroll`
@@ -503,7 +635,22 @@ export function apply(ctx, config) {
       '/usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js',
       '/usr/lib/node_modules/@deepseek-ai/dsh/lib/bin.js',
     ].filter(Boolean)
+    // ⭐ 2026-10-16（issue #5 / #6 / #7）：**桌面版是 Electron 安装包，不是 npm -g 装的** ⇒ 上面几条全找不到
+    //    ⇒ 老逻辑退到 `dsh`（PATH 里没有这个命令）⇒ 那一轮必败、而且只留下一句 exit 1 ✗
+    //    桌面版把 dsh 打在应用里 ⇒ 按 `process.resourcesPath` 猜几个位置（找到就用；找不到就**明说**）
+    if (process.resourcesPath) {
+      for (const rel of [
+        ['app.asar.unpacked', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'],
+        ['app', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'],
+        ['node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'],
+      ]) {
+        const p = join(process.resourcesPath, ...rel)
+        if (existsSync(p)) return { command: process.execPath, args: [p], shell: false }
+      }
+    }
     for (const g of guesses) if (existsSync(g)) return { command: process.execPath, args: [g], shell: false }
+    // ⚠️ 走到这儿就是真找不到 —— 一定要出声（静默失败比报错更坏）
+    log('⚠️ 找不到 dsh：桌面版多半不是 npm 全局安装的 ⇒ 请在设置里把「dsh 路径」指到 <应用目录>/…/@deepseek-ai/dsh/lib/bin.js，或改用 npm 装的 dsh')
     return { command: 'dsh', args: [], shell: true }
   }
 
@@ -539,13 +686,8 @@ export function apply(ctx, config) {
   }
 
   const promptFor = () => {
-    // ⭐ 章程取哪一份：**插件里那份（永远跟版本一致）**；但家里那份如果**比它新**，说明使用者自己改过 ⇒ 听使用者的。
-    const shipped = join(pluginDir, 'prompts', 'duty.md')
-    const homeCopy = join(stateDir, 'duty.md')
-    let duty = shipped
-    try {
-      if (existsSync(homeCopy) && statSync(homeCopy).mtimeMs > statSync(shipped).mtimeMs) duty = homeCopy
-    } catch { /* 读不到就用 shipped 那份 */ }
+    // ⭐ 章程取哪一份：家里那份优先（ensureCharter 保证铺好；他改过的话就是他那份，升级的事由 ensureCharter 记账处理）
+    const duty = charterPath(pluginDir, stateDir)
     const kws = Array.isArray(cfg.keywords) ? cfg.keywords.filter(Boolean) : []
     // ⭐ 开场先让它读**工作区**的 AGENTS.md —— 这一轮的工作目录就是使用者的工作区，
     //    AGENTS.md 本来就会自动注入；这里再点一句，保证它真按使用者的设定来（别人的设定同理）。
@@ -553,25 +695,41 @@ export function apply(ctx, config) {
     //    所以"使用者的设定"由**我们自己读进来**喂给它 —— 它在宿主进程里跑，没有沙箱限制 ✓
     let ownerDoc = ''
     try {
-      const wsDir = String(cfg.workspace || '').trim() || process.cwd()
-      const agents = join(wsDir, 'AGENTS.md')
-      if (existsSync(agents)) {
+      // ⚠️ 2026-10-16 用户反馈（"只要给人设就会走偏"）：留空时我们以前退到 `process.cwd()`，
+      //    也就是 **dsh 进程自己的工作目录** —— 那对多数人根本不是他的工作区 ✗
+      //    ⇒ 读错人设、甚至把别的目录的设定读进来 ✓
+      //    ⭐ 现在的规矩：**留空 = 不读设定**（宁可按中性说话，也别猜错 ✓）；要按人设就自己填工作区 ✓。
+      const wsDir = String(cfg.workspace || '').trim()
+      const agents = wsDir ? join(wsDir, 'AGENTS.md') : ''
+      if (agents && existsSync(agents)) {
         const text = readFileSync(agents, 'utf8')
         ownerDoc = '\n\n===== 使用者的 AGENTS.md（他写给自己 AI 的人设与准则，**按这个来**）=====\n'
           + text.slice(0, 6000)
           + '\n===== 设定结束 =====\n'
       }
     } catch { /* 读不到就算了，别因此跑不成 */ }
+    // ⭐ 「每天最多挑 N 条」是**全天**的账：上一轮已经挑过的要扣掉，这一轮只给剩下的额度
+    const quota = Math.max(0, Number(cfg.perDay) || 0)
+    const already = countPickedToday()
+    const left = Math.max(0, quota - already)
     return `你是这个账号的 B站 助手。`
       + `下面是使用者的设定（如果有）—— **按它来**，别用你默认那套人格。`
       + ownerDoc
+      + (ownerDoc
+        ? ''
+        : '⭐ 这一轮**没有**拿到使用者的设定（他没填「工作区」，或那个目录里没有 `AGENTS.md`）⇒ **按中性说话**：别扮演任何人、也别自己编一套设定 ✓。')
       + `然后读章程 ${duty}，按里面的要求刷一轮 B站，`
       + (cfg.reportLevel === 'brief'
         ? `日报写成薄版：每条一两行（值不值得 + 链接）就够，别写长摘要。`
         : cfg.reportLevel === 'off'
           ? `这一轮不要写日报文件，也别生成任何报告；只有真发了评论就一句话记下。`
           : `把报告写到 ${join(outDir, `${dayKey()}.md`)}。`)
-      + `今天最多挑 ${cfg.perDay} 条；关键词${kws.length ? `用这些：${kws.join('、')}` : '用章程里的默认那几组'}。`
+      + (cfg.reportLevel === 'off' ? '' : `⚠️ 今天那份报告里可能已经有上一轮写的东西 —— 有就**追加到末尾**，别覆盖（配额按全天算）。`)
+      + (cfg.reportLevel === 'off' ? '' : '⭐ 报告里**每挑中一条**，第一行写成 `### BV号`（例：`### BV1xxxxxxx`）—— 宿主**就数这些标题行**算今天挑了几条：漏写当成没挑中，给只是提到 / 跳过的视频加上标题则当成挑中。')
+      + (already > 0
+        ? `今天已经挑过 ${already} 条了 ⇒ **这一轮最多再挑 ${left} 条**（「每天最多 ${quota} 条」是全天总量，不是每轮）；`
+        : `今天最多挑 ${quota} 条；`)
+      + `关键词${kws.length ? `用这些：${kws.join('、')}` : '用章程里的默认那几组'}。`
       + subsHint()
       + `本地转写：${cfg.transcribe
         ? (asrReadyNow()
@@ -584,6 +742,9 @@ export function apply(ctx, config) {
       + `⭐ 不管哪种情况，**报告里都要写一行「因无字幕跳过 N 条」**（N=0 也写）—— 别让它悄悄少几条。`
       + `判重表 = ${join(stateDir, 'seen.md')}（**就是这个绝对路径**，别写到家目录 ~、也别写到别处）；`
       + `⚠️ 它读不出来或写不进去，**必须在报告里明说** —— 那一轮宁可不发评论，也别当成"没有记录"重发一遍。`
+      + `⭐ 另外把这一轮**看过的每一条视频（挑中的和跳过的都算）**追加进归档：${join(digestDir, `${dayKey().slice(0, 7)}.md`)}`
+      + ` —— 一行一条：日期 · BV 号 · 标题 · UP · 一句话结论 · 链接（跳过的那条在后面注明理由）；`
+      + `这是**给以后检索用**的（报告是给人看的，归档是给"回头翻"用的），别省略、也别只写挑中的。`
       + `自动评论并 @ ${cfg.mentionName || '（还没填要 @ 谁）'} 是${cfg.autoComment && cfg.mentionName
         ? `开着的（每轮最多 ${cfg.commentPerRound} 条评论，每条在正文里纯文本 @ ${cfg.mentionName}，150 字内）`
         : '关着的（只写报告，别发评论）'}。`
@@ -599,6 +760,22 @@ export function apply(ctx, config) {
    *    （headless 里那两条 B站 MCP 就是当初手写进去的）。分发给别人时不能要求人家改 profile，
    *    所以插件自己生成一份、跑的时候 `--patch` 带上（dsh 支持可重复的 `--patch`）。
    */
+  /**
+   * ⭐ 值班轮能看到哪些 MCP 工具（2026-10-17 审查里的 H3）
+   *    起因：overlay 把整台 mcp_server.py 挂成 stdio server ⇒ 那一轮的模型手里握着**原生全套**工具
+   *    （bili_reply / bili_crawl / bili_send_opus / bili_upload_video / bili_login…）——
+   *    宿主这边 autoComment / mentionName 两道闸只拦得住我们自己的 bili_reply 工具，拦不住它 ✗。
+   *    做法：白名单写进 overlay 的 env（mcp-client 会把它并进子进程环境），
+   *    mcp_server.py 那头**不在白名单里的工具根本不注册** —— 连名字都不给它看见 ✓。
+   *    要读全就手工改这个列表（或者直接跑 mcp_server.py，不设这个变量 = 全放）。
+   */
+  const mcpWhitelist = () => {
+    const list = ['bili_search', 'bili_subtitle', 'bili_comments', 'bili_video_info',
+      'bili_up_videos', 'bili_collection_videos']   // 本分支：订阅查询
+    if (cfg.seeVideo !== false) list.push('bili_frames')   // 看画面关掉就不给它这只
+    if (cfg.autoComment || cfg.replyToComments) list.push('bili_reply')   // 只有真要发评论才给这只
+    return list
+  }
 
   /* ─────────────── 「这一轮到底用什么模型」───────────────
    * 以前是黑盒：插件起 headless 时不传模型，就一直吃 headless profile 的默认。
@@ -700,6 +877,8 @@ export function apply(ctx, config) {
         `        command: '${posix(cfg.pythonPath || 'python')}'`,
         '        args:',
         `          - '${posix(script)}'`,
+        '        env:',
+        `          BILI_MCP_TOOLS: '${mcpWhitelist().join(',')}'`,
         '',
       ].join('\n'))
     }
@@ -858,6 +1037,7 @@ export function apply(ctx, config) {
 
   const runDuty = (why = 'window', promptOverride = null) => {
    try {
+    refreshCfg()          // ⭐ 设置页刚改过的值要立刻生效（config 是就地改的，快照会过期）
     const dsh = resolveDsh()
     const overlay = ensureOverlay()
     const args = [...dsh.args, '--profile', cfg.headlessProfile || 'headless']
@@ -877,13 +1057,18 @@ export function apply(ctx, config) {
       stdio: ['ignore', 'pipe', 'pipe'],
       // ⭐ PYTHONUTF8 / PYTHONIOENCODING：Windows 上 Python 默认按 GBK 编解码，
       //    中文 / emoji 打进管道会炸（用户反馈过 UnicodeDecodeError），一律按 UTF-8 来
-      env: pyEnv(dutyEnv()),
+      // ⭐ ELECTRON_RUN_AS_NODE：**桌面版（Electron）里 spawn 出去的 node 必须带这个**，
+      //    否则它当成"再开一个 Electron 应用"、什么都不干就以 0 退出（issue #5：0.17 秒、code 0、什么都没做）
+      env: pyEnv({ ...dutyEnv(), ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}) }),
     })
     let logStart = 0
     try { logStart = statSync(logFile).size } catch { /* 第一次跑还没有日志 */ }
     activeRun = { why, pid: child.pid, startedAt: Date.now(), logStart, file: null, bvids: null }
-
-    const pick = (buf) => appendFileSync(logFile, String(buf), 'utf8')
+    // ⚠️ 2026-10-16 issue #1：`duty.log` 被别的进程占着时（EBUSY）`appendFileSync` 会抛异常 ——
+    //    而这里是 **stream 的 data 回调**，没人接 ⇒ 整个宿主被杀。⇒ 任何写日志都包 try/catch。
+    const pick = (buf) => {
+      try { appendFileSync(logFile, String(buf), 'utf8') } catch { /* 写不进去就丢，绝不能抛 */ }
+    }
     child.stdout?.on('data', pick)
     child.stderr?.on('data', pick)
     child.on('exit', (code) => {
@@ -891,10 +1076,19 @@ export function apply(ctx, config) {
       lastExitInfo = { why, code, at: Date.now(), ok: code === 0 }
       log(`刷B站结束（${why}，code=${code}）`)
       stubReportIfMissing(code)   // ⭐ 没写报告就补一份占位 —— 别让使用者什么都看不到
+      rotateLogIfBig()            // ⭐ 日志别无声地长（三天 797KB ⇒ 一年约 100MB）
+      // ⭐ 这一轮挑了几条：从今天的报告里数（上一轮挑的还在同一份文件里 ⇒ 数出来就是全天的账）
+      try {
+        const st = readJson(dutyStateFile, {})
+        const prev = st.day === dayKey() ? Number(st.picked || 0) : 0
+        const picked = countPickedToday()   // 报告是事实来源、state 只是兜底（跟闸门同一个算法）
+        if (picked > prev) { bumpState({ picked }); log(`今天挑到 ${picked} 条（上限 ${Number(cfg.perDay) || 0} 条）`) }
+      } catch (e) { log(`数挑了几条时出错（不影响这一轮）：${e?.message ?? e}`) }
       // ⭐ 发完评论之后**过一会儿再核一次**（2026-10-16 加的「评论发出后复核」）：
       //    接口回"发送成功"≠ 公开可见（新号/风控会进审核）；而"不公开"时连 @ 通知都不会推 ⇒
       //    插件会以为发了、下一轮不再发 ⇒ 一条都没到人。等 90 秒再查，避免把"还在审核"误判成"没发出去"。
-      setTimeout(() => { Promise.resolve(runVerify('round')).catch((e) => log('复核异常：' + (e?.message ?? e))) }, 90_000)
+      const verifyTimer = setTimeout(() => { Promise.resolve(runVerify('round')).catch((e) => log('复核异常：' + (e?.message ?? e))) }, 90_000)
+      verifyTimer.unref?.()   // 别为了一次复核把宿主进程的退出拖住 90 秒
     })
     child.on('error', (e) => log(`刷B站起不来：${e?.message ?? e}`))
     return { started: true, why, profile: cfg.headlessProfile, cwd, log: logFile }
@@ -949,18 +1143,21 @@ export function apply(ctx, config) {
    */
   const tick = () => {
     try {
+      refreshCfg()                    // ⭐ 定时器活得比设置页久：每一跳都重新读一遍配置
       if (!cfg.peakValley) return
       const now = new Date()
       const st = readJson(dutyStateFile, {})
       const today = dayKey(now)
-      const count = st.day === today ? Number(st.count || 0) : 0
-      if (count >= Number(cfg.perDay || 0)) return
+      // ⭐ 闸门看的是「今天已经**挑到几条**」（从今天的报告里数出来），不是「跑了几轮」
+      if (countPickedToday(now) >= Number(cfg.perDay || 0)) return
+      // ⭐ 「不写日报」那档没有报告可数 ⇒ 数不出条数就保守一点：一天只跑一轮
+      if (String(cfg.reportLevel || 'full') === 'off' && roundsToday(now) >= 1) return
       for (const k of ['noon', 'night']) {
         if (!cfg[k]) continue
         if (!inWindow(now, WINDOWS[k])) continue
         const key = `${today}:${k}`
         if (st.windows?.[key]) continue
-        bumpState({ windows: { ...(st.windows || {}), [key]: true }, lastRunAt: now.toISOString(), lastWhy: k })
+        bumpState({ windows: { ...(st.windows || {}), [key]: true }, count: roundsToday(now) + 1, lastRunAt: now.toISOString(), lastWhy: k })
         runDuty(`window:${k}`)
         return
       }
@@ -983,9 +1180,13 @@ export function apply(ctx, config) {
   }
   const readBody = (req) => new Promise((resolve) => {
     let data = ''
-    req.on('data', (c) => { data += c; if (data.length > 1_000_000) req.destroy() })
-    req.on('end', () => { try { resolve(JSON.parse(data || '{}')) } catch { resolve({}) } })
-    req.on('error', () => resolve({}))
+    let done = false
+    // ⚠️ 超过 1MB 得**先把 Promise 收掉**再掐断：只 destroy 的话它永远不 settle，
+    //    这个请求就挂在那儿（不回响应、也不释放）
+    const finish = (v) => { if (!done) { done = true; resolve(v) } }
+    req.on('data', (c) => { data += c; if (data.length > 1_000_000) { data = ''; finish({}); req.destroy() } })
+    req.on('end', () => { try { finish(JSON.parse(data || '{}')) } catch { finish({}) } })
+    req.on('error', () => finish({}))
   })
 
   const venvPython = () => process.platform === 'win32'
@@ -1008,15 +1209,18 @@ export function apply(ctx, config) {
 
   let uvOk = null
   const haveUv = async () => {
-    if (uvOk !== null) return uvOk
-    uvOk = await new Promise((resolve) => {
+    if (uvOk) return true
+    const ok = await new Promise((resolve) => {
       try {
         const c = spawn('uv', ['--version'], { windowsHide: true, stdio: 'ignore' })
         c.on('exit', (code) => resolve(code === 0))
         c.on('error', () => resolve(false))
       } catch { resolve(false) }
     })
-    return uvOk
+    // ⭐ 只缓存"有"：把"没有"也缓存住的话，这一轮里刚下好的 uv（或用户刚装上的）会被一直当成没有，
+    //    非重启 dsh 不可 ✗（调用点只有装依赖那两处，多探一次几毫秒）
+    if (ok) uvOk = true
+    return ok
   }
 
   /** 探一下某个命令在不在（用于"这台机器有没有 python"）—— 陌生人第一条坎就卡在这儿 */
@@ -1070,6 +1274,25 @@ export function apply(ctx, config) {
       ].join('\n'), 'utf8')
     }
   } catch { /* 建不了也别拦着插件加载 */ }
+
+  // ⭐ 归档目录：那一轮**被沙箱关着**，只写得了"启动前就已存在"的目录 ⇒ 宿主预建 ✓
+  //    （2026-10-16 主人要的"它看过什么"清单：报告是给人看的，归档是给检索用的 ✓）
+  const digestDir = join(stateDir, 'digest')
+  try { mkdirSync(digestDir, { recursive: true }) } catch { /* 建不了也别拦着插件加载 */ }
+
+  /**
+   * ⭐ 日志轮转（2026-10-16 量出来的：`duty.log` 三天就 797 KB、没有轮转 ⇒ 一年约 100 MB ✗）
+   * 超过 2MB 就滚成 `duty.log.1`（只留一份），别让它在 C 盘上无声地长。
+   */
+  const rotateLogIfBig = (limit = 2 * 1024 * 1024) => {
+    try {
+      if (!existsSync(logFile) || statSync(logFile).size < limit) return
+      const bak = logFile + '.1'
+      try { rmSync(bak, { force: true }) } catch { /* 删不掉就算了 */ }
+      renameSync(logFile, bak)
+      appendFileSync(logFile, `${new Date().toISOString()}  日志超过 2MB，旧的滚到 duty.log.1\n`, 'utf8')
+    } catch { /* 轮转失败不该影响跑一轮 */ }
+  }
   let installingAsr = false
 
   /** 找 uv：系统里的 → 插件家里下好的 → 自己下一份（给"两样都没有"的人）；主/转写两套安装共用 */
@@ -1169,7 +1392,10 @@ export function apply(ctx, config) {
         let code = 1
         if (uvCmd) code = await spawnLogged(uvCmd, ['pip', 'install', '--python', venvPy, '-i', mirror, '-r', reqFile])
         if (code !== 0) code = await spawnLogged(venvPy, ['-m', 'pip', 'install', '-i', mirror, '-r', reqFile])
-        if (code === 0 && existsSync(venvPy)) { saveCfg({ pythonPath: venvPy }); appendInstall(`已把 pythonPath 设为 ${venvPy}\n`) }
+        if (code === 0 && existsSync(venvPy)) {
+          await persistCfg({ pythonPath: venvPy })   // ⭐ 不然设置页里显式设过 pythonPath 的话，这里就白写了
+          appendInstall(`已把 pythonPath 设为 ${venvPy}\n`)
+        }
         appendInstall(`=== 结束（exit ${code}，venvReady=${venvReadyNow()}）===\n`)
         log(`装依赖结束：exit=${code} venvReady=${existsSync(venvPy)}`)
       } catch (e) {
@@ -1204,6 +1430,7 @@ export function apply(ctx, config) {
   let updateCache = null            // { at, latest } —— 检查更新的结果缓存
 
   const status = () => {
+    refreshCfg()
     const st = readJson(dutyStateFile, {})
     const today = dayKey()
     return {
@@ -1212,7 +1439,8 @@ export function apply(ctx, config) {
       config: cfg,
       windows: WINDOWS,
       today,
-      ranToday: st.day === today ? Number(st.count || 0) : 0,
+      ranToday: st.day === today ? Number(st.count || 0) : 0,   // 今天跑了几轮
+      pickedToday: countPickedToday(),                          // 今天挑到几条（从报告里数）
       lastRunAt: st.lastRunAt || null,
       lastExit: lastExitInfo,
       active: activeInfo(),
@@ -1238,6 +1466,7 @@ export function apply(ctx, config) {
   }
 
   const handle = async (req, res, url) => {
+    refreshCfg()
     const path = url.pathname
     if (req.method === 'GET' && path === '/api/bili-duty/status') return sendJson(res, 200, status())
 
@@ -1264,21 +1493,10 @@ export function apply(ctx, config) {
         'keywords', 'subs', 'headlessModel', 'headlessProvider', 'headlessEffort', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound']) {
         if (k in body) patch[k] = body[k]
       }
-      if ('perDay' in patch) patch.perDay = Math.max(0, Math.min(Number(patch.perDay) || 0, 50))
-      if ('frameHeight' in patch) patch.frameHeight = [480, 720, 1080].includes(Number(patch.frameHeight)) ? Number(patch.frameHeight) : 480
-      if ('frameCount' in patch) patch.frameCount = Math.max(4, Math.min(Number(patch.frameCount) || 9, 16))
-      if ('frameAudio' in patch) patch.frameAudio = ['auto', 'always'].includes(String(patch.frameAudio)) ? String(patch.frameAudio) : 'auto'
-      if ('headlessEffort' in patch) patch.headlessEffort = ['', 'low', 'medium', 'high', 'max'].includes(String(patch.headlessEffort ?? '')) ? String(patch.headlessEffort ?? '') : ''
-      if ('headlessModel' in patch) patch.headlessModel = String(patch.headlessModel ?? '').trim().slice(0, 60)
-      if ('headlessProvider' in patch) patch.headlessProvider = String(patch.headlessProvider ?? '').trim().slice(0, 40) || 'deepseek-official'
-      if ('subs' in patch) patch.subs = (Array.isArray(patch.subs) ? patch.subs : [])
-        .map((x) => String(x ?? '').trim()).filter(Boolean).slice(0, 30)
-      if ('reportLevel' in patch) patch.reportLevel = ['full', 'brief', 'off'].includes(String(patch.reportLevel)) ? String(patch.reportLevel) : 'full'
-      if ('replyToComments' in patch) patch.replyToComments = Boolean(patch.replyToComments)
-      if ('replyPerRound' in patch) patch.replyPerRound = Math.max(1, Math.min(Number(patch.replyPerRound) || 1, 10))
-      saveCfg(patch)
-      log(`设置已更新：${JSON.stringify(patch)}`)
-      return sendJson(res, 200, { ok: true, config: cfg })
+      // ⭐ 范围钳制 + 两份都写（config.json / DSH 原生设置页），统一走 persistCfg —— 见文件上方
+      const { clean, host } = await persistCfg(patch)
+      log(`设置已更新：${JSON.stringify(clean)}（DSH 那边${host.ok ? '已同步' : '没写成：' + host.error}）`)
+      return sendJson(res, 200, { ok: true, config: cfg, host })
     }
 
     if (req.method === 'POST' && path === '/api/bili-duty/watch') {

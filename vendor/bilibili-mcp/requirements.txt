@@ -1,4 +1,4 @@
-# dsh-bili-duty 用的 Python MCP 依赖
+# dsh-bili-scroll 用的 Python MCP 依赖
 # （基座是 AGI_Ananas 的 bilibili-mcp，MIT；这里只按我们的实测改了版本约束）
 bilibili-api-python>=17.4.1,<18
 aiohttp>=3.9.0

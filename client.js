@@ -32,13 +32,20 @@ window.__ModuleLoader__.load({
     const h = React.createElement
 
     const API = '/api/bili-duty'
-    const jget = async (p) => (await fetch(API + p, { credentials: 'same-origin' })).json()
-    const jpost = async (p, body) => (await fetch(API + p, {
+    /* ⚠️ 原来 jget/jpost 直接 .json()、从不看 res.ok ⇒ HTTP 500 的 {ok:false,error}
+     *    会被调用方当成「已保存 / 成功」，绿色提示把故障盖掉。（2026-10-16 审查修） */
+    const asJson = async (res) => {
+      if (res.ok) return res.json()
+      const why = res.status === 401 ? '（未登录 / 没权限）' : res.status === 403 ? '（被宿主拦了）' : ''
+      throw new Error('HTTP ' + res.status + why)
+    }
+    const jget = async (p) => asJson(await fetch(API + p, { credentials: 'same-origin' }))
+    const jpost = async (p, body) => asJson(await fetch(API + p, {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body || {}),
-    })).json()
+    }))
 
     const CSS = `
 [data-bd-page]{display:flex;flex-direction:column;gap:18px;padding:2px 2px 8px;max-width:640px;}
@@ -157,6 +164,14 @@ window.__ModuleLoader__.load({
       const [report, setReport] = React.useState(null)        // 非 null = 报告已展开   // 顶部那行状态（跑一轮/装依赖的反馈原来在最底下，看不见）
       const [loginState, setLoginState] = React.useState('')
       const [loginTone, setLoginTone] = React.useState('')
+      /* ⚠️ 扫码轮询的 timer 必须能停：切走设置页后还在跑的话会在已卸载的组件上 setState，
+       *    重复点「扫码登录」还会叠出第二个 timer。（2026-10-16 审查修） */
+      const loginTimer = React.useRef(null)
+      const alive = React.useRef(true)
+      React.useEffect(() => () => {
+        alive.current = false
+        if (loginTimer.current) { clearInterval(loginTimer.current); loginTimer.current = null }
+      }, [])
 
       const cfg = st?.config
       React.useEffect(() => {
@@ -189,7 +204,9 @@ window.__ModuleLoader__.load({
         try {
           const r = await jpost('/config', p)
           if (r?.config) setSt((old) => ({ ...old, config: r.config }))
-          say(what ? `${what}：已保存` : '已保存', 'good')
+          // ⭐ DSH 原生设置页里显式设过的键由宿主说了算 ⇒ 我们这份也得写进去；写失败要说出来，别假装"已保存"
+          if (r?.host && r.host.ok === false) say(`${what || '设置'}：插件自己那份存了，但 DSH 设置页那份没写进去（${r.host.error}）`, 'warn')
+          else say(what ? `${what}：已保存` : '已保存', 'good')
         } catch (e) { say(String(e?.message ?? e), 'warn') }
         finally { setBusy('') }
       }
@@ -240,8 +257,8 @@ window.__ModuleLoader__.load({
         setBusy('upgrade')
         try {
           const r = await jpost('/upgrade', {})
-          say((r && r.hint) || '正在升级', 'good')
-          say('升级过程写在下面的「主依赖的日志」里 —— 完了记得重启一次 dsh（不重启还是旧版）', 'warn')
+          // 原来这两句分两次 say，第二句把服务端的 hint 冲掉了 —— 合成一句。（2026-10-16 审查修）
+          say(((r && r.hint) || '正在升级') + ' —— 升级过程写在下面的「主依赖的日志」里；完了记得重启一次 dsh（不重启还是旧版）', 'warn')
         } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
       }
 
@@ -309,21 +326,31 @@ window.__ModuleLoader__.load({
           setLogin({ key: r.key, qr: r.qr })
           if (!r.qr) { setLoginTone('warn'); setLoginState('没画出二维码 —— 先点上面的「重装依赖」（venv 里要有 qrcode）') }
           else setLoginState('用手机 B站 扫这张码')
+          if (loginTimer.current) { clearInterval(loginTimer.current); loginTimer.current = null }   // 重复点：先把上一轮停掉
           let n = 0
+          const stop = () => { clearInterval(timer); if (loginTimer.current === timer) loginTimer.current = null }
           const timer = setInterval(async () => {
+            if (!alive.current) { stop(); return }        // 已经切走设置页了：别再问、别再 setState
             n += 1
             try {
               const p = await jpost('/login/poll', { key: r.key })
               if (p?.state === 'ok') {
-                clearInterval(timer); setLogin(null)
+                stop(); setLogin(null)
                 setLoginTone('good'); setLoginState('登录成功')
                 setSt((old) => ({ ...old, loggedIn: true }))
               } else if (p?.state === 'scanned') { setLoginTone(''); setLoginState('扫到了，请在手机上确认') }
-              else if (p?.state === 'expired') { clearInterval(timer); setLogin(null); setLoginTone('warn'); setLoginState('二维码过期了，再点一次「扫码登录」') }
+              else if (p?.state === 'expired') { stop(); setLogin(null); setLoginTone('warn'); setLoginState('二维码过期了，再点一次「扫码登录」') }
+              // ⚠️ 扫码成功但响应里没有 SESSDATA 时服务端回 state='unknown'：原来没这个分支
+              //    ⇒ 界面一直显示「等扫码…」，用户白等 3 分钟才超时。（2026-10-16 审查修）
+              else if (p?.state === 'unknown') {
+                stop(); setLogin(null); setLoginTone('warn')
+                setLoginState('没登上：' + (p?.message || '响应里没有 SESSDATA —— 再点一次「扫码登录」'))
+              }
               else { setLoginTone(''); setLoginState('等扫码…') }
             } catch { /* 抖动就下次再问 */ }
-            if (n > 90) { clearInterval(timer); setLogin(null); setLoginTone('warn'); setLoginState('超时了，再点一次「扫码登录」') }
+            if (n > 90) { stop(); setLogin(null); setLoginTone('warn'); setLoginState('超时了，再点一次「扫码登录」') }
           }, 2000)
+          loginTimer.current = timer
         } catch (e) { setLoginTone('warn'); setLoginState(String(e?.message ?? e)) }
         finally { setBusy('') }
       }
@@ -412,7 +439,7 @@ window.__ModuleLoader__.load({
 
         /* ── 今天 ── */
         h('div', { 'data-bd-row': '' },
-          h('span', { 'data-bd-badge': '' }, `今天已挑 ${st.ranToday} / ${cfg.perDay} 条`),
+          h('span', { 'data-bd-badge': '' }, `今天已挑 ${st.pickedToday ?? st.ranToday ?? 0} / ${cfg.perDay} 条`),
           h('span', { 'data-bd-badge': '' }, '环境' + (st.venvReady ? '已就绪' : (st.installing ? '正在装' : '未装'))),
           h('span', { 'data-bd-badge': '' }, st.loggedIn ? 'B站已登录' : 'B站未登录'),
             h('span', { 'data-bd-badge': '' }, 'v' + (st.version || '?')),
@@ -542,12 +569,13 @@ window.__ModuleLoader__.load({
             h('div', { 'data-bd-row': '' },
               h('div', { 'data-bd-grow': '' },
                 h('div', { 'data-bd-label': '' }, '每轮最多发几条评论'),
-                h('div', { 'data-bd-note': '' }, '每条评论里 @ 一次下面那个人')),
+                h('div', { 'data-bd-note': '' }, '每条评论里 @ 一次下面那个人；填 0 = 这一轮不发评论')),
               h('input', {
-                'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 1, max: 20,
+                'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 0, max: 20,
                 value: perRound ?? '',
                 onChange: (e) => setPerRound(e.target.value),
-                onBlur: () => { const n = Math.max(1, Math.min(Number(perRound) || 1, 20)); setPerRound(String(n)); patch({ commentPerRound: n }, '每轮几条评论') },
+                // ⭐ 0 是合法值（= 这一轮不发评论）；范围与 index.js 的 clampPatch 一致（0–20）
+                onBlur: () => { const n = Math.max(0, Math.min(Number(perRound) || 0, 20)); setPerRound(String(n)); patch({ commentPerRound: n }, '每轮几条评论') },
               })),
             h('div', { 'data-bd-label': '' }, '要 @ 谁（B站 昵称）'),
             h('input', {
@@ -682,9 +710,14 @@ window.__ModuleLoader__.load({
           }),
           h('div', { 'data-bd-label': '' }, '工作区（它按这里的 AGENTS.md 认设定）'),
           h('input', {
-            'data-bd-input': '', value: ws ?? '', placeholder: '留空 = dsh 自己的工作目录',
+            'data-bd-input': '', value: ws ?? '',
+            placeholder: '填你自己的工作区路径（留空 = 不读人设，按中性说话）',
             onChange: (e) => setWs(e.target.value),
           }),
+          h('div', { 'data-bd-note': '' },
+            '⭐ 想让它按你的设定说话，这里要填你自己平时用的那个工作区（放 AGENTS.md 的那个目录）；',
+            h('br'),
+            '留空不等于"用你的工作区" —— 那是不读设定、按中性说话（以前会去猜 dsh 进程自己的目录，容易读错人设）。'),
           h('div', { 'data-bd-label': '' }, '日报写多细'),
           h('select', {
             'data-bd-input': '', value: rl ?? 'full',
@@ -745,10 +778,10 @@ window.__ModuleLoader__.load({
       inject: ['slots'],
       apply(ctx) {
         const style = document.createElement('style')
-        style.setAttribute('data-plugin-css', 'dsh-bili-duty')
+        style.setAttribute('data-plugin-css', 'dsh-bili-scroll')
         style.textContent = CSS
         document.head.appendChild(style)
-        ctx.effect(() => () => style.remove(), 'dsh-bili-duty: 设置页样式')
+        ctx.effect(() => () => style.remove(), 'dsh-bili-scroll: 设置页样式')
 
         // ⭐ 进「设置」：label 就是左侧导航里那一项（抄 dsh-meme 的写法）
         const slots = (typeof ctx.get === 'function' ? ctx.get('slots') : undefined) || ctx.slots

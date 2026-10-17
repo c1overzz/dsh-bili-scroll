@@ -1,6 +1,6 @@
 {
   "name": "dsh-bili-scroll",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "DSH 插件：每天替你刷一轮 B站 —— 读字幕挑出值得的、写一份日报，值得的就 @ 你",
   "keywords": [
     "dsh",
@@ -30,6 +30,7 @@
     "vendor",
     "README.md",
     "AGENTS.md",
+    "selfcheck.mjs",
     "LICENSE"
   ],
   "engines": {
@@ -37,7 +38,6 @@
     "node": ">=22"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-llm": "*",
     "@deepseek-ai/dsh-tools": "*",
     "@deepseek-ai/schemastery": "*"
   },
@@ -45,9 +45,6 @@
     "@deepseek-ai/schemastery": "^3.18.1"
   },
   "peerDependenciesMeta": {
-    "@deepseek-ai/dsh-llm": {
-      "optional": true
-    },
     "@deepseek-ai/dsh-tools": {
       "optional": true
     },
