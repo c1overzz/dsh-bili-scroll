@@ -28,6 +28,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { McpClient } from './lib/mcp.mjs'
 import { verifyRecent, appendVerifyToReport } from './lib/verify.mjs'
+import { parseReport } from './lib/report.mjs'
 import { WINDOWS, stateDirOf, readJson, writeJson, ensureHomeFiles, inWindow, dayKey } from './lib/state.mjs'
 import { loginStart, loginPoll, saveCredential, renderQrPng } from './lib/login.mjs'
 import { ensureUv } from './lib/uvfetch.mjs'
@@ -57,9 +58,9 @@ export const Config = !z ? undefined : z.object({
   dmMode: z.string().default('off').extra('volatile', true),
   /** ⭐ 私信发给谁的 UID（数字）。要在 dmMode 不是 off 时填 */
   dmUid: z.natural().default(0).extra('volatile', true),
-  /** ⭐ 楼中楼回复：开=只在「明确是 AI / 机器人」的账号下面回（避免打扰真人）；关=永远只发自己的顶层评论 */
+  /** ⭐ 楼中楼回复：开=只在「明确是 AI / 机器人」的账号下面回；关=永远只发自己的顶层评论，绝不回复任何人 */
   aiReply: z.boolean().default(true).extra('volatile', true),
-  /** ⭐ 自定义的 AI 识别特征词（**补充**内置那批，不是替换 —— 内置一直有效；留空 = 只用内置） */
+  /** ⭐ 自定义的 AI 识别特征词（**补充**，不是替换 —— 内置那批一直有效；留空 = 只用内置） */
   aiKeywords: z.array(z.string()).default([]).extra('volatile', true),
   /** 本地转写（没字幕的视频用 Whisper 转；默认关，要下模型） */
   transcribe: z.boolean().default(false).extra('volatile', true),
@@ -69,7 +70,7 @@ export const Config = !z ? undefined : z.object({
   commentPerRound: z.natural().default(1).extra('volatile', true),
   /** ⭐ 要 @ 谁（B站 昵称，单个）；**留空 = 不发评论** —— 保留是为了向后兼容，新配置请用 mentionNames */
   mentionName: z.string().default('').extra('volatile', true),
-  /** ⭐⭐ 要 @ 的**名单**（一行一个）—— 多个名字**按顺序全 @ 上**；给了它就优先于上面那个单名字 */
+  /** ⭐⭐ 要 @ 谁（**一个列表**，按顺序 @ 全部）；非空时**优先于** mentionName；留空 = 不发评论 */
   mentionNames: z.array(z.string()).default([]).extra('volatile', true),
   /** 关注关键词（空了用章程里默认那几组） */
   keywords: z.array(z.string()).default([]).extra('volatile', true),
@@ -177,29 +178,25 @@ export function apply(ctx, config) {
     return out
   }
   const cfg = normalize(readJson(cfgFile, {}), normalize(config, { ...DEFAULTS }))
-  /** ⭐ 要 @ 的名单：mentionNames 优先，回落到老的单名字 mentionName（向后兼容） */
+  /** ⭐ 要 @ 的名单：mentionNames 优先，回落到老的 mentionName（向后兼容） */
   const mentionList = (c = cfg) => {
     const list = Array.isArray(c?.mentionNames) ? c.mentionNames.map((s) => String(s).trim()).filter(Boolean) : []
     if (list.length) return list
     const one = String(c?.mentionName || '').trim()
     return one ? [one] : []
   }
-  /**
-   * ⭐ 拼给那一轮看的 @ 标签串：`@A @B`。
-   * 🔴 **每个 @ 后面都必须跟一个空格** —— B站 是**靠空格判定 @ 到哪儿结束**的，
-   *    连写成 `@A@B` 的话**一个都 @ 不出来**（等于白 @）✗
-   */
+  /** 要 @ 的那串标签：`@A @B`（⚠️ 每个 @ 后面都带一个空格，B站 才认得出这个 @） */
   const mentionTag = (c = cfg) => mentionList(c).map((m) => `@${m}`).join(' ')
+
   /**
-   * 存设置。
-   * ⭐ 返回值 = **这次没生效的字段**（2026-10-17 加）。
-   *   起因：`normalize(patch, cfg)` 是拿**当前** cfg 的键集去过滤的 ⇒
-   *   字段名拼错、或者"浏览器半已经是新版、宿主半还是旧版"时前端新发的字段，
-   *   都会被**静默丢掉** —— 界面显示"已保存"，实际一个字段都没改，用户完全看不出来 ✗。
-   *   ⇒ 把丢掉的字段**交回给调用方**，让它明说"这几个没生效"。
+   * ⭐ 写配置，并把「**没写进去的键**」报出来（2026-10-17 加）。
+   * 🔴 起因：`normalize(patch, cfg)` 是拿**当前 cfg 的键集**过滤的 ——
+   *    插件加了新字段但**服务端那半没重载**时，设置页传上来的新字段会被**静默丢掉**，
+   *    用户看到的就是"点了保存、re-enter 又变回默认"，完全无从排查 ✗。
+   *    所以这里返回 notApplied，由调用方（HTTP 接口 / bili_config）报给使用者 ✓。
    */
   const saveCfg = (patch) => {
-    const want = patch && typeof patch === 'object' && !Array.isArray(patch) ? Object.keys(patch) : []
+    const want = Object.keys(patch || {})
     Object.assign(cfg, normalize(patch, cfg))
     writeJson(cfgFile, cfg)
     return want.filter((k) => !(k in cfg))
@@ -340,14 +337,14 @@ export function apply(ctx, config) {
       force: { type: 'boolean', description: '本人当场让你发的，传 true 越过"自动评论关着"的闸' },
     },
     async execute(args) {
-      // dmMode==='only' 时本轮根本不该发公开评论 —— 在工具层也一并挡掉（除非当场 force）
+      // dmMode==='only' 时本轮根本不该发公开评论 —— 在工具层也一并挡掉（除非本人当场 force）
       const commentOn = Boolean(cfg.autoComment && mentionList().length && cfg.dmMode !== 'only')
       if (!commentOn && !args.force) {
         return {
           ok: false,
           blocked: true,
           hint: cfg.dmMode === 'only'
-            ? '现在是「只私信」模式（dmMode=only）—— 规定不发公开评论，改成用 bili_send_message 私信。确实要发时传 force: true。'
+            ? '现在是「只私信」模式（dmMode=only）—— 规定不发公开评论，改成用 bili_send_message 私信。本人当场让你发时传 force: true。'
             : '要发评论得同时满足两条：设置里开着「自动评论并 @ 你」、并且填了「要 @ 谁」。或者本人当场让你发时传 force: true。',
         }
       }
@@ -378,6 +375,7 @@ export function apply(ctx, config) {
         }])),
         peakValley: cfg.peakValley,
         autoComment: cfg.autoComment,
+        // ⭐ 实际会 @ 的名单（mentionNames 优先，回落到老的 mentionName）
         mentionNames: mentionList(),
         mentionTag: mentionTag(),
         dmMode: cfg.dmMode,
@@ -392,13 +390,9 @@ export function apply(ctx, config) {
     },
   })
 
-  /* ⭐⭐ 报账工具：让「那一轮」把"本轮实际挑到几条"告诉插件。
-   * 没有它的话 state.json 里的 count 永远是 0 ⇒ 徽章永远是「今天已挑 0 / N」，
-   * 而且定时器那句 `if (count >= perDay) return` 永远不成立 ⇒ **每日上限形同虚设** ✗
-   *
-   * ⚠️ 注意：跑那一轮的子进程**根本不加载本插件**（它只挂 Python MCP），
-   *    所以这个工具在 vendor/bilibili-mcp/mcp_server.py 里**也有一份同名的** ——
-   *    那一轮用的是 MCP 那份；这份是给宿主 / 设置页这边用的。 */
+  // ⭐⭐ 报账工具：让「那一轮」把"本轮实际挑到几条"告诉插件（2026-10-17 加）
+  //    没有它的话 state.json 里的 count 永远是 0 ⇒ 界面徽章永远是「今天已挑 0 / N」，
+  //    而且定时器那句 `if (count >= perDay) return` 永远不成立 ⇒ **每日上限形同虚设** ✗
   tool({
     name: 'bili_note_picks',
     description: '⭐ 报账：把「**这一轮**实际挑到几条」告诉插件，它会累加进当天的额度（今天已挑 X / 上限 Y）。\n'
@@ -472,26 +466,18 @@ export function apply(ctx, config) {
     name: 'bili_config',
     description: '读 / 改「刷B站」的设置。不给 `patch` 就是读；给了就改（只认 schema 里的字段）。\n'
       + '例：`{"perDay":5,"peakValley":true,"noon":true,"night":true,"autoComment":false,"transcribe":false,"keywords":["DeepSeek Harness"]}`；'
-      + '私信投递：`{"dmMode":"only","dmUid":12345678}`（dmMode = off / only / both）；'
+      + '私信投递：`{"dmMode":"only","dmUid":10967510}`（dmMode = off / only / both）；'
       + '楼中楼开关 `{"aiReply":false}`；自定义 AI 识别词 `{"aiKeywords":["XX助手","YBot"]}`（**补充**内置那批，不是替换）；'
       + '要 @ 的名单 `{"mentionNames":["某人","另一个人"]}`（按顺序全部 @ 上；老的单个 `mentionName` 仍然认，但名单优先）。',
     parameters: { patch: { type: 'object', additionalProperties: true, description: '要改的字段（可省）' } },
     async execute(args) {
-      const notApplied = (args?.patch && typeof args.patch === 'object' && !Array.isArray(args.patch))
-        ? saveCfg(args.patch)
-        : []
+      let notApplied = []
+      if (args?.patch && typeof args.patch === 'object' && !Array.isArray(args.patch)) notApplied = saveCfg(args.patch)
       return {
-        ok: true,
-        config: cfg,
-        windows: WINDOWS,
-        home: stateDir,
-        venvReady: venvReadyNow(),
-        // ⭐ 只报"真丢了"的：字段名拼错，或者这个字段还没被当前这版代码认识
+        ok: true, config: cfg, windows: WINDOWS, home: stateDir, venvReady: venvReadyNow(),
+        // ⭐ 报出"没写进去的键"：多半是字段名拼错、或插件加了新字段但**服务端那半没重载**（重启 dsh 即可）
         ...(notApplied.length
-          ? {
-            notApplied,
-            note: `⚠️ 这些字段**没生效**：${notApplied.join('、')} —— 多半是插件没重载（重启一次 dsh 即可），也可能是字段名拼错了`,
-          }
+          ? { notApplied, note: `⚠️ 这些字段没生效：${notApplied.join(', ')} —— 检查拼写；如果确认没拼错，多半是插件没重载（重启一次 dsh 即可）` }
           : {}),
       }
     },
@@ -509,14 +495,12 @@ export function apply(ctx, config) {
   }
 
   /**
-   * ⭐⭐ 记「今天挑到几条」—— 修的是**一个做了一半的每日额度**。
+   * ⭐⭐ 记「今天挑到几条」（2026-10-17 加固，**修的是上游一个做了一半的每日额度**）。
    * 🔴 起因：`state.json` 里的 `count` 本来是"今天挑了几条"的计数器 ——
-   *    设置页的徽章读它（「今天已挑 X / 上限」）、谷时定时器也靠它拦每日上限
-   *    （`if (count >= perDay) return`），但**全代码里从来没有任何地方给 `count` 加过**
-   *    （唯一的 `bumpState` 只写 windows / lastRunAt / lastWhy）⇒
-   *    徽章**永远是 0**，而且**每日上限根本没在拦** ✗。
-   *    根治要靠"那一轮把本轮挑到几条报回来"，所以配了 `bili_note_picks` 工具
-   *    （MCP 侧也要有，见 vendor/bilibili-mcp/mcp_server.py）+ prompt 里的收尾报账要求。
+   *    UI 徽章读它（「今天已挑 X / 上限」）、定时器也靠它拦每日上限（`if (count >= perDay) return`），
+   *    但**全代码里从来没有任何地方给 `count` 加过**（唯一的 `bumpState` 只写 windows / lastRunAt / lastWhy）
+   *    ⇒ 徽章**永远是 0**，而且**每日上限根本没在拦** ✗。
+   *    根治要靠"那一轮把本轮挑到几条报回来"，所以配了 `bili_note_picks` 工具 + prompt 里的收尾报账要求。
    */
   const picksToday = () => {
     const st = readJson(dutyStateFile, {})
@@ -595,13 +579,13 @@ export function apply(ctx, config) {
     } catch { /* 读不到就算了，别因此跑不成 */ }
     // ⭐ 投递方式（2026-10-17 加）：dmMode = off（只评论）· only（只私信）· both（都发）
     //    commentOn 是"这一轮到底能不能发公开评论"的唯一判据（工具层的闸用的是同一套逻辑）
-    // ⭐ 要 @ 的名单（mentionNames 优先，回落到老的单名字 mentionName）
+    // ⭐ 要 @ 的名单（mentionNames 优先，回落到老的 mentionName）
     const mentions = mentionList()
     // ⭐ 评论开头要原样写的那串：`@A @B`；**结尾必须再跟一个空格**，B站 才认得出这些 @
     const mentionTagText = mentions.map((m) => `@${m}`).join(' ')
     const commentOn = Boolean(cfg.autoComment && mentions.length && cfg.dmMode !== 'only')
     const dmOn = Boolean(cfg.dmMode !== 'off' && Number(cfg.dmUid) > 0)
-    // 楼中楼开关（默认开 = 只在识别为 AI / 机器人的账号下面回；关了 = 永远只发自己的顶层评论）
+    // 楼中楼开关（默认开 = 只在 AI 号下面回；关了 = 永远只发自己的顶层评论）
     const aiReplyOn = cfg.aiReply !== false
     // 使用者自定义的 AI 识别词 —— **补充**内置那批，不是替换
     const aiKw = Array.isArray(cfg.aiKeywords) ? cfg.aiKeywords.map((x) => String(x).trim()).filter(Boolean) : []
@@ -611,6 +595,16 @@ export function apply(ctx, config) {
     const left = Math.max(0, cap - picked)
     return `你是这个账号的 B站 助手。`
       + `下面是使用者的设定（如果有）—— **按它来**，别用你默认那套人格。`
+      + `⭐ 语气（照章程里「语气：可爱，但不傻」那节来，**报告和评论都算**）：`
+      + `**轻快、可爱、会用可爱的颜文字，但专业劲儿不能丢、别卖蠢** —— `
+      + `一段最多一个颜文字、整篇 3~4 个封顶；写到失败 / 风控 / 账号出事这类话题时把颜文字收起来；`
+      + `别演成"鱼言鱼语"（自称本鱼 / 本鲸、管人叫主人那套）；`
+      + `⭐ 评论的开场要有"可爱 + 活泼"的调子（使用者 2026-10-17 审过的样例，照这个语感来、别逐字抄）：`
+      + `楼中楼 → 「${mentionTagText || '@TA'} 嘿嘿，顺着这条我再接一句～」/「${mentionTagText || '@TA'} 诶嘿，举手补充一点点！」；`
+      + `顶层 → 「${mentionTagText || '@TA'} 挖到宝啦！这期有个跟我们超对口的实测～」/「${mentionTagText || '@TA'} 报告！今天挖到一期好料」/「${mentionTagText || '@TA'} 发现一条好东西，先给你占个座～」。`
+      + `⚠️ **每条换着说、别老用同一句**（像机器人刷屏，也吃风控）；**别再用「补一句：」这种正经起手**；`
+      + `口癖可用「挖到宝啦 / 诶 / 哇 / 报告！/ 说到点子上了 / 对的对的」，句尾用「～」收；`
+      + `人称偶尔用「我」「咱」就行，**不许给自己起名，也不许管人叫主人**。`
       + ownerDoc
       + `然后读章程 ${duty}，按里面的要求刷一轮 B站，`
       + (cfg.reportLevel === 'brief'
@@ -653,6 +647,7 @@ export function apply(ctx, config) {
           + `490 字那条能发出去、再长就被接口拒（报 **code 21007**）✗。`
           + `所以**一条私信务必控制在 500 字以内、最多塞 4~5 条** —— 宁可少放一条，也别整条被拒；`
           + `⚠️ **被拒了就精简一次重发**（删理由、砍条目），**别原样无脑重试** ✗。`
+          + `语气照章程「语气」那节来（可爱 + 专业、颜文字最多 1 个）。`
           + `🔴🔴 **私信是写给「人」看的，必须是干净的人话** —— **不许出现任何设置名 / 内部术语 / 台账口径** ✗：`
           + `dmMode、only、aiReply、判据、白名单、prompt、token、复核 这类词，**一个都不许出现在私信正文里**；`
           + `**更不许写「公开评论一条没发 / 楼中楼跳过」这种内部机制说明** ✗`
@@ -665,13 +660,11 @@ export function apply(ctx, config) {
         : '')
       + (commentOn
         ? (aiReplyOn
-          ? `⭐⭐ **只在「明确是 AI / 机器人」的账号下面楼中楼**（由设置里的「在 AI 号下面楼中楼回复」开关控制，默认开）。`
-            + `为什么有这条：**真人看到陌生人在自己的评论下面回复会觉得被打扰**，而 AI / 机器人号之间互相呼应没这个问题`
-            + ` ⇒ 所以**只认 AI，绝不碰真人**。先用 bili_comments 看这条视频的热门评论（会返回 user / sign / mid / level），`
-            + `判断说话的是不是 AI（口径见章程那一节），再三选一：`
-            + `① **明确是 AI / 机器人账号**、**且它已经把"值得"的那个点说出来过** ⇒ **不要另发新评论**，`
-            + `改成**在它那条评论下面回一条楼中楼**（bili_reply 带上它的 rpid），正文开头照样是「${mentionTagText} 」（**注意结尾那个空格**）；`
-            + `⭐ **只呼应 / 补充，不许抢功、不许贬低**；`
+          ? `⭐⭐「只在明确是 AI / 机器人的账号下面楼中楼」—— **绝不碰真人**（使用者定的策略，每次发评论前都要走这一步）：`
+            + `先用 bili_comments 看这条视频的热门评论，**并判断说话的是不是 AI**（现在会返回 user / sign / mid / level），然后三选一：`
+            + `① **明确是 AI / 机器人账号**（大肥鱼 / 鲸鱼娘那种：昵称或签名里有 AI 字样，或正文是"本鱼 / 本鲸 / 人家 + 主人 + 插件 / 判据 / 一轮 / 替我刷"那套鱼言鱼语）`
+            + `、**且它已经把"值得"的那个点说出来过** ⇒ **不要另发新评论**，改成**在它那条评论下面回一条楼中楼**`
+            + `（bili_reply 带上它的 rpid），正文开头照样是「${mentionTagText} 」（**注意结尾那个空格**）；⭐ **只呼应 / 补充，不许抢功、不许贬低**；`
             + `② **其它一切情况**（没人说过 / 说了的是真人 / 拿不准）⇒ **发自己的新评论（顶层）**，开头写「${mentionTagText} 」（**带结尾空格**）。`
             + (aiKw.length
               ? `⭐ 使用者**另外自定义**了这些 AI 识别特征（⚠️ **内置那批照常有效，这批只是补充**）：`
@@ -681,7 +674,7 @@ export function apply(ctx, config) {
             + `⚠️ 不许硬凑"他是 AI"的证据，判断只用 bili_comments 已返回的字段、别为此多花工具调用；`
             + `⚠️ 同一个视频只留一条（新评论 or 楼中楼，二选一）；⚠️ 走楼中楼时判重表里**同时记**自己那条的 rpid 和被回复的根评论 rpid；`
             + `⚠️ 评论区取不到就当"没人说过"、按 ② 发，别卡住。`
-          : `⚠️ **楼中楼回复：关着** —— **不许在任何人的评论下面回复**，`
+          : `⚠️ **楼中楼回复：关着**（使用者关的）—— **不许在任何人的评论下面回复**，`
             + `不管对方是不是 AI、有没有先说过这个点，**一律只发自己的顶层评论**，开头写「${mentionTagText} 」（**带结尾空格**）；`
             + `评论区里有没有 AI 号都跟你无关，**别为此去翻评论区**；`
             + `⚠️ 同一个视频只留一条评论（就是你自己那条顶层）✓。`)
@@ -773,6 +766,82 @@ export function apply(ctx, config) {
     } catch (e) { log(`补占位报告失败：${e?.message ?? e}`) }
   }
 
+  /* ─────────────── 调试状态（设置页「调试」那一栏用）───────────────
+   * ⚠️ 为什么得宿主自己记：`runDuty` 是**发起就不等**的（spawn 完立刻 return），
+   *    不把 child 存下来的话，界面根本无从知道"现在到底跑没跑"、跑了多久 ✗
+   */
+  const progressFile = join(stateDir, 'progress.jsonl')
+  let dutyChild = null
+  let dutyStartedAt = null
+  let dutyWhy = ''
+  let dutyLastExit = null
+
+  /** 往进度流里追一条"这一轮开始了"的分隔标记（前端按它给进度分段） */
+  const markRoundStart = (why) => {
+    try {
+      appendFileSync(progressFile, JSON.stringify({
+        ts: Date.now() / 1000,
+        at: new Date().toTimeString().slice(0, 8),
+        tool: '__round__', phase: 'start', label: `开始跑一轮（${why}）`, why,
+      }) + '\n', 'utf8')
+    } catch { /* 写不进去也不该影响跑这一轮 */ }
+  }
+
+  /** 读文件的尾巴（掐掉可能被截断的那半行） */
+  const tailOf = (file, tailBytes) => {
+    try {
+      const st = statSync(file)
+      const start = Math.max(0, st.size - tailBytes)
+      let txt = readFileSync(file, 'utf8').slice(start)
+      if (start > 0) { const nl = txt.indexOf('\n'); txt = nl >= 0 ? txt.slice(nl + 1) : '' }
+      return txt
+    } catch { return '' }
+  }
+
+  /** 进度流（MCP 那边一个工具调用写两行：start / ok|fail|error） */
+  const readProgress = (keep = 240) => {
+    const txt = tailOf(progressFile, 400_000)
+    const out = []
+    for (const ln of txt.split('\n')) {
+      if (!ln.trim()) continue
+      try { out.push(JSON.parse(ln)) } catch { /* 半行/坏行跳过 */ }
+    }
+    return out.slice(-keep)
+  }
+
+  /** duty.log 里的"关键行" —— 那 1MB transcript 人根本读不动，只挑阶段与报错出来 */
+  // ⚠️ 那 1.2 万行里大半是模型自己的 transcript（连章程正文都在里面），所以关键词得挑准：
+  //    · 裸的「失败 / 超时」会被报告正文里的「失败两次就记为跳过」之类误伤 ⇒ 要求带上下文
+  //    · 真日志里接口报错长这样：`错误代码：-650，信息：用户等级太低。` ⇒ 单独认一条
+  const KEY_LINE = /刷B站(开跑|结束|起不来)|评论复核(开始|结束)|Traceback|Uncaught|Unhandled|错误代码|Error:|Exception|code=[0-9]|失败[（(：:]|请求超时|连接超时/
+  const KEY_BAD = /Traceback|Uncaught|Unhandled|错误代码|Error:|Exception|起不来|失败[（(：:]|请求超时|连接超时|code=[1-9]/
+  const readKeyLines = (keep = 80) => {
+    const out = []
+    for (const ln of tailOf(logFile, 600_000).split('\n')) {
+      const t = ln.trim()
+      if (!t || !KEY_LINE.test(t)) continue
+      out.push({ text: t.slice(0, 320), bad: KEY_BAD.test(t) })
+    }
+    return out.slice(-keep)
+  }
+
+  const debugInfo = () => {
+    const running = Boolean(dutyChild)
+    let stats = null
+    try {
+      const p = join(outDir, dayKey() + '.md')
+      if (existsSync(p)) stats = parseReport(readFileSync(p, 'utf8')).stats
+    } catch { /* 报告还没有/读不动都不算调试失败 */ }
+    return {
+      ok: true, running, why: dutyWhy,
+      startedAt: dutyStartedAt, elapsedMs: dutyStartedAt ? Date.now() - dutyStartedAt : 0,
+      lastExit: dutyLastExit, today: dayKey(),
+      progress: readProgress(), keyLines: readKeyLines(),
+      logTail: tailOf(logFile, 6000), logFile, progressFile,
+      stats,
+    }
+  }
+
   const runDuty = (why = 'window') => {
    try {
     const dsh = resolveDsh()
@@ -799,7 +868,14 @@ export function apply(ctx, config) {
     const pick = (buf) => appendFileSync(logFile, String(buf), 'utf8')
     child.stdout?.on('data', pick)
     child.stderr?.on('data', pick)
+    // ⭐ 调试页要看到"正在跑"：把 child / 开始时间 / 为什么跑 都留一份
+    dutyChild = child
+    dutyStartedAt = Date.now()
+    dutyWhy = why
+    markRoundStart(why)
     child.on('exit', (code) => {
+      if (dutyChild === child) dutyChild = null          // 只有"当前这一轮"才清，避免连跑时互相顶掉
+      dutyLastExit = { code, at: Date.now(), why }
       log(`刷B站结束（${why}，code=${code}）`)
       stubReportIfMissing(code)   // ⭐ 没写报告就补一份占位 —— 别让使用者什么都看不到
       // ⭐ 发完评论之后**过一会儿再核一次**（2026-10-16 加的「评论发出后复核」）：
@@ -1136,11 +1212,13 @@ export function apply(ctx, config) {
       if ('reportLevel' in patch) patch.reportLevel = ['full', 'brief', 'off'].includes(String(patch.reportLevel)) ? String(patch.reportLevel) : 'full'
       if ('replyToComments' in patch) patch.replyToComments = Boolean(patch.replyToComments)
       if ('replyPerRound' in patch) patch.replyPerRound = Math.max(1, Math.min(Number(patch.replyPerRound) || 1, 10))
-      const saved = saveCfg(patch)
-      // 前端发了、但白名单里没有的字段（拼错 / 旧版宿主还不认识）—— 一起报回去
-      const ignored = Object.keys(body).filter((k) => k !== 'ok' && !(k in patch))
-      const notApplied = [...new Set([...ignored, ...saved])]
-      log(`设置已更新：${JSON.stringify(patch)}${notApplied.length ? `（⚠️ 没生效：${notApplied.join('、')}）` : ''}`)
+      // ⭐ 两类"没生效"都要报出去（否则用户只会看到"保存了又变回默认"，无从排查）：
+      //    ignored  = 这个插件版本的白名单里压根没有（多半是装了个旧包）
+      //    dropped  = 白名单里有，但 normalize 被"当前 cfg 的键集"过滤掉了（**插件没重载的典型症状**）
+      const ignored = Object.keys(body).filter((k) => !['ok'].includes(k) && !(k in patch))
+      const dropped = saveCfg(patch)
+      const notApplied = [...new Set([...ignored.filter((k) => !(k in cfg)), ...dropped])]
+      log(`设置已更新：${JSON.stringify(patch)}${notApplied.length ? ` ⚠️ 没生效：${notApplied.join(', ')}` : ''}`)
       return sendJson(res, 200, { ok: true, config: cfg, notApplied })
     }
 
@@ -1163,13 +1241,28 @@ export function apply(ctx, config) {
     if (req.method === 'POST' && path === '/api/bili-duty/verify') return sendJson(res, 200, await runVerify('manual'))
 
     // 「看今天的报告」：把报告的文本读出来给设置页显示（浏览器不能直接开本地文件 ✗）
+    // ⭐ 调试：现在跑没跑 / 跑到哪了 / 报了什么错（设置页「调试」那一栏轮询它）
+    if (req.method === 'GET' && path === '/api/bili-duty/debug') {
+      return sendJson(res, 200, debugInfo())
+    }
+
     if (req.method === 'GET' && path === '/api/bili-duty/report') {
       const day = String(url.searchParams.get('day') || dayKey()).replace(/[^0-9-]/g, '') || dayKey()
       const file = join(outDir, day + '.md')
       let text = ''
       let exists = false
-      try { exists = existsSync(file); if (exists) text = readFileSync(file, 'utf8').slice(0, 200000) } catch { /* 读不到就给空 */ }
-      return sendJson(res, 200, { ok: true, day, exists, file, text })
+      try { exists = existsSync(file); if (exists) text = readFileSync(file, 'utf8').slice(0, 1000000) } catch { /* 读不到就给空 */ }
+      // ⭐ 顺手把 markdown **解析成结构化对象**给前端 —— 那一大坨混在一起的报告，
+      //    前端才有办法按"轮次 / 分节 / 条目"摊开显示（解析失败就退回纯文本，不会白屏）✓
+      let parsed = null
+      try { if (exists) parsed = parseReport(text, { day, file }) } catch (e) { log('报告解析失败：' + (e?.message ?? e)) }
+      // 顺手把"有哪些天的报告"列出来（报告页要能切日期；读目录比让前端猜便宜）
+      let days = []
+      try {
+        days = readdirSync(outDir).filter((x) => /^\d{4}-\d{2}-\d{2}\.md$/.test(x))
+          .map((x) => x.slice(0, -3)).sort().reverse()
+      } catch { /* 目录还没建 */ }
+      return sendJson(res, 200, { ok: true, day, exists, file, text, parsed, days })
     }
 
     // 「打开文件夹」：浏览器开不了本地目录 ⇒ 让宿主去开（只认 out / home 两个，别的不受理）

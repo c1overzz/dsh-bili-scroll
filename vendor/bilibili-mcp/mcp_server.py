@@ -13,6 +13,8 @@ import base64
 import os
 import tempfile
 import time
+import functools
+import threading
 from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
@@ -29,6 +31,88 @@ from bilibili_api.login_v2 import QrCodeLogin, QrCodeLoginEvents
 CRED_FILE = Path(__file__).parent / "bili_credential.json"
 
 mcp = FastMCP("bilibili-mcp")
+
+
+# ========== 进度上报（插件设置页的「调试」靠它） ==========
+# 🔴 为什么非要有这个：那一轮的 stdout 里**只有** `Processing request of type CallToolRequest`，
+#    根本**看不出调的是哪个工具** —— 光解析日志做不出"实时进度"，只能在这儿自己上报 ✓。
+#    写 jsonl（一行一个事件），插件读尾巴就行：不用长连接、写坏一行也不影响别的 ✓。
+
+_PROG_LOCK = threading.Lock()
+_PROG_KEEP = 600            # 最多留 600 行，超了砍掉最老的
+_PROG_MAX_BYTES = 400_000
+
+
+def _duty_home() -> Path:
+    """插件家目录：优先 BILI_DUTY_HOME（插件起这一轮时会设），退回本文件所在目录。"""
+    return Path(os.environ.get("BILI_DUTY_HOME") or Path(__file__).resolve().parent)
+
+
+def _brief(v, n: int = 54) -> str:
+    """把参数 / 返回值压成一行短摘要（换行变空格、超长截断加 …）"""
+    try:
+        s = json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else str(v)
+    except Exception:
+        s = "<无法显示>"
+    s = " ".join(s.split())
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def progress(tool: str, phase: str, **info):
+    """往 progress.jsonl 追加一个事件。
+    ⚠️ **绝不能抛** —— 上报自己挂了，不能连累真正干活的工具 ✗"""
+    try:
+        rec = {"ts": time.time(), "at": time.strftime("%H:%M:%S"), "tool": tool, "phase": phase}
+        rec.update(info)
+        p = _duty_home() / "progress.jsonl"
+        with _PROG_LOCK:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with open(p, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            if p.stat().st_size > _PROG_MAX_BYTES:      # 涨太大就只留最后一段
+                keep = p.read_text(encoding="utf-8").splitlines()[-_PROG_KEEP:]
+                p.write_text("\n".join(keep) + "\n", encoding="utf-8")
+    except Exception:
+        pass
+
+
+def logged_tool():
+    """跟 `mcp.tool()` 完全一样，只是每次调用前后各写一行进度。
+    ⚠️ 必须保住原函数签名 —— FastMCP 靠 `inspect.signature` 生成参数表；
+       `functools.wraps` 会把 `__wrapped__` 指回原函数，签名才不会被吃成 `(*a, **kw)` ✓"""
+    def deco(fn):
+        doc = " ".join((fn.__doc__ or "").strip().split("\n")[0].strip().split())
+        doc = _brief(doc.replace("**", "").replace("`", ""), 34)   # 只留一小截当标签
+
+        @functools.wraps(fn)
+        async def wrapper(*a, **kw):
+            name = fn.__name__
+            args = {k: _brief(v, 40) for k, v in kw.items() if v not in (None, "", 0, False)}
+            t0 = time.time()
+            progress(name, "start", label=doc, args=args)
+            try:
+                r = await fn(*a, **kw)
+            except Exception as e:
+                progress(name, "error", ms=int((time.time() - t0) * 1000), error=_brief(e, 130))
+                raise
+            ok, note = True, ""
+            try:
+                d = json.loads(r) if isinstance(r, str) else None
+                if isinstance(d, dict):
+                    if d.get("success") is False or d.get("ok") is False:
+                        ok = False
+                    note = _brief(d.get("error") or d.get("message") or d.get("hint") or "", 90)
+                    if not note:                        # 没有错就挑几个关键字段当摘要
+                        note = _brief({k: v for k, v in d.items()
+                                       if k in ("title", "name", "count", "total", "todayTotal",
+                                                "uv", "bv", "mid", "items", "data")}, 90)
+            except Exception:
+                pass
+            progress(name, "ok" if ok else "fail", ms=int((time.time() - t0) * 1000), note=note)
+            return r
+
+        return mcp.tool()(wrapper)
+    return deco
 
 
 def load_credential() -> Credential:
@@ -60,7 +144,7 @@ def get_cred() -> Credential:
 
 # ========== Tool: 扫码登录（生成二维码） ==========
 
-@mcp.tool()
+@logged_tool()
 async def bili_login() -> str:
     """
     生成B站登录二维码，返回二维码图片（base64）供用户扫码。
@@ -111,7 +195,7 @@ async def bili_login() -> str:
 
 # ========== Tool: 检查登录状态 ==========
 
-@mcp.tool()
+@logged_tool()
 async def bili_login_check() -> str:
     """
     检查B站扫码登录状态。在用户扫码后调用此工具。
@@ -192,7 +276,7 @@ async def bili_login_check() -> str:
 
 # ========== Tool: 登录状态查询 ==========
 
-@mcp.tool()
+@logged_tool()
 async def bili_check_credential() -> str:
     """
     检查当前B站登录凭证是否有效
@@ -227,7 +311,7 @@ async def bili_check_credential() -> str:
 
 # ========== Tool 1: 搜索视频 ==========
 
-@mcp.tool()
+@logged_tool()
 async def bili_search(keyword: str, num: int = 10, order: str = "totalrank") -> str:
     """
     搜索B站视频
@@ -275,7 +359,7 @@ async def bili_search(keyword: str, num: int = 10, order: str = "totalrank") -> 
 
 # ========== Tool 2: 获取评论 ==========
 
-@mcp.tool()
+@logged_tool()
 async def bili_comments(bvid: str, num: int = 30) -> str:
     """
     获取B站视频的热门评论
@@ -313,6 +397,10 @@ async def bili_comments(bvid: str, num: int = 30) -> str:
                 c = {
                     "rpid": r.get("rpid", 0),
                     "user": member.get("uname", ""),
+                    # ⭐ 2026-10-16 加：判断"这条评论是不是 AI / 机器人账号"要靠这几项
+                    "mid": member.get("mid", 0),
+                    "sign": member.get("sign", ""),
+                    "level": (member.get("level_info") or {}).get("current_level", 0),
                     "content": content.get("message", ""),
                     "like": r.get("like", 0),
                     "reply_count": r.get("rcount", 0),
@@ -321,8 +409,11 @@ async def bili_comments(bvid: str, num: int = 30) -> str:
                 # 子评论
                 sub_replies = []
                 for sub in (r.get("replies") or [])[:2]:
+                    sm = sub.get("member", {})
                     sub_replies.append({
-                        "user": sub.get("member", {}).get("uname", ""),
+                        "user": sm.get("uname", ""),
+                        "mid": sm.get("mid", 0),
+                        "sign": sm.get("sign", ""),
                         "content": sub.get("content", {}).get("message", ""),
                         "like": sub.get("like", 0),
                     })
@@ -340,7 +431,7 @@ async def bili_comments(bvid: str, num: int = 30) -> str:
 
 # ========== Tool 3: 获取字幕 ==========
 
-@mcp.tool()
+@logged_tool()
 async def bili_subtitle(bvid: str) -> str:
     """
     获取B站视频的AI字幕（语音转文字）
@@ -401,7 +492,7 @@ async def bili_subtitle(bvid: str) -> str:
 
 # ========== Tool 4: 获取弹幕 ==========
 
-@mcp.tool()
+@logged_tool()
 async def bili_danmaku(bvid: str, num: int = 100) -> str:
     """
     获取B站视频的弹幕
@@ -429,7 +520,7 @@ async def bili_danmaku(bvid: str, num: int = 100) -> str:
 
 # ========== Tool 5: 视频详情 ==========
 
-@mcp.tool()
+@logged_tool()
 async def bili_video_info(bvid: str) -> str:
     """
     获取B站视频的详细信息
@@ -468,7 +559,7 @@ async def bili_video_info(bvid: str) -> str:
 
 # ========== Tool 6: 回复评论 ==========
 
-@mcp.tool()
+@logged_tool()
 async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0) -> str:
     """
     在B站视频下发表评论或回复某条评论
@@ -517,7 +608,7 @@ async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0) -> str:
 
 # ========== Tool 7: 批量采集 ==========
 
-@mcp.tool()
+@logged_tool()
 async def bili_crawl(keyword: str, max_videos: int = 5, comments_per_video: int = 20, get_subtitles: bool = True) -> str:
     """
     批量采集：搜索B站视频并抓取每个视频的评论和字幕
@@ -623,7 +714,7 @@ def _extract_cover_from_video(video_path: str) -> Picture:
 
 
 
-@mcp.tool()
+@logged_tool()
 async def bili_send_dynamic(
     text: str,
     images: list[str] | None = None,
@@ -685,7 +776,7 @@ async def bili_send_dynamic(
 
 # ========== Tool 9: 上传视频 ==========
 
-@mcp.tool()
+@logged_tool()
 async def bili_upload_video(
     video_path: str,
     title: str,
@@ -794,7 +885,7 @@ async def bili_upload_video(
 
 # ========== Tool 10: 上传多P视频 ==========
 
-@mcp.tool()
+@logged_tool()
 async def bili_upload_video_multi(
     video_paths: list[str],
     page_titles: list[str],
@@ -875,7 +966,7 @@ async def bili_upload_video_multi(
 
 # ========== Tool 11: 发布专栏文章 (Opus) ==========
 
-@mcp.tool()
+@logged_tool()
 async def bili_send_opus(
     title: str,
     content: str,
@@ -930,7 +1021,7 @@ async def bili_send_opus(
 
 # ========== Tool 12: 查询分区列表 ==========
 
-@mcp.tool()
+@logged_tool()
 async def bili_video_zones() -> str:
     """
     获取B站视频常用分区ID列表，供上传视频时选择tid参数
@@ -975,7 +1066,7 @@ async def bili_video_zones() -> str:
 
 # ========== Tool 13: 热门视频 ==========
 
-@mcp.tool()
+@logged_tool()
 async def bili_hot_videos(pn: int = 1, ps: int = 20) -> str:
     """
     获取B站当前热门视频列表
@@ -1008,7 +1099,7 @@ async def bili_hot_videos(pn: int = 1, ps: int = 20) -> str:
 
 # ========== Tool 14: 热搜关键词 ==========
 
-@mcp.tool()
+@logged_tool()
 async def bili_hot_buzzwords(page_num: int = 1, page_size: int = 20) -> str:
     """
     获取B站热搜词/热门关键词
@@ -1026,7 +1117,7 @@ async def bili_hot_buzzwords(page_num: int = 1, page_size: int = 20) -> str:
 
 # ========== Tool 15: 每周必看 ==========
 
-@mcp.tool()
+@logged_tool()
 async def bili_weekly_hot(week: int = 0) -> str:
     """
     获取B站每周必看视频推荐
@@ -1047,7 +1138,7 @@ async def bili_weekly_hot(week: int = 0) -> str:
 
 # ========== Tool 16: 排行榜 ==========
 
-@mcp.tool()
+@logged_tool()
 async def bili_rank(category: str = "all", day: int = 3) -> str:
     """
     获取B站各分区排行榜
@@ -1099,7 +1190,7 @@ async def bili_rank(category: str = "all", day: int = 3) -> str:
 
 # ========== Tool 17: 用户信息 ==========
 
-@mcp.tool()
+@logged_tool()
 async def bili_user_info(uid: int) -> str:
     """
     获取B站用户的详细信息
@@ -1145,7 +1236,7 @@ async def bili_user_info(uid: int) -> str:
 
 # ========== Tool 18: 用户视频列表 ==========
 
-@mcp.tool()
+@logged_tool()
 async def bili_user_videos(uid: int, pn: int = 1, ps: int = 30, order: str = "pubdate", keyword: str = "") -> str:
     """
     获取B站用户的投稿视频列表
@@ -1193,7 +1284,7 @@ async def bili_user_videos(uid: int, pn: int = 1, ps: int = 30, order: str = "pu
 
 # ========== Tool 19: 收藏夹列表 ==========
 
-@mcp.tool()
+@logged_tool()
 async def bili_favorite_lists(uid: int = 0) -> str:
     """
     获取用户的收藏夹列表
@@ -1226,7 +1317,7 @@ async def bili_favorite_lists(uid: int = 0) -> str:
 
 # ========== Tool 20: 收藏夹内容 ==========
 
-@mcp.tool()
+@logged_tool()
 async def bili_favorite_content(media_id: int, page: int = 1, keyword: str = "") -> str:
     """
     获取收藏夹内的视频列表
@@ -1268,7 +1359,7 @@ async def bili_favorite_content(media_id: int, page: int = 1, keyword: str = "")
 
 # ========== Tool 21: 发私信 ==========
 
-@mcp.tool()
+@logged_tool()
 async def bili_send_message(receiver_uid: int, text: str) -> str:
     """
     给B站用户发送私信
@@ -1303,7 +1394,7 @@ async def bili_send_message(receiver_uid: int, text: str) -> str:
 
 # ========== Tool 22: 未读消息 ==========
 
-@mcp.tool()
+@logged_tool()
 async def bili_unread_messages() -> str:
     """
     获取B站未读消息数（私信、@、回复、点赞等）
@@ -1321,7 +1412,7 @@ async def bili_unread_messages() -> str:
 
 # ========== Tool 23: 最近收到的回复 ==========
 
-@mcp.tool()
+@logged_tool()
 async def bili_received_replies() -> str:
     """
     获取最近收到的评论回复通知
@@ -1339,7 +1430,7 @@ async def bili_received_replies() -> str:
 
 # ========== Tool 24: 最近收到的@和点赞 ==========
 
-@mcp.tool()
+@logged_tool()
 async def bili_received_at_and_likes() -> str:
     """
     获取最近收到的@提及和点赞通知
@@ -1360,14 +1451,9 @@ async def bili_received_at_and_likes() -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
-# ========== 报账：本轮挑到几条 ==========
+# ========== Tool 23: 报账（本轮挑到几条）==========
 
-def _duty_home() -> Path:
-    """插件家目录：优先用 BILI_DUTY_HOME（插件起这一轮时会设），退回到本文件所在目录。"""
-    return Path(os.environ.get("BILI_DUTY_HOME") or Path(__file__).resolve().parent)
-
-
-@mcp.tool()
+@logged_tool()
 async def bili_note_picks(count: int) -> str:
     """
     ⭐ 报账：把「**这一轮**实际挑到几条」告诉插件，它会累加进当天的额度（今天已挑 X / 上限 Y）。
