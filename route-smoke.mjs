@@ -384,7 +384,11 @@ ok('指向一个不存在的路径 ⇒ 老实说没有，而不是回落到默�
   (await call('GET', '/api/bili-duty/prompt')).json.persona.exists === false)
 
 // ④ 业务部分必须**没有性格**（分两种情况钉，别一刀切）
-const CHARACTER = /颜文字|语气|口癖|可爱|卖萌|人格/g
+// 两档：
+//   · SOFT：泛指（语气 / 人格）—— **指路**会用它们（"语气照【人格设定】来"）✓ 允许
+//   · HARD：**具体的性格规定**（颜文字几个、可爱、口癖…）—— 业务部分里一个都不许有 ✗
+const CHARACTER = /颜文字|语气|口癖|可爱|卖萌|人格|撒娇/g
+const HARD = /颜文字|口癖|可爱|卖萌|撒娇/g
 // (a) 没有配置文件时：整条提示词里一个性格词都不该有 ✓
 await call('POST', '/api/bili-duty/config', { personaFile: '' })
 const pfNone0 = (await call('GET', '/api/bili-duty/prompt')).json
@@ -394,12 +398,30 @@ const pfNone = (await call('GET', '/api/bili-duty/prompt')).json
 ok('⭐⭐ 没有配置文件时，整条提示词里一个性格词都没有',
   pfNone.persona.exists === false && !CHARACTER.test(pfNone.full),
   (pfNone.full.match(CHARACTER) || []).join(' '))
+// (a2) ⭐ 私信开着时**也要**扫一遍 —— 这条之前漏了：DM 段里曾藏着一句
+//      「语气照章程『语气』那节来（可爱 + 专业，颜文字最多 1 个）」，既是性格指令、
+//      指的又是已经不存在的小节 ✗。所以"没性格"要**在每种开关组合下都成立** ✓
+await call('POST', '/api/bili-duty/config', {
+  dmMode: 'both', dmUids: ['10967510'], mentionNames: ['不平等云雾'], autoComment: true, personaFile: '',
+})
+const pfDm = (await call('GET', '/api/bili-duty/prompt')).json
+// ⚠️ 人格段本身当然会含这些词 ⇒ 先把「【人格设定】那一整段」和那句开场都剥掉，
+//    剩下的是**业务部分**，那里面一个性格词都不该有 ✓
+const restDm = String(pfDm.full)
+  .replace(/\n?【人格设定】[\s\S]*?(?=\n【)/, '')
+  .replace(/不要套用你默认的人格。/g, '')
+ok('⭐⭐ 私信开着时，业务部分里没有**具体的性格规定**', !HARD.test(restDm),
+  (restDm.match(HARD) || []).join(' '))
+ok('指路可以（"语气照【人格设定】来"），但只能是这种泛指',
+  (restDm.match(CHARACTER) || []).every((w) => w === '语气' || w === '人格'),
+  (restDm.match(CHARACTER) || []).join(' '))
+
 // (b) 有配置文件时：只允许【人格设定】那一段 + 开场那句
 const rest = String(pf1.json.full)
   .replace(/【人格设定】[\s\S]*?(?=\n【)/, '')
   .replace(/不要套用你默认的人格。/, '')
-ok('⭐ 有配置文件时，除人格段与那句开场，其余部分不含性格词',
-  !CHARACTER.test(rest), (rest.match(CHARACTER) || []).join(' '))
+ok('⭐ 有配置文件时，除人格段与那句开场，其余部分没有具体的性格规定',
+  !HARD.test(rest), (rest.match(HARD) || []).join(' '))
 
 /* ⑭ 收拾干净 —— 沙箱里的配置别留给下一次跑 */
 await call('POST', '/api/bili-duty/config', { windows: [], noSubtitlePick: false, dmUids: [], dmUid: 0 })
