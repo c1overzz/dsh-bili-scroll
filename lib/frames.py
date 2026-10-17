@@ -264,23 +264,23 @@ def window_text(segs, lo, hi):
                    if float(sg.get("end", 0) or 0) >= lo and float(sg.get("start", 0) or 0) <= hi)
 
 
-def grab(ff, src, t, out_path):
+def grab(ff, src, t, out_path, W=480):
     r = subprocess.run(
         [ff, "-y", "-loglevel", "error", "-ss", f"{t:.2f}", "-i", src,
-         "-frames:v", "1", "-vf", "scale=480:-2", "-q:v", "3", out_path],
+         "-frames:v", "1", "-vf", f"scale={W}:-2", "-q:v", "3", out_path],
         capture_output=True, text=True, timeout=90,
     )
     return r.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 512
 
 
-def compose(ims, cols, sheet_path):
+def compose(ims, cols, sheet_path, cell=480):
     """Pillow 拼图 + 烧时间码。"""
     from PIL import Image, ImageDraw, ImageFont
 
     cell_h = max(im.height for _, im in ims)
     rows = (len(ims) + cols - 1) // cols
     pad, bar = 6, 22
-    sheet = Image.new("RGB", (cols * 480 + (cols + 1) * pad,
+    sheet = Image.new("RGB", (cols * cell + (cols + 1) * pad,
                                rows * (cell_h + bar) + (rows + 1) * pad), (18, 18, 20))
     d = ImageDraw.Draw(sheet)
     try:
@@ -290,11 +290,11 @@ def compose(ims, cols, sheet_path):
 
     for i, (t, im) in enumerate(ims):
         r, c = divmod(i, cols)
-        x = pad + c * (480 + pad)
+        x = pad + c * (cell + pad)
         y = pad + r * (cell_h + bar + pad)
         sheet.paste(im, (x, y))
         mm, ss = divmod(int(t), 60)
-        d.rectangle([x, y + cell_h, x + 480, y + cell_h + bar], fill=(28, 28, 32))
+        d.rectangle([x, y + cell_h, x + cell, y + cell_h + bar], fill=(28, 28, 32))
         d.text((x + 6, y + cell_h + 2), f"#{i + 1}  {mm:02d}:{ss:02d}", font=font, fill=(240, 240, 240))
 
     sheet.save(sheet_path, quality=86, optimize=True)
@@ -342,9 +342,17 @@ def main():
     if not yt:
         fail("找不到 yt-dlp（.venv-asr/bin/yt-dlp）")
 
-    # ⭐ 拼图每格固定 480px 宽 —— 所以**下载超过 480p 没有任何收益**，只会慢 3~4 倍：
-    #    实测 21 分钟的视频，1080p 下 16 段要 2 分钟、500+ MB；480p 只要几十兆。
-    dl_height = min(int(a.height), 480)
+    # ⭐ 一张拼图在模型那边封顶 1024 tokens ≈ 1.8M 像素（14px patch、3:1 下采样，42px/格）。
+    #    ⇒ 格子开多大是算出来的，不是拍脑袋：cells × W × (W*9/16) ≈ 1.8M
+    #      · 4 格 ≈ 890px · 9 格 ≈ 596px · 16 格 ≈ 447px
+    #    下载高度只要 ≥ 格子宽度就够了（下更高的纯属浪费时间：21 分钟视频 1080p 要 2 分钟/500MB）。
+    ncells = max(1, min(a.n, 16))
+    cell_budget = int((1_800_000 / (ncells * 0.5625)) ** 0.5)
+    settings_h = int(a.height)
+    steps = [480, 720, 1080]
+    dl_target = next((h for h in steps if h >= cell_budget), 1080)
+    dl_height = min(settings_h, dl_target)
+    cell_w = max(320, min(cell_budget, dl_height))
 
     os.makedirs(TMP, exist_ok=True)
     prune()
@@ -377,11 +385,11 @@ def main():
             ims = []
             for i, (t, src, offset) in enumerate(srcs):
                 out = os.path.join(workdir, f"f{i:02d}.jpg")
-                if not grab(ff, src, t + offset, out):
+                if not grab(ff, src, t + offset, out, cell_w):
                     continue
                 im = Image.open(out).convert("RGB")
-                h = int(im.height * 480 / im.width)
-                ims.append((t, im.resize((480, h), Image.LANCZOS)))
+                h = int(im.height * cell_w / im.width)
+                ims.append((t, im.resize((cell_w, h), Image.LANCZOS)))
             return ims
 
         ims = []
@@ -401,7 +409,7 @@ def main():
 
         sheet = os.path.join(TMP, f"{bvid}.jpg")
         grid = {4: 2, 9: 3, 16: 4}.get(len(ims)) or max(1, int(len(ims) ** 0.5 + 0.5))
-        compose(ims, max(1, min(a.cols or grid, 4)), sheet)
+        compose(ims, max(1, min(a.cols or grid, 4)), sheet, cell_w)
 
         # ⭐ 音频来源的「每帧说了什么」：不受 UP 改字幕影响（画面上的硬字幕可能是规避写法）
         audio_lines = []

@@ -590,7 +590,7 @@ window.__ModuleLoader__.load({
             h('div', { 'data-bd-row': '' },
               h('div', { 'data-bd-grow': '' },
                 h('div', { 'data-bd-label': '' }, '清晰度'),
-                h('div', { 'data-bd-note': '' }, '拼图每格固定 480px 宽 —— 所以下载 720/1080 不会更清楚，只会更慢（现在已自动按 480 下）')),
+                h('div', { 'data-bd-note': '' }, '格子宽度按帧数自动算（4 帧≈890px / 9 帧≈600 / 16 帧≈450），下载高度会自动匹配；这里只是上限：设 480 更省流量，但小字会糊一点')),
               h('select', {
                 'data-bd-input': '', 'data-bd-sel': '', value: String(cfg.frameHeight ?? 480),
                 onChange: (e) => patch({ frameHeight: Number(e.target.value) }, '清晰度'),
