@@ -8,8 +8,9 @@
    两个都没有**也不用让用户先装** —— 插件点「装依赖」时会**自己下一份 `uv` 到自己的家目录**（免管理员、不用 PATH）；
    只有它自己也下不动时（网络到不了 GitHub / 加速代理 / PyPI 镜像），才需要引导用户手动装。
    · 它是**直连 GitHub → 国内加速代理 → PyPI 镜像**依次试的，并且会**核对官方 sha256** ✓
-   · ⚠️ 若用户机器上的**杀软拦了这次下载**：让他把 `%USERPROFILE%\.dsh\bili-duty\bin\` 加白，或干脆自己装 uv / Python 3.10+ ✓
-   · ⭐ **万一下载链路都不通**（有用户反馈"桌面版上这条链路经常不通"）：**手动放一份 `uv.exe` 到 `<家目录>\bin\` 就行**
+   · ⚠️ **Windows** 上若杀软拦了这次下载：让他把 `%USERPROFILE%\.dsh\bili-duty\bin\` 加白，或干脆自己装 uv / Python 3.10+ ✓
+   · ⭐ **万一下载链路都不通**（有用户反馈"桌面版上这条链路经常不通"）：**手动放一份 uv 到 `<家目录>/bin/` 就行**
+     （Windows 是 `uv.exe`，Linux / macOS 是 `uv`）
      —— 插件会**优先用那里那一份**，跳过下载 ✓
 2. `dsh plugin --profile web add dsh-bili-scroll`（npm，推荐）
    · 备选：`dsh plugin --profile web add github:c1overzz/dsh-bili-scroll`
@@ -37,12 +38,29 @@
 
 ## 仓库结构（改代码时看这里）
 
-- `index.js` —— host 半端：11 个工具 + 谷时定时器 + HTTP 接口 + 设置命名空间
+- `index.js` —— host 半端：12 个工具 + 时段定时器 + HTTP 接口 + 设置命名空间
+  · 里面有一节「跨平台的那点基础设施」（`whichSync` / `asCommand` / `resolvePy`），**改命令之前先读它**
 - `client.js` —— 浏览器半端：设置页（注册在 `settings.section`）
 - `lib/` —— 状态目录与家目录 / 极小的 MCP stdio 客户端 / 扫码登录 / **`hostdeps.mjs`（从宿主树取 `@deepseek-ai/*`，拿不到就退到自己依赖 / 本地等价实现）** / **`verify.mjs`（评论发出后复核）**
 - `prompts/duty.md` —— 一轮要做的事（判定口径 + 红线，**用户可以改**）
 - `vendor/bilibili-mcp/` —— 内置的 Python MCP（MIT，AGI_Ananas）
 - `selfcheck.mjs` + `tools/` —— 本地预检：`node selfcheck.mjs`（**现在不用解析钩子了**；`tools/register.mjs` 那条还留着当备份）
+- `window-smoke.mjs` / `route-smoke.mjs` —— 时段工具的单测、以及把宿主端那几条 HTTP 路由**真调一遍**
+
+## 跨平台（**这个插件两头都要能用**）
+
+它一开始是照着 Windows 上的 dsh 写的，到 Linux 上出过**整条路走不通**的事故，所以：
+
+- 🔴 **别写死某一个平台的命令**。典型翻车：`python`（Linux 多数发行版**只有 `python3`**，
+  直接写 `python` ⇒ 二维码画不出来、内部 MCP 起不来）；`cmd.exe /c`（升级流程在 Linux 上必然失败）。
+- 找可执行文件用 `resolveDsh()`：它按 **设置 → `process.argv[1]`（宿主进程自己）→ PATH 扫描
+  → 从 node 位置推** 的顺序来，**不猜安装布局**（nvm / `.npm-global` / `%APPDATA%\npm` 都能命中）。
+- 找 Python 用 `resolvePy()`（异步）/ `pyPathSync()`（同步那把）：设置里写的 → 自己建的 venv → `python3` → `python`。
+- 起进程一律**别自己拼 `shell`**：把 `shell` 交给 `spawn`（它自己知道该用 `cmd.exe` 还是 `/bin/sh`），
+  `.cmd` / `.bat` 必须走 shell、`.exe` 直接 exec、其余用 `node <它>`（见 `asCommand`）。
+- 「打开文件夹」这类**只有桌面才存在**的功能：有桌面就调系统程序，**没有桌面（服务器 / NAS）
+  就把目录列在设置页里**（`/files` → `/file` → `/download` 三个接口）—— 不许只回一句"做不到" ✗。
+  ⚠️ 那条路径读接口**只认单层安全文件名**（`safeName` 挡 `../`、绝对路径、盘符），改之前先想清楚。
 
 ## 约定
 

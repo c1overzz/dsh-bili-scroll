@@ -28,17 +28,19 @@
 
 机器上要有 **`Python 3.10+` 或 `uv`** —— **有一个就够**：
 
-- **有 `uv` 最好**：单个 ~32 MB 的 exe，**解压就能用、不用管理员、不用进 PATH**，而且它还能自己把 Python 拉下来；
+- **有 `uv` 最好**：一个 ~32 MB 的**单文件可执行程序**（Windows 上是 `uv.exe`，Linux / macOS 上是 `uv`），
+  **解压就能用、不用管理员、不用进 PATH**，而且它还能自己把 Python 拉下来；
 - 只有 Python 也行（装官方安装器时记得勾 **`Add to PATH`**）；
 - ⭐ **两个都没有？也没关系**：点「装依赖」时**插件会自己下一份 `uv` 放到自己的家目录**
   （单文件、约 15MB、**免管理员、不用进 PATH** ✓），之后全程自动 ✓
   · 它会**先直连 GitHub，不通就走国内加速代理**，还配了 PyPI 镜像兜底 ✓
   · 下载完会**核对官方 `sha256`**（对不上就丢弃换下一个源 ✓）—— 因为它下来的东西是要**被执行**的
-  · ⚠️ **如果杀软 / Windows Defender 报这个下载**：把插件家目录 `%USERPROFILE%\.dsh\bili-duty\bin\` **加白**即可；
-    不想加白也行，自己装一份 uv 或 Python 3.10+ 就绕过去了 ✓
+  · ⚠️ **Windows 上如果杀软 / Defender 拦了这个下载**：把插件家目录 `%USERPROFILE%\.dsh\bili-duty\bin\` **加白**即可；
+    不想加白也行，自己装一份 uv 或 Python 3.10+ 就绕过去了 ✓（Linux / macOS 上没这回事）
 
 > ✅ **已经做到了**（v0.1.1 起）：插件会**自己把 `uv` 下到自己的家目录** ⇒ 这条前提不用用户操心、也不用管理员权限。
-> ⚠️ 万一它自己也下不动（有用户反馈桌面版上这条链路经常不通）：**手动放一份 `uv.exe` 到 `<家目录>\bin\`** 就行 ——
+> ⚠️ 万一它自己也下不动（有用户反馈桌面版上这条链路经常不通）：**手动放一份 uv 到 `<家目录>/bin/`** 就行 ——
+> Windows 上文件名是 `uv.exe`，Linux / macOS 上是 `uv`（记得 `chmod +x uv`）。
 > 插件**优先用那里那一份**，会跳过下载。
 
 ## 装
@@ -58,9 +60,10 @@ dsh plugin --profile web add github:c1overzz/dsh-bili-scroll   # 备选：直接
    `dsh --profile headless …`，桌面版上容易卡在那儿。⇒ **先用设置页的「现在跑一轮」手动跑**（那条是稳的）；
    能不能自动跑，等你确认过自己那台桌面版的版本与 profile 再说。
 2. **「装依赖」卡住、或者扫码时一直不出二维码** —— 大概率是 0.1.0 那版（见开头那个按钮指纹，跑一次 `add` 就升级了）。
-   不想升级也行，救急一句：`<家>\.venv\Scripts\python.exe -m ensurepip --upgrade`，再点一次「重装主依赖」。
-3. **它下不动 `uv`**（桌面版上这条链路经常不通）⇒ 自己放一份 `uv.exe` 到 `<家目录>\bin\`，
-   插件会优先用它、跳过下载。
+   不想升级也行，救急一句（Windows）：`<家>\.venv\Scripts\python.exe -m ensurepip --upgrade`，
+   Linux / macOS 上则是：`<家>/.venv/bin/python -m ensurepip --upgrade`，再点一次「重装主依赖」。
+3. **它下不动 `uv`**（桌面版上这条链路经常不通）⇒ 自己放一份 uv 到 `<家目录>/bin/`
+   （Windows 是 `uv.exe`，Linux / macOS 是 `uv`），插件会优先用它、跳过下载。
 4. **「本地转写」是两段式的** —— 只打开开关**不够**，还得点它下面那个「**装转写依赖**」。
    没装的时候，拿不到字幕的视频默认被**跳过**（报告里会写「**因无字幕跳过 N 条**」，你能一眼看出漏了几条）；
    也可以改开「拿不到字幕的也看看」—— 那就只凭标题和简介判断，不再跳过。
@@ -119,8 +122,10 @@ dsh plugin --profile web add github:c1overzz/dsh-bili-scroll   # 备选：直接
 
 按顺序来，别跳步：
 
-1. **先确认前提**：机器上有 `Python 3.10+` 或 `uv` 吗？（查 `python --version` / `uv --version`）
-   两个都没有 ⇒ **建议装 `uv`**（单文件 exe、免管理员、能自带 Python）；
+1. **先确认前提**：机器上有 `Python 3.10+` 或 `uv` 吗？
+   ⚠️ 查 Python 时 **Linux / macOS 上多半是 `python3 --version`**（很多发行版压根没有 `python`）——
+   插件自己会按 `python3` → `python` 的顺序找，你不用替它操心 ✓
+   两个都没有 ⇒ **建议装 `uv`**（单文件、免管理员、能自带 Python）；
 2. **装插件**：`dsh plugin --profile web add github:c1overzz/dsh-bili-scroll`
    （npm 上的 `dsh-bili-scroll` 同名同内容，审核通过后用 `add dsh-bili-scroll` 更省事）
 3. ⚠️ **必须提醒用户重启一次 dsh** —— bundle 层要重启才组装，不重启插件不会生效；
