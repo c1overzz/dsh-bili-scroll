@@ -23,7 +23,7 @@ const hostDeps = await loadHostDeps()
 const z = hostDeps.z
 const defineTool = hostDeps.defineTool
 import { spawn } from 'node:child_process'
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { McpClient } from './lib/mcp.mjs'
@@ -106,7 +106,9 @@ export const Config = !z ? undefined : z.object({
   /** 给那一轮叠一份插件自己的 patch（把 B站 MCP 挂上）—— 用户 profile 一个字都不用改 */
   overlayMcp: z.boolean().default(true).extra('volatile', true),
   /** 跑 headless 时的工作目录 */
-  workspace: z.string().default('').extra('volatile', true),
+  // ⭐ 人格设定文件（2026-10-18）：整个插件**唯一**的"性格"来源，位置可指定。
+  //    留空 = 用数据目录里的 persona.md ✓
+  personaFile: z.string().default('').extra('volatile', true),
   /** 日报形态：full=完整（现状）· brief=每条一两行 · off=不写报告（只发评论） */
   reportLevel: z.string().default('full').extra('volatile', true),
   /** 回复评论：默认关。开了之后只回「直接回复到它那条评论下面的人」 */
@@ -273,7 +275,7 @@ export function apply(ctx, config) {
   const DEFAULTS = {
     perDay: 5, peakValley: false, noon: true, night: true, windows: [], autoComment: false, transcribe: false, noSubtitlePick: false, asrModel: 'small',
     dmMode: 'off', dmUid: 0, dmUids: [], aiReply: true, aiKeywords: [],
-    keywords: [], commentPerRound: 1, mentionName: '', mentionNames: [], pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1,
+    keywords: [], commentPerRound: 1, mentionName: '', mentionNames: [], pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, personaFile: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1,
   }
   const normalize = (src, base) => {
     const out = { ...base }
@@ -750,69 +752,55 @@ export function apply(ctx, config) {
   }
 
   /**
-   * 这一轮会读哪个「工作区 AGENTS.md」（2026-10-18 重做）
+   * 人格设定文件 —— **整个插件唯一**的「性格」来源（2026-10-18 重做）
    *
-   * 🔴 原来留空直接就回落到 `process.cwd()` —— 那是 **dsh 启动时所在的目录**。
-   *    在 NAS / 桌面版上它通常是 DSH 自己的安装目录，那儿**根本没有 AGENTS.md** ✗。
-   *    于是"填了工作区"和"没填"看起来一模一样，设置页那句「留空 = dsh 自己的工作目录」
-   *    等于什么都没说 —— 使用者只能自己猜（这次的困惑就是这么来的）。
-   * ✅ 现在：把"到底读没读到"如实算出来交给设置页；而且**留空时只在那个目录里真找得到
-   *    AGENTS.md 的情况下才认它**，没有就不读 —— 绝不去读一个奇怪的地方 ✓
+   * 为什么定成"唯一一个文件"：
+   *   · 原来人格散在**三处** —— `index.js` 里写死一段、章程里有一节、
+   *     还会去读工作区的 `AGENTS.md` ✗。同一个"性格"有三个来源，
+   *     改一处漏一处；更糟的是**装插件的人会拿到别人写的性格** ✗。
+   *   · 现在收敛成唯一一个 md：默认 `<数据目录>/persona.md`，
+   *     位置可以用设置里的「人格设定文件」指到任何地方 ✓，也能在设置页里直接编辑 ✓。
+   *   · 这个文件**不存在**时 ⇒ 这一轮**没有人格设定**（插件本身不带任何性格 ✓）；
+   *     其余提示词一律只为业务服务，不含性格 ✓
    */
-  const wsInfo = () => {
-    const configured = String(cfg.workspace || '').trim()
-    const cwd = process.cwd()
-    const info = { configured, cwd, dir: '', file: '', found: false, size: 0, limit: 6000, fallback: false, err: '' }
-    for (const dir of (configured ? [configured] : [cwd])) {
-      const file = join(dir, 'AGENTS.md')
-      try {
-        const st = statSync(file)
-        if (st.isFile()) return { ...info, dir, file, found: true, size: st.size, fallback: !configured }
-      } catch { /* 这个目录里没有就算了 */ }
+  const PERSONA_LIMIT = 4000
+  const personaFile = () => String(cfg.personaFile || '').trim() || join(stateDir, 'persona.md')
+  const personaInfo = () => {
+    const path = personaFile()
+    const out = {
+      path, custom: Boolean(String(cfg.personaFile || '').trim()),
+      exists: false, size: 0, chars: 0, text: '', truncated: false, limit: PERSONA_LIMIT, err: '',
     }
-    info.dir = configured || cwd
-    info.file = join(info.dir, 'AGENTS.md')
-    info.err = configured
-      ? '这个目录里没有 AGENTS.md'
-      : '留空，而且 dsh 启动的那个目录里也没有 AGENTS.md ⇒ 这一轮不读工作区设定'
-    return info
+    try {
+      const st = statSync(path)
+      if (!st.isFile()) { out.err = '这个路径不是文件'; return out }
+      out.exists = true
+      out.size = st.size
+      let text = readFileSync(path, 'utf8')
+      if (text.length > PERSONA_LIMIT) { text = text.slice(0, PERSONA_LIMIT); out.truncated = true }
+      out.text = text
+      out.chars = text.length
+    } catch {
+      out.err = '还没有这个文件 —— 这一轮不带人格设定（插件自己不带性格）'
+    }
+    return out
   }
-
-  /**
-   * 人格与语气 —— 这段是**插件内置**的，每个装插件的人都拿得到。
-   *
-   * ⚠️ 2026-10-18 记：使用者明确说过「可爱 + 颜文字」那一套**他只要自己用**、别人不需要。
-   *    而这段写死在 `index.js` 里 ⇒ 一合并就会**发给每一个装插件的人** ✗。
-   *    所以单独抽成一个函数：设置页的「人格」页能把**原文**摊给他看（看得见才谈得上决定）✓
-   */
-  const personaText = (mentionTagText) =>
-        `【人格与语气】照章程「语气：可爱，但不傻」那一节来，报告和评论都算。\n`
-      + `轻快、可爱、会用颜文字，但专业性不能丢、别卖蠢：一段最多一个颜文字、整篇 3~4 个封顶；`
-      + `写到失败 / 风控 / 账号出事这类话题时把颜文字收起来。\n`
-      + `别演“鱼言鱼语”（自称本鱼 / 本鲸、管人叫主人那套）。\n`
-      + `评论的开场要有可爱、活泼的调子，按这个语感写，别逐字照抄：\n`
-      + `  楼中楼：「${mentionTagText || '@TA'} 嘿嘿，顺着这条我再接一句～」/「${mentionTagText || '@TA'} 诶嘿，举手补充一点点！」\n`
-      + `  顶层：「${mentionTagText || '@TA'} 挖到宝啦！这期有个跟我们超对口的实测～」/「${mentionTagText || '@TA'} 报告！今天挖到一期好料」/「${mentionTagText || '@TA'} 发现一条好东西，先给你占个座～」\n`
-      + `每条换着说，别老用同一句；别用「补一句：」这种正经起手。\n`
-      + `口癖可用「挖到宝啦 / 诶 / 哇 / 报告！ / 说到点子上了 / 对的对的」，句尾用「～」收。\n`
-      + `人称偶尔用「我」「咱」；不许给自己起名，也不许管人叫主人。`
+  /** 拼进提示词的那段：没有文件就**什么都不给** —— 不塞占位、不塞默认性格 ✓ */
+  const personaText = () => {
+    const p = personaInfo()
+    if (!p.exists || !String(p.text).trim()) return ''
+    return `\n【人格设定】下面是使用者自己写的人格与语气，照它来；不要另演一套人格。\n`
+      + String(p.text).trim() + `\n`
+      + (p.truncated ? `（这份太长了，只取了前 ${PERSONA_LIMIT} 字）\n` : '')
+  }
 
   const promptFor = () => {
     const { path: duty } = charterPick()
     const kws = Array.isArray(cfg.keywords) ? cfg.keywords.filter(Boolean) : []
-    // 使用者的「设定」由我们自己读进来喂给它 —— 那一轮的工作目录是插件数据目录，
-    // 它在沙箱里只写得了自己那儿，读不到使用者的工作区；而宿主进程没有这个限制。
-    let ownerDoc = ''
-    const ws = wsInfo()
-    if (ws.found) {
-      try {
-        const text = readFileSync(ws.file, 'utf8')
-        ownerDoc = `\n===== 使用者的设定（${ws.file}，他写给自己 AI 的人设与准则，按它来）=====\n`
-          + text.slice(0, ws.limit)
-          + (text.length > ws.limit ? `\n…（这份一共 ${text.length} 字，太长，这里只给前 ${ws.limit} 字）\n` : '')
-          + `===== 设定结束 =====\n`
-      } catch { /* 读不到就算了，别因此跑不成 */ }
-    }
+    // ⚠️ 这里**不再**注入工作区的 AGENTS.md（2026-10-18 去掉）：
+    //    个性化人格只能来自那唯一一个人格文件（见 personaText）✓
+    //    顺带也堵掉了那个坑 —— 在"有 AGENTS.md 的目录"里启动 dsh，会把
+    //    一份毫不相干的开发文档当成人设塞进来 ✗
     // 投递方式：dmMode = off（只评论）/ only（只私信）/ both（都发）。
     // commentOn 是「这一轮到底能不能发公开评论」的唯一判据（工具层的闸用的是同一套逻辑）。
     const mentions = mentionList()
@@ -829,11 +817,15 @@ export function apply(ctx, config) {
     const cap = Math.max(0, Number(cfg.perDay) || 0)
     const picked = picksToday()
     const left = Math.max(0, cap - picked)
-    return `你是这个账号的 B站 助手。下面是你这一轮的全部依据，照它执行；不要套用你默认的人格。\n`
-      + ownerDoc
-      + `\n`
-      + personaText(mentionTagText)
-      + `\n\n【本轮任务】\n`
+    // ⭐ 提示词分两块：**人格**（只来自那一个 md 文件，没有就一个字都不给）
+    //    + **业务**（下面全部，只为刷 B站 这件事服务，**不含任何性格设定**）✓
+    //    ⚠️ "别套用你默认的人格"这句**只在真有人格文件时才说** —— 没有文件时
+    //       说这句本身就是一句性格指令 ✗（业务部分要干净）
+    const persona = personaText()
+    return `你是这个账号的 B站 助手。下面是你这一轮的全部依据，照它执行。\n`
+      + (persona ? `不要套用你默认的人格。\n` : '')
+      + persona
+      + `\n【本轮任务】\n`
       + `读章程 ${duty}，按里面的要求刷一轮 B站。\n`
       + (cfg.reportLevel === 'brief'
         ? `日报写成薄版：每条一两行（值不值得 + 链接）就够，别写长摘要。\n`
@@ -917,31 +909,26 @@ export function apply(ctx, config) {
    * —— 这种事**不该靠猜** ✗。提示词是插件行为的全部依据，摊开就完了 ✓
    */
   const promptInfo = () => {
-    const ws = wsInfo()
     const ch = charterPick()
-    const tag = mentionList().map((m) => `@${m}`).join(' ')
+    const persona = personaInfo()
     let charterText = '', charterErr = ''
     try { charterText = readFileSync(ch.path, 'utf8') } catch (e) { charterErr = String(e?.message ?? e) }
-    let ownerText = ''
-    if (ws.found) { try { ownerText = readFileSync(ws.file, 'utf8') } catch { /* wsInfo 那边已经记了原因 */ } }
     const full = promptFor()
+    const composed = personaText()
     return {
       ok: true,
       chars: full.length,
-      workspace: ws,
+      persona,
       pieces: [
         {
-          key: 'persona', title: '人格与语气', builtin: true,
-          from: '插件内置 —— 写死在 index.js 的 personaText() 里，**谁装上都有**',
-          chars: personaText(tag).length, text: personaText(tag),
+          key: 'persona', title: '人格设定', kind: 'persona',
+          found: persona.exists && Boolean(String(persona.text).trim()),
+          from: persona.path + (persona.custom ? '  ← 你在设置里指定的位置' : '  ← 默认位置（数据目录里）')
+            + '　｜　插件自身**不带**任何性格，没有这个文件就没有人格设定',
+          chars: composed.length, text: persona.exists ? persona.text : '', error: persona.err,
         },
         {
-          key: 'owner', title: '你工作区里的 AGENTS.md', found: ws.found,
-          from: ws.found ? ws.file : (ws.err || '（没读）'),
-          chars: ownerText.length, text: ownerText,
-        },
-        {
-          key: 'charter', title: '章程（这一轮要做的事）', mine: ch.mine,
+          key: 'charter', title: '章程（这一轮要做的事）', kind: 'charter', mine: ch.mine,
           from: ch.path + (ch.mine ? '  ← 用的是你自己改过的那份' : '  ← 插件自带的那份'),
           chars: charterText.length, text: charterText, error: charterErr,
         },
@@ -1515,9 +1502,9 @@ export function apply(ctx, config) {
         return d ? d.toISOString() : null
       })(),
       builtinWindows: WINDOWS,
-      // ⭐ 工作区那条链路的实情（2026-10-18）：设置页不用再让使用者猜
-      //    "留空到底去了哪儿、那儿有没有 AGENTS.md" ✓
-      workspace: wsInfo(),
+      // ⭐ 人格设定文件的实情（2026-10-18）：哪个路径、在不在、多大 ✓
+      //    ⚠️ 不带 text —— /status 是每 5 秒轮询的，几千字正文没必要跟着跑 ✓
+      persona: (() => { const p = personaInfo(); return { ...p, text: '' } })(),
       // ⭐ 这台机器是什么环境（2026-10-18 加）：设置页据此决定「打开文件夹」该怎么呈现 ——
       //    有桌面就照旧；**没有桌面**（服务器 / NAS 常态）就直接把目录列出来 ✓
       platform: {
@@ -1571,7 +1558,7 @@ export function apply(ctx, config) {
       const patch = {}
       for (const k of ['perDay', 'peakValley', 'noon', 'night', 'windows', 'autoComment', 'transcribe', 'noSubtitlePick', 'asrModel',
         'commentPerRound', 'mentionName', 'mentionNames', 'dmMode', 'dmUid', 'dmUids', 'aiReply', 'aiKeywords',
-        'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound']) {
+        'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'personaFile', 'reportLevel', 'replyToComments', 'replyPerRound']) {
         if (k in body) patch[k] = body[k]
       }
       if ('perDay' in patch) patch.perDay = Math.max(0, Math.min(Number(patch.perDay) || 0, 50))
@@ -1742,6 +1729,24 @@ export function apply(ctx, config) {
 
     // 「人格 / 提示词」：把这一轮真发出去的话摊给设置页看 ✓
     if (req.method === 'GET' && path === '/api/bili-duty/prompt') return sendJson(res, 200, promptInfo())
+
+    // 「人格设定文件」：读 / 写那唯一一个 md（2026-10-18）
+    //   ⚠️ 写是有意开放的 —— 这个文件就是给使用者自己编的，设置页里直接改最省事 ✓
+    if (req.method === 'GET' && path === '/api/bili-duty/persona') return sendJson(res, 200, { ok: true, ...personaInfo() })
+    if (req.method === 'POST' && path === '/api/bili-duty/persona') {
+      const body = await readBody(req)
+      const text = String(body?.text ?? '')
+      if (text.length > 100000) return sendJson(res, 200, { ok: false, error: '太长了（上限 10 万字），这真的是人格设定吗' })
+      const file = personaFile()
+      try {
+        mkdirSync(dirname(file), { recursive: true })
+        writeFileSync(file, text, 'utf8')
+        log(`人格设定写好了：${file}（${text.length} 字）`)
+        return sendJson(res, 200, { ok: true, ...personaInfo(), saved: true })
+      } catch (e) {
+        return sendJson(res, 200, { ok: false, error: '写不进去：' + (e?.message ?? e), path: file })
+      }
+    }
 
     // 「一键升级」：点了它自己跑 add（⚠️ 之后要重启才生效）
     if (req.method === 'POST' && path === '/api/bili-duty/upgrade') return sendJson(res, 200, runUpgrade())

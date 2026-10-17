@@ -9,7 +9,7 @@
  * 夹具：把线上 out/*.md 拷进沙箱的数据目录（只读线上，不往真数据目录写任何东西）
  */
 import { mkdirSync, copyFileSync, writeFileSync, rmSync, existsSync, readdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 // 有真数据目录就拿真报告当夹具（最有说服力）；没有就用合成夹具，别让外人一跑就挂
@@ -336,67 +336,70 @@ if (process.env.DUMP_FILES) {
   console.log(`（真接口输出已 dump 到 ${process.env.DUMP_FILES}）`)
 }
 
-/* ⑬″ 工作区那条链路 + 「人格 / 提示词」页
- *  🔴 原来留空会**静默**回落到 process.cwd()（dsh 启动目录，通常没有 AGENTS.md）⇒
- *     "填了"和"没填"看起来一模一样，使用者只能猜 ✗。现在必须**如实报出来** ✓ */
+/* ⑬″ 人格设定文件 —— **整个插件唯一**的"性格"来源 + 「人格 / 提示词」页
+ *  🔴 原来是三处：index.js 里写死一段、章程里有一节、还会读工作区的 AGENTS.md ✗。
+ *     现在只剩一个 md：没有它 ⇒ 这一轮就没有人格设定（插件自身不带性格）✓ */
 const pf0 = await call('GET', '/api/bili-duty/prompt')
 ok('/prompt 200 且 ok', pf0.code === 200 && pf0.json?.ok === true, 'code=' + pf0.code)
-ok('/prompt 分了三段（人格 / 工作区 / 章程）',
-  Array.isArray(pf0.json.pieces) && pf0.json.pieces.map((x) => x.key).join() === 'persona,owner,charter',
+ok('/prompt 只分两段（人格设定 / 章程）',
+  Array.isArray(pf0.json.pieces) && pf0.json.pieces.map((x) => x.key).join() === 'persona,charter',
   (pf0.json.pieces || []).map((x) => x.key).join())
-const persona = pf0.json.pieces.find((x) => x.key === 'persona')
-ok('人格那段标了"插件内置"（谁装上都有，得让人看见）', persona.builtin === true)
-ok('人格那段不是空的', persona.chars > 200, persona.chars)
-ok('章程那段有内容、且报出了用的哪一份',
-  pf0.json.pieces.find((x) => x.key === 'charter').chars > 1000 &&
-  /duty\.md/.test(pf0.json.pieces.find((x) => x.key === 'charter').from))
-ok('完整提示词拼得出来', pf0.json.chars > 1000 && pf0.json.full.length === pf0.json.chars)
+ok('⭐ 不再有"工作区 AGENTS.md"那一段（人格只能有一个来源）',
+  !(pf0.json.pieces || []).some((x) => x.key === 'owner' || /AGENTS\.md/.test(x.from)))
 
-// ① 没填工作区：必须说清「留空去了哪儿、那儿有没有」
-//    ⚠️ 这条**不能假设「一定读不到」** —— 跑测试时 cwd 就是仓库目录，那儿**有** AGENTS.md
-//    （就是那份写给 AI 看的说明）。新逻辑是「留空 ⇒ 只在真有时才认」，两种结果都合法，
-//    但**必须如实**：读到了要标 fallback，没读到要把原因写出来 ✓
-const ws0 = pf0.json.workspace
-ok('/prompt 带回了工作区实情',
-  ws0 && typeof ws0.found === 'boolean' && 'fallback' in ws0 && typeof ws0.err === 'string')
-ok('没填时 configured 就是空', ws0.configured === '')
-if (ws0.found) {
-  ok('⭐ 留空时读到的那份必须标成 fallback（免得当成使用者自己填的）', ws0.fallback === true)
-  ok('而且路径确实指向 cwd 下的 AGENTS.md', ws0.file === join(ws0.cwd, 'AGENTS.md'), ws0.file)
-} else {
-  ok('⭐ 留空且那儿没有 ⇒ 明说去了哪儿、为什么没读，不静默',
-    /留空/.test(ws0.err) && /AGENTS\.md/.test(ws0.err), ws0.err)
-}
-const pr0 = pf0.json.pieces.find((x) => x.key === 'owner')
-ok('工作区那段的 found 跟 workspace 一致', pr0.found === ws0.found)
+// ① 还没建这个文件 ⇒ 提示词里**没有人格段**（插件自己不带性格）
+const per0 = pf0.json.persona
+ok('/prompt 带回了人格文件的实情', per0 && typeof per0.path === 'string' && 'exists' in per0)
+ok('⭐ 默认位置就在数据目录里（persona.md）', per0.path.endsWith('persona.md') && per0.custom === false, per0.path)
+ok('⭐ 还没这个文件时：exists=false，而且说清了"插件自己不带性格"', per0.exists === false, per0.err)
+ok('⭐⭐ 这时提示词里压根没有【人格设定】这一段', !/【人格设定】/.test(pf0.json.full))
+ok('而且人格那段给的是空（不塞默认性格、不塞占位）',
+  pf0.json.pieces.find((x) => x.key === 'persona').chars === 0)
+ok('/status 也带回了人格文件实情',
+  typeof (await call('GET', '/api/bili-duty/status')).json?.persona?.path === 'string')
 
-// ② 填一个**真有** AGENTS.md 的目录 ⇒ 内容要真进提示词
-const wsDir = join(SANDBOX, 'my-workspace')
-mkdirSync(wsDir, { recursive: true })
-writeFileSync(join(wsDir, 'AGENTS.md'), '# 我的人设\n说话简洁，别客套。\n')
-await call('POST', '/api/bili-duty/config', { workspace: wsDir })
+// ② 写一份人格进去 ⇒ 内容要**原样**进提示词
+const PERSONA = '# 我的人格\n说话轻快一点，句尾用～收。\n遇到失败别卖萌。\n'
+const w1 = await call('POST', '/api/bili-duty/persona', { text: PERSONA })
+ok('POST /persona 写得进去', w1.code === 200 && w1.json?.ok === true && w1.json.saved === true, JSON.stringify(w1.json?.error))
+ok('写完回读出来了', w1.json?.exists === true && String(w1.json.text).includes('说话轻快一点'))
 const pf1 = await call('GET', '/api/bili-duty/prompt')
-ok('⭐ 填了真目录 ⇒ 认出来了', pf1.json.workspace.found === true, JSON.stringify(pf1.json.workspace))
-ok('报出了绝对路径与大小', pf1.json.workspace.dir === wsDir && pf1.json.workspace.size > 0)
-ok('owner 段拿到了内容', pf1.json.pieces.find((x) => x.key === 'owner').chars > 0)
-ok('⭐⭐ 内容真的拼进了这一轮发出去的话', /说话简洁，别客套/.test(pf1.json.full))
-ok('而且拼进去的是原文（没被 GFM 之类动过）', pf1.json.full.includes('# 我的人设'))
-// ⚠️ 不能跟 pf0 比（pf0 可能已经读了 cwd 那份）⇒ 留到 ③ 之后跟「填了但没读到」那次比 ✓
+ok('⭐⭐ 人格内容**原样**进了这一轮发出去的话',
+  pf1.json.full.includes('说话轻快一点，句尾用～收') && pf1.json.full.includes('遇到失败别卖萌'))
+ok('带了【人格设定】这个章节名', /【人格设定】/.test(pf1.json.full))
+ok('人格那段有字数了', pf1.json.pieces.find((x) => x.key === 'persona').chars > 0)
+ok('提示词相应变长了', pf1.json.chars > pf0.json.chars, pf1.json.chars + ' vs ' + pf0.json.chars)
 
-// ③ 填一个**没有** AGENTS.md 的目录 ⇒ 老实说没有，别静默
-await call('POST', '/api/bili-duty/config', { workspace: join(SANDBOX, 'empty-ws') })
+// ③ 位置可指定：换到别处的 md 就认那一份
+const customPath = join(SANDBOX, 'my-own', 'tone.md')
+mkdirSync(dirname(customPath), { recursive: true })
+writeFileSync(customPath, '# 另一个位置的人格\n只用短句。\n')
+await call('POST', '/api/bili-duty/config', { personaFile: customPath })
 const pf2 = await call('GET', '/api/bili-duty/prompt')
-ok('⭐ 填了但那儿没有 ⇒ 如实说没有（不静默回落）',
-  pf2.json.workspace.found === false && /没有 AGENTS\.md/.test(pf2.json.workspace.err || ''),
-  pf2.json.workspace.err)
-ok('⭐ 填了但那儿没有 ⇒ 也不回落去读 cwd（明确不读才不会有意外）',
-  pf2.json.workspace.fallback === false && pf2.json.pieces.find((x) => x.key === 'owner').chars === 0)
-ok('⭐ 有工作区内容时提示词确实更长', pf1.json.chars > pf2.json.chars,
-  pf1.json.chars + ' vs ' + pf2.json.chars)
+ok('⭐ 人格文件的位置可以指定到任何地方', pf2.json.persona.path === customPath, pf2.json.persona.path)
+ok('标记成"你指定的位置"', pf2.json.persona.custom === true)
+ok('换位置后读的是新那份', /只用短句/.test(pf2.json.full) && !/说话轻快一点/.test(pf2.json.full))
+ok('指向一个不存在的路径 ⇒ 老实说没有，而不是回落到默认那份',
+  (await call('POST', '/api/bili-duty/config', { personaFile: join(SANDBOX, 'nope', 'x.md') })) &&
+  (await call('GET', '/api/bili-duty/prompt')).json.persona.exists === false)
 
-// ④ /status 也带上了这条链路的实情
-const stw = (await call('GET', '/api/bili-duty/status')).json?.workspace
-ok('/status 里有 workspace 实情', stw && typeof stw.found === 'boolean' && typeof stw.err === 'string')
+// ④ 业务部分必须**没有性格**（分两种情况钉，别一刀切）
+const CHARACTER = /颜文字|语气|口癖|可爱|卖萌|人格/g
+// (a) 没有配置文件时：整条提示词里一个性格词都不该有 ✓
+await call('POST', '/api/bili-duty/config', { personaFile: '' })
+const pfNone0 = (await call('GET', '/api/bili-duty/prompt')).json
+// 先把默认那份删掉，确保真的是"没有"
+rmSync(join(SANDBOX, 'bili-duty', 'persona.md'), { force: true })
+const pfNone = (await call('GET', '/api/bili-duty/prompt')).json
+ok('⭐⭐ 没有配置文件时，整条提示词里一个性格词都没有',
+  pfNone.persona.exists === false && !CHARACTER.test(pfNone.full),
+  (pfNone.full.match(CHARACTER) || []).join(' '))
+// (b) 有配置文件时：只允许【人格设定】那一段 + 开场那句
+const rest = String(pf1.json.full)
+  .replace(/【人格设定】[\s\S]*?(?=\n【)/, '')
+  .replace(/不要套用你默认的人格。/, '')
+ok('⭐ 有配置文件时，除人格段与那句开场，其余部分不含性格词',
+  !CHARACTER.test(rest), (rest.match(CHARACTER) || []).join(' '))
 
 /* ⑭ 收拾干净 —— 沙箱里的配置别留给下一次跑 */
 await call('POST', '/api/bili-duty/config', { windows: [], noSubtitlePick: false, dmUids: [], dmUid: 0 })

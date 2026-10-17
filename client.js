@@ -185,6 +185,9 @@ window.__ModuleLoader__.load({
 [data-bd-crumb]{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;
   color:var(--dsw-alias-label-secondary,#6b7280);}
 [data-bd-crumb] b{font-weight:500;color:var(--dsw-alias-label-primary,#111827);}
+/* 人格设定那份 md 的编辑框（2026-10-18）：够高、能拉、等宽一点好对着写 ✓ */
+[data-bd-area]{width:100%;box-sizing:border-box;min-height:170px;resize:vertical;line-height:1.6;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;}
 [data-bd-narrow]{width:auto;max-width:200px;}
 
 /* ⭐ 窄屏（手机）：少几列、字号小一点、按钮挤一挤 —— 别横向溢出 */
@@ -778,74 +781,97 @@ window.__ModuleLoader__.load({
      *    这一页把每轮真发出去的话拆成三段摊开：
      *      ① 插件内置的人格与语气  ② 你工作区里的 AGENTS.md  ③ 章程 duty.md ✓
      */
-    const wsLine = (w) => {
-      if (!w) return '（宿主端还没重启，读不到这条实情）'
-      const head = w.configured ? `你填的是：${w.dir}` : '你没填工作区'
-      if (w.found) {
-        return `${head} ⇒ 会读 ${w.file}（${fmtSize(w.size)}${w.size > w.limit ? `，只取前 ${w.limit} 字` : ''}）`
-          + (w.fallback ? '　⚠️ 这是"dsh 启动目录"里的那份（因为留空），不是你指定的' : '')
-      }
-      return `${head} ⇒ 这一轮不读工作区设定（${w.err || '那儿没有 AGENTS.md'}）`
+    /* ────────────── 「人格」页（2026-10-18 重做）──────────────
+     * 🔴 为什么要重做：人格原来散在**三处** —— `index.js` 里写死一段、章程里有一节、
+     *    还会去读工作区的 `AGENTS.md` ✗。同一个"性格"有三个来源，改一处漏一处；
+     *    更糟的是**装插件的人会拿到别人写的性格** ✗。
+     * ✅ 现在收敛成**唯一一个 md 文件**（默认数据目录里的 `persona.md`，位置可指定）：
+     *    这一页能直接**看和改**它，也能看到它拼进这一轮提示词之后的样子 ✓
+     */
+    const personaLine = (p) => {
+      if (!p) return '（宿主端还没重启，读不到人格文件的实情）'
+      const where = p.custom ? `你指定的：${p.path}` : `默认位置：${p.path}`
+      if (p.exists) return `${where} ⇒ 这一轮**带着人格**（${p.chars} 字${p.truncated ? `，超长只取前 ${p.limit} 字` : ''}）`
+      return `${where} ⇒ 这一轮**不带人格设定**（${p.err || '还没有这个文件'}）`
     }
 
-    function PersonaView({ st }) {
-      const [d, setD] = React.useState(null)
+    function PersonaView({ st, say }) {
+      const [per, setPer] = React.useState(null)      // 那个 md 本身（/persona）
+      const [pr, setPr] = React.useState(null)        // 拼好的提示词（/prompt）
       const [err, setErr] = React.useState('')
+      const [draft, setDraft] = React.useState(null)
+      const [saving, setSaving] = React.useState(false)
       const [open, setOpen] = React.useState('')
-      React.useEffect(() => {
-        let alive = true
-        const tick = async () => {
-          try {
-            const r = await jget('/prompt')
-            if (!alive) return
-            if (r && r.ok) { setD(r); setErr('') } else setErr((r && r.error) || '读不到提示词')
-          } catch (e) { if (alive) setErr(String(e?.message ?? e)) }
-        }
-        tick()
-        const iv = setInterval(tick, 8000)
-        return () => { alive = false; clearInterval(iv) }
-      }, [])
+
+      const load = async () => {
+        try {
+          const a = await jget('/persona')
+          if (a && a.ok) { setPer(a); setDraft(a.text ?? ''); setErr('') }
+          else setErr((a && a.error) || '读不到人格文件')
+          const b = await jget('/prompt')
+          if (b && b.ok) setPr(b)
+        } catch (e) { setErr(String(e?.message ?? e)) }
+      }
+      React.useEffect(() => { load() }, [])
+
+      const saveIt = async () => {
+        setSaving(true)
+        try {
+          const r = await jpost('/persona', { text: draft })
+          if (r && r.ok) {
+            setPer(r)
+            if (say) say('人格设定已保存 —— 下一轮就按它来', 'good')
+            const b = await jget('/prompt')
+            if (b && b.ok) setPr(b)
+          } else if (say) say('保存失败：' + ((r && r.error) || '未知原因'), 'warn')
+        } catch (e) { if (say) say(String(e?.message ?? e), 'warn') } finally { setSaving(false) }
+      }
 
       if (err) return h('div', { 'data-bd-sec': '' }, h('div', { 'data-bd-warn': '' }, err))
-      if (!d) return h('div', { 'data-bd-sec': '' }, h('div', { 'data-bd-note': '' }, '正在读这一轮的提示词…'))
+      if (!per) return h('div', { 'data-bd-sec': '' }, h('div', { 'data-bd-note': '' }, '正在读人格设定…'))
 
-      const ws = d.workspace || (st && st.workspace)
-      const piece = (p) => h('div', { key: p.key, 'data-bd-sec': '' },
-        h('div', { 'data-bd-row': '' },
-          h('div', { 'data-bd-label': '' }, p.title),
-          p.builtin ? h('span', { 'data-bd-tag': '', 'data-bd-warn': '' }, '插件内置 · 谁装上都有') : null,
-          p.mine ? h('span', { 'data-bd-tag': '' }, '你自己改过的那份') : null,
-          h('span', { 'data-bd-note': '' }, `${p.chars} 字`),
-          h('button', {
-            'data-bd-btn': '', 'data-bd-tiny': '',
-            onClick: () => setOpen(open === p.key ? '' : p.key),
-          }, open === p.key ? '收起' : '看全文')),
-        h('div', { 'data-bd-note': '' }, p.from),
-        open === p.key ? h('pre', { 'data-bd-pre': '', 'data-tall': '' },
-          p.chars ? p.text : '（这一段是空的）') : null)
-
+      const dirty = draft !== null && draft !== (per.text ?? '')
+      const pieces = (pr && pr.pieces) || []
       return h('div', { 'data-bd-pane-settings': '' },
+        /* ① 唯一的人格来源：那个 md，直接改 */
+        h('div', { 'data-bd-sec': '' },
+          h('div', { 'data-bd-h': '' }, '人格设定（整个插件唯一的一份）'),
+          h('div', { 'data-bd-note': '' },
+            '插件本**不带**任何性格：这个文件里写什么，它这一轮就照什么来；'
+            + '文件空的或不存在 ⇒ 这一轮就没有人格设定。'
+            + '别处的提示词都只为"刷B站"这件事服务，不含性格。'),
+          h('div', { 'data-bd-note': '', 'data-bd-bad': per.exists ? undefined : '' }, personaLine(per)),
+          h('textarea', {
+            'data-bd-input': '', 'data-bd-area': '', rows: 12,
+            value: draft ?? '',
+            placeholder: '在这里写你的人格与语气；留空 = 不带人格设定。\n例如：说话轻快一点，句尾用「～」收；遇到失败别卖萌。',
+            onChange: (e) => setDraft(e.target.value),
+          }),
+          h('div', { 'data-bd-row': '' },
+            h('button', {
+              'data-bd-btn': '', disabled: saving || !dirty, onClick: saveIt,
+            }, saving ? '保存中…' : (dirty ? '保存' : '已保存')),
+            h('button', { 'data-bd-btn': '', disabled: saving, onClick: load }, '重新读'),
+            h('span', { 'data-bd-note': '' },
+              `${(draft ?? '').length} 字${per.truncated ? `（超长，只会送前 ${per.limit} 字）` : ''}`),
+            dirty ? h('span', { 'data-bd-warn': '' }, '有改动没保存') : null)),
+
+        /* ② 这一轮实际会发出去的话 */
         h('div', { 'data-bd-sec': '' },
           h('div', { 'data-bd-h': '' }, '这一轮会发出去的话'),
           h('div', { 'data-bd-note': '' },
-            '每跑一轮，插件都会把下面这些拼成一段话交给 AI —— 它这一轮的一切判断都以这段话为准。'
-            + `这一轮一共 ${d.chars} 字。`)),
-        h('div', { 'data-bd-sec': '' },
-          h('div', { 'data-bd-h': '' }, '工作区（你的 AGENTS.md）'),
-          h('div', {
-            'data-bd-note': '',
-            'data-bd-bad': ws && ws.found === false && ws.configured ? '' : undefined,
-          }, wsLine(ws))),
-        ...d.pieces.map(piece),
-        h('div', { 'data-bd-sec': '' },
+            pr ? `拼起来一共 ${pr.chars} 字，分两段 —— 人格那段的来源就是上面这个文件：` : '正在读…')),
+        ...pieces.map((p) => h('div', { key: p.key, 'data-bd-sec': '' },
           h('div', { 'data-bd-row': '' },
-            h('div', { 'data-bd-label': '' }, '拼起来的完整原文'),
+            h('div', { 'data-bd-label': '' }, p.title),
+            h('span', { 'data-bd-note': '' }, `${p.chars} 字`),
             h('button', {
               'data-bd-btn': '', 'data-bd-tiny': '',
-              onClick: () => setOpen(open === 'full' ? '' : 'full'),
-            }, open === 'full' ? '收起' : '看全文'),
-            h('button', { 'data-bd-btn': '', 'data-bd-tiny': '', onClick: () => copyText(d.full) }, '复制')),
-          open === 'full' ? h('pre', { 'data-bd-pre': '', 'data-tall': '' }, d.full) : null))
+              onClick: () => setOpen(open === p.key ? '' : p.key),
+            }, open === p.key ? '收起' : '看全文')),
+          h('div', { 'data-bd-note': '' }, p.from),
+          open === p.key ? h('pre', { 'data-bd-pre': '', 'data-tall': '' },
+            p.chars ? p.text : '（这一段是空的）') : null)))
     }
 
     /* ────────────── 设置页正文 ────────────── */
@@ -881,9 +907,8 @@ window.__ModuleLoader__.load({
       const cfg = st?.config
       // ⭐ 这台机器有没有桌面（决定"打开文件夹"是真按钮还是换成翻目录）✓
       const noDesktop = Boolean(st && st.platform && st.platform.desktop === false)
-      // ⭐ 工作区那条链路的实情（2026-10-18）：设置页据此当场告诉使用者
-      //    "会去哪个目录、那儿有没有 AGENTS.md" —— 不用再猜 ✓
-      const wsInfo = st && st.workspace
+      // ⭐ 人格文件的实情（2026-10-18）：哪个路径、在不在、多大 ✓
+      const persona = st && st.persona
       React.useEffect(() => {
         if (cfg && kws === null) setKws(Array.isArray(cfg.keywords) ? cfg.keywords.filter(Boolean) : [])
         if (cfg && ws === null) setWs(cfg.workspace || '')
@@ -1345,24 +1370,23 @@ window.__ModuleLoader__.load({
               onChange: (next) => { setKws(next); patch({ keywords: next }, '关键词') },
             })),
           h(Field, {
-            label: '工作区',
-            // ⚠️ 原来那句「留空 = dsh 自己的工作目录」等于没说：使用者不知道那是**哪个**
-            //    目录、那儿**有没有** AGENTS.md，只能自己猜（2026-10-18 的困惑就是这么来的）✗
-            note: '这个目录里的 AGENTS.md 会当"你的设定"读给它（最多取前 6000 字）。'
-              + '留空 = 只在 dsh 启动的那个目录里**真**有 AGENTS.md 时才读；没有就不读 —— 不会去翻别处',
+            label: '人格设定文件',
+            // ⚠️ 原来这里叫「工作区」，读的是那个目录里的 AGENTS.md ——
+            //    既说不清"留空去了哪儿"，又会把毫不相干的文档当成人格读进来 ✗（2026-10-18 去掉）
+            note: '整个插件**唯一**的人格来源，就这一个 md 文件。留空 = 用数据目录里的 persona.md。'
+              + '想放别处就填一个完整文件路径（如 /home/me/我的语气.md）；'
+              + '在「人格」那一页可以直接编辑它。文件不存在或留空 ⇒ 这一轮不带人格设定',
           },
             [
               h('input', {
-                key: 'i', 'data-bd-input': '', value: ws ?? '', placeholder: '/path/to/your/notes',
+                key: 'i', 'data-bd-input': '', value: ws ?? '', placeholder: '（留空 = 数据目录里的 persona.md）',
                 onChange: (e) => { setWs(e.target.value); autoSave('ws', saveText) },
                 onBlur: () => flushSave('ws'),
               }),
-              // ⭐ 实时实情：到底会去哪个目录、那儿有没有 —— 一眼看完，不用猜 ✓
               h('div', {
-                key: 's',
-                'data-bd-note': '',
-                'data-bd-bad': wsInfo && wsInfo.found === false && wsInfo.configured ? '' : undefined,
-              }, wsLine(wsInfo)),
+                key: 's', 'data-bd-note': '',
+                'data-bd-bad': persona && persona.exists === false ? '' : undefined,
+              }, personaLine(persona)),
             ]),
           h(Field, { label: '日报写多细' },
             h('select', {
@@ -1465,7 +1489,7 @@ window.__ModuleLoader__.load({
           report !== null ? h('pre', { 'data-bd-pre': '' }, report) : null)),
 
         tab === 'report' ? h(ReportView) : null,
-        tab === 'persona' ? h(PersonaView, { st }) : null,
+        tab === 'persona' ? h(PersonaView, { st, say }) : null,
         tab === 'debug' ? h(DebugView, { onRun, busy, st }) : null,
       )
     }
