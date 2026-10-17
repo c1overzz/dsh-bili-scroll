@@ -772,6 +772,82 @@ window.__ModuleLoader__.load({
           h('a', { 'data-bd-btn': '', href: dl(view.name), download: view.name }, '下载这份')) : null)
     }
 
+    /* ────────────── 「人格」页（2026-10-18 加）──────────────
+     * 🔴 为什么要有：使用者问过「人格设定到底在哪儿？是不是只读了 duty.md？」
+     *    —— 提示词是插件行为的**全部依据**，这种事不该让人猜 ✗。
+     *    这一页把每轮真发出去的话拆成三段摊开：
+     *      ① 插件内置的人格与语气  ② 你工作区里的 AGENTS.md  ③ 章程 duty.md ✓
+     */
+    const wsLine = (w) => {
+      if (!w) return '（宿主端还没重启，读不到这条实情）'
+      const head = w.configured ? `你填的是：${w.dir}` : '你没填工作区'
+      if (w.found) {
+        return `${head} ⇒ 会读 ${w.file}（${fmtSize(w.size)}${w.size > w.limit ? `，只取前 ${w.limit} 字` : ''}）`
+          + (w.fallback ? '　⚠️ 这是"dsh 启动目录"里的那份（因为留空），不是你指定的' : '')
+      }
+      return `${head} ⇒ 这一轮不读工作区设定（${w.err || '那儿没有 AGENTS.md'}）`
+    }
+
+    function PersonaView({ st }) {
+      const [d, setD] = React.useState(null)
+      const [err, setErr] = React.useState('')
+      const [open, setOpen] = React.useState('')
+      React.useEffect(() => {
+        let alive = true
+        const tick = async () => {
+          try {
+            const r = await jget('/prompt')
+            if (!alive) return
+            if (r && r.ok) { setD(r); setErr('') } else setErr((r && r.error) || '读不到提示词')
+          } catch (e) { if (alive) setErr(String(e?.message ?? e)) }
+        }
+        tick()
+        const iv = setInterval(tick, 8000)
+        return () => { alive = false; clearInterval(iv) }
+      }, [])
+
+      if (err) return h('div', { 'data-bd-sec': '' }, h('div', { 'data-bd-warn': '' }, err))
+      if (!d) return h('div', { 'data-bd-sec': '' }, h('div', { 'data-bd-note': '' }, '正在读这一轮的提示词…'))
+
+      const ws = d.workspace || (st && st.workspace)
+      const piece = (p) => h('div', { key: p.key, 'data-bd-sec': '' },
+        h('div', { 'data-bd-row': '' },
+          h('div', { 'data-bd-label': '' }, p.title),
+          p.builtin ? h('span', { 'data-bd-tag': '', 'data-bd-warn': '' }, '插件内置 · 谁装上都有') : null,
+          p.mine ? h('span', { 'data-bd-tag': '' }, '你自己改过的那份') : null,
+          h('span', { 'data-bd-note': '' }, `${p.chars} 字`),
+          h('button', {
+            'data-bd-btn': '', 'data-bd-tiny': '',
+            onClick: () => setOpen(open === p.key ? '' : p.key),
+          }, open === p.key ? '收起' : '看全文')),
+        h('div', { 'data-bd-note': '' }, p.from),
+        open === p.key ? h('pre', { 'data-bd-pre': '', 'data-tall': '' },
+          p.chars ? p.text : '（这一段是空的）') : null)
+
+      return h('div', { 'data-bd-pane-settings': '' },
+        h('div', { 'data-bd-sec': '' },
+          h('div', { 'data-bd-h': '' }, '这一轮会发出去的话'),
+          h('div', { 'data-bd-note': '' },
+            '每跑一轮，插件都会把下面这些拼成一段话交给 AI —— 它这一轮的一切判断都以这段话为准。'
+            + `这一轮一共 ${d.chars} 字。`)),
+        h('div', { 'data-bd-sec': '' },
+          h('div', { 'data-bd-h': '' }, '工作区（你的 AGENTS.md）'),
+          h('div', {
+            'data-bd-note': '',
+            'data-bd-bad': ws && ws.found === false && ws.configured ? '' : undefined,
+          }, wsLine(ws))),
+        ...d.pieces.map(piece),
+        h('div', { 'data-bd-sec': '' },
+          h('div', { 'data-bd-row': '' },
+            h('div', { 'data-bd-label': '' }, '拼起来的完整原文'),
+            h('button', {
+              'data-bd-btn': '', 'data-bd-tiny': '',
+              onClick: () => setOpen(open === 'full' ? '' : 'full'),
+            }, open === 'full' ? '收起' : '看全文'),
+            h('button', { 'data-bd-btn': '', 'data-bd-tiny': '', onClick: () => copyText(d.full) }, '复制')),
+          open === 'full' ? h('pre', { 'data-bd-pre': '', 'data-tall': '' }, d.full) : null))
+    }
+
     /* ────────────── 设置页正文 ────────────── */
 
     function Panel() {
@@ -805,6 +881,9 @@ window.__ModuleLoader__.load({
       const cfg = st?.config
       // ⭐ 这台机器有没有桌面（决定"打开文件夹"是真按钮还是换成翻目录）✓
       const noDesktop = Boolean(st && st.platform && st.platform.desktop === false)
+      // ⭐ 工作区那条链路的实情（2026-10-18）：设置页据此当场告诉使用者
+      //    "会去哪个目录、那儿有没有 AGENTS.md" —— 不用再猜 ✓
+      const wsInfo = st && st.workspace
       React.useEffect(() => {
         if (cfg && kws === null) setKws(Array.isArray(cfg.keywords) ? cfg.keywords.filter(Boolean) : [])
         if (cfg && ws === null) setWs(cfg.workspace || '')
@@ -1053,7 +1132,7 @@ window.__ModuleLoader__.load({
       //    它整个不生效 —— 界面上要置灰 + 说清原因，而不是留个亮着却什么都不干的开关 ✗
       const canComment = sw('autoComment') && (dmMode || 'off') !== 'only'
 
-      const TABS = [['settings', '设置'], ['report', '报告'], ['debug', '调试']]
+      const TABS = [['settings', '设置'], ['report', '报告'], ['persona', '人格'], ['debug', '调试']]
 
       return h('div', { 'data-bd-page': '' },
 
@@ -1267,13 +1346,24 @@ window.__ModuleLoader__.load({
             })),
           h(Field, {
             label: '工作区',
-            note: '它按这个目录里的 AGENTS.md 认设定 · 留空 = dsh 自己的工作目录',
+            // ⚠️ 原来那句「留空 = dsh 自己的工作目录」等于没说：使用者不知道那是**哪个**
+            //    目录、那儿**有没有** AGENTS.md，只能自己猜（2026-10-18 的困惑就是这么来的）✗
+            note: '这个目录里的 AGENTS.md 会当"你的设定"读给它（最多取前 6000 字）。'
+              + '留空 = 只在 dsh 启动的那个目录里**真**有 AGENTS.md 时才读；没有就不读 —— 不会去翻别处',
           },
-            h('input', {
-              'data-bd-input': '', value: ws ?? '', placeholder: '/path/to/your/notes',
-              onChange: (e) => { setWs(e.target.value); autoSave('ws', saveText) },
-              onBlur: () => flushSave('ws'),
-            })),
+            [
+              h('input', {
+                key: 'i', 'data-bd-input': '', value: ws ?? '', placeholder: '/path/to/your/notes',
+                onChange: (e) => { setWs(e.target.value); autoSave('ws', saveText) },
+                onBlur: () => flushSave('ws'),
+              }),
+              // ⭐ 实时实情：到底会去哪个目录、那儿有没有 —— 一眼看完，不用猜 ✓
+              h('div', {
+                key: 's',
+                'data-bd-note': '',
+                'data-bd-bad': wsInfo && wsInfo.found === false && wsInfo.configured ? '' : undefined,
+              }, wsLine(wsInfo)),
+            ]),
           h(Field, { label: '日报写多细' },
             h('select', {
               'data-bd-input': '', value: rl ?? 'full',
@@ -1375,6 +1465,7 @@ window.__ModuleLoader__.load({
           report !== null ? h('pre', { 'data-bd-pre': '' }, report) : null)),
 
         tab === 'report' ? h(ReportView) : null,
+        tab === 'persona' ? h(PersonaView, { st }) : null,
         tab === 'debug' ? h(DebugView, { onRun, busy, st }) : null,
       )
     }

@@ -101,7 +101,9 @@ writeFileSync(join(HOME, 'duty.log'),
 
 /* ── 假 ctx：把路由抓下来 ───────────────────────────────────────── */
 let mod
-try { mod = await import('./index.js') } catch (e) {
+// ⭐ INDEX_JS=<路径>：换个 index.js 来跑（改前改后的提示词逐字对比就靠它）
+const INDEX_JS = process.env.INDEX_JS || './index.js'
+try { mod = await import(INDEX_JS) } catch (e) {
   console.error('✗ import index.js 失败：' + e?.message); process.exit(1)
 }
 
@@ -170,6 +172,13 @@ if (days.length > 1) {
   const rp2 = await call('GET', '/api/bili-duty/report?day=' + days[1])
   ok('/report?day= 能换日期', rp2.code === 200 && rp2.json?.day === days[1], 'day=' + rp2.json?.day)
   ok('换日期后解析的是那一天', rp2.json?.parsed?.day === days[1])
+}
+
+/* ③′ 需要的话，把**这一轮真发出去的话**原样 dump 出来 */
+if (process.env.DUMP_PROMPT) {
+  const p0 = await call('GET', '/api/bili-duty/debug')
+  writeFileSync(process.env.DUMP_PROMPT, String(p0.json?.prompt || ''))
+  console.log(`（提示词已 dump 到 ${process.env.DUMP_PROMPT}：${String(p0.json?.prompt || '').length} 字）`)
 }
 
 /* ④ /debug */
@@ -312,6 +321,68 @@ if (process.env.DUMP_FILES) {
   writeFileSync(process.env.DUMP_FILES, JSON.stringify({ files: fl.json, file: one && one.json }, null, 2))
   console.log(`（真接口输出已 dump 到 ${process.env.DUMP_FILES}）`)
 }
+
+/* ⑬″ 工作区那条链路 + 「人格 / 提示词」页
+ *  🔴 原来留空会**静默**回落到 process.cwd()（dsh 启动目录，通常没有 AGENTS.md）⇒
+ *     "填了"和"没填"看起来一模一样，使用者只能猜 ✗。现在必须**如实报出来** ✓ */
+const pf0 = await call('GET', '/api/bili-duty/prompt')
+ok('/prompt 200 且 ok', pf0.code === 200 && pf0.json?.ok === true, 'code=' + pf0.code)
+ok('/prompt 分了三段（人格 / 工作区 / 章程）',
+  Array.isArray(pf0.json.pieces) && pf0.json.pieces.map((x) => x.key).join() === 'persona,owner,charter',
+  (pf0.json.pieces || []).map((x) => x.key).join())
+const persona = pf0.json.pieces.find((x) => x.key === 'persona')
+ok('人格那段标了"插件内置"（谁装上都有，得让人看见）', persona.builtin === true)
+ok('人格那段不是空的', persona.chars > 200, persona.chars)
+ok('章程那段有内容、且报出了用的哪一份',
+  pf0.json.pieces.find((x) => x.key === 'charter').chars > 1000 &&
+  /duty\.md/.test(pf0.json.pieces.find((x) => x.key === 'charter').from))
+ok('完整提示词拼得出来', pf0.json.chars > 1000 && pf0.json.full.length === pf0.json.chars)
+
+// ① 没填工作区：必须说清「留空去了哪儿、那儿有没有」
+//    ⚠️ 这条**不能假设「一定读不到」** —— 跑测试时 cwd 就是仓库目录，那儿**有** AGENTS.md
+//    （就是那份写给 AI 看的说明）。新逻辑是「留空 ⇒ 只在真有时才认」，两种结果都合法，
+//    但**必须如实**：读到了要标 fallback，没读到要把原因写出来 ✓
+const ws0 = pf0.json.workspace
+ok('/prompt 带回了工作区实情',
+  ws0 && typeof ws0.found === 'boolean' && 'fallback' in ws0 && typeof ws0.err === 'string')
+ok('没填时 configured 就是空', ws0.configured === '')
+if (ws0.found) {
+  ok('⭐ 留空时读到的那份必须标成 fallback（免得当成使用者自己填的）', ws0.fallback === true)
+  ok('而且路径确实指向 cwd 下的 AGENTS.md', ws0.file === join(ws0.cwd, 'AGENTS.md'), ws0.file)
+} else {
+  ok('⭐ 留空且那儿没有 ⇒ 明说去了哪儿、为什么没读，不静默',
+    /留空/.test(ws0.err) && /AGENTS\.md/.test(ws0.err), ws0.err)
+}
+const pr0 = pf0.json.pieces.find((x) => x.key === 'owner')
+ok('工作区那段的 found 跟 workspace 一致', pr0.found === ws0.found)
+
+// ② 填一个**真有** AGENTS.md 的目录 ⇒ 内容要真进提示词
+const wsDir = join(SANDBOX, 'my-workspace')
+mkdirSync(wsDir, { recursive: true })
+writeFileSync(join(wsDir, 'AGENTS.md'), '# 我的人设\n说话简洁，别客套。\n')
+await call('POST', '/api/bili-duty/config', { workspace: wsDir })
+const pf1 = await call('GET', '/api/bili-duty/prompt')
+ok('⭐ 填了真目录 ⇒ 认出来了', pf1.json.workspace.found === true, JSON.stringify(pf1.json.workspace))
+ok('报出了绝对路径与大小', pf1.json.workspace.dir === wsDir && pf1.json.workspace.size > 0)
+ok('owner 段拿到了内容', pf1.json.pieces.find((x) => x.key === 'owner').chars > 0)
+ok('⭐⭐ 内容真的拼进了这一轮发出去的话', /说话简洁，别客套/.test(pf1.json.full))
+ok('而且拼进去的是原文（没被 GFM 之类动过）', pf1.json.full.includes('# 我的人设'))
+// ⚠️ 不能跟 pf0 比（pf0 可能已经读了 cwd 那份）⇒ 留到 ③ 之后跟「填了但没读到」那次比 ✓
+
+// ③ 填一个**没有** AGENTS.md 的目录 ⇒ 老实说没有，别静默
+await call('POST', '/api/bili-duty/config', { workspace: join(SANDBOX, 'empty-ws') })
+const pf2 = await call('GET', '/api/bili-duty/prompt')
+ok('⭐ 填了但那儿没有 ⇒ 如实说没有（不静默回落）',
+  pf2.json.workspace.found === false && /没有 AGENTS\.md/.test(pf2.json.workspace.err || ''),
+  pf2.json.workspace.err)
+ok('⭐ 填了但那儿没有 ⇒ 也不回落去读 cwd（明确不读才不会有意外）',
+  pf2.json.workspace.fallback === false && pf2.json.pieces.find((x) => x.key === 'owner').chars === 0)
+ok('⭐ 有工作区内容时提示词确实更长', pf1.json.chars > pf2.json.chars,
+  pf1.json.chars + ' vs ' + pf2.json.chars)
+
+// ④ /status 也带上了这条链路的实情
+const stw = (await call('GET', '/api/bili-duty/status')).json?.workspace
+ok('/status 里有 workspace 实情', stw && typeof stw.found === 'boolean' && typeof stw.err === 'string')
 
 /* ⑭ 收拾干净 —— 沙箱里的配置别留给下一次跑 */
 await call('POST', '/api/bili-duty/config', { windows: [], noSubtitlePick: false, dmUids: [], dmUid: 0 })

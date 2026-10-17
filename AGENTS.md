@@ -40,7 +40,10 @@
 
 - `index.js` —— host 半端：12 个工具 + 时段定时器 + HTTP 接口 + 设置命名空间
   · 里面有一节「跨平台的那点基础设施」（`whichSync` / `asCommand` / `resolvePy`），**改命令之前先读它**
-- `client.js` —— 浏览器半端：设置页（注册在 `settings.section`）
+- `client.js` —— 浏览器半端：设置页（注册在 `settings.section`），四个标签
+  `设置 / 报告 / 人格 / 调试`
+  · ⭐ 「人格」页把**每轮真发出去的话**拆成三段摊开（内置人格 / 工作区的 AGENTS.md / 章程），
+    数据来自 `GET /api/bili-duty/prompt` —— 提示词是插件行为的全部依据，**不该让人猜** ✗
 - `lib/` —— 数据目录（`stateDir`，配置 / 报告 / 凭证都在这儿）/ 极小的 MCP stdio 客户端 / 扫码登录 / **`hostdeps.mjs`（从宿主树取 `@deepseek-ai/*`，拿不到就退到自己依赖 / 本地等价实现）** / **`verify.mjs`（评论发出后复核）**
 - `prompts/duty.md` —— 一轮要做的事（判定口径 + 红线，**用户可以改**）
   · 🔴 **别把使用者个人的口味写进这一份** ✗。他自己那份是 `$DSH_HOME/bili-duty/duty.md`
@@ -73,6 +76,11 @@
 ## 约定
 
 - 配置与运行数据都在用户的 `$DSH_HOME/bili-duty/`，**不写进插件包目录**
+- ⭐ **「工作区」的语义**（`cfg.workspace` → `wsInfo()`）：
+  填了就往那儿找 `AGENTS.md`；**留空时只在 dsh 启动目录里真找得到时才认它**，没有就**不读** ✓
+  · 🔴 别退回"留空 = 无条件读 `process.cwd()`" —— 那在服务器 / 桌面上是个没意义的目录，
+    而且会让"填了"和"没填"看起来一样，使用者只能猜 ✗（2026-10-18 的困惑就是这么来的）
+  · 不管读没读到，都要把实情报给设置页（`/status.workspace`、设置页那行小字）✓
 - 时段（`cfg.windows`，`"HH:MM-HH:MM"` 字符串数组）：**非空就接管**，空了才回落到内置的 noon / night。
   内置那两组按 DeepSeek 官方口径：工作日 9–12 / 14–18 是高峰，其余（含周末）都是谷时。
   ⚠️ 「这一场跑过没有」按**覆盖块**记（`windowBlocks` + `blockAt`，见 `lib/state.mjs` 里那段长注释）：
