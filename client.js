@@ -138,6 +138,8 @@ window.__ModuleLoader__.load({
       const [modelText, setModelText] = React.useState(null)
       const [effortText, setEffortText] = React.useState(null)
       const [modelInfo, setModelInfo] = React.useState(null)
+      const [catalog, setCatalog] = React.useState(null)
+      const [selModel, setSelModel] = React.useState(null)
       const [subsText, setSubsText] = React.useState(null)
       const [watchText, setWatchText] = React.useState('')
       const [watchMsg, setWatchMsg] = React.useState('')
@@ -162,6 +164,11 @@ window.__ModuleLoader__.load({
         if (cfg && subsText === null) setSubsText((cfg.subs || []).join('\n'))
         if (cfg && modelText === null) setModelText(cfg.headlessModel || '')
         if (cfg && effortText === null) setEffortText(cfg.headlessEffort || '')
+        if (cfg && selModel === null) {
+          setSelModel(String(cfg.headlessModel || '').trim()
+            ? `${String(cfg.headlessProvider || 'deepseek-official').trim()}::${String(cfg.headlessModel).trim()}`
+            : '')
+        }
         if (cfg && ws === null) setWs(cfg.workspace || '')
         if (cfg && rl === null) setRl(cfg.reportLevel || 'full')
         if (cfg && perDay === null) setPerDay(String(cfg.perDay ?? 5))
@@ -326,6 +333,10 @@ window.__ModuleLoader__.load({
         await patch({ keywords: list, workspace: String(ws || '').trim() }, '关键词与工作区')
       }
 
+      React.useEffect(() => {
+        jget('/models').then((d) => setCatalog(d || { ok: false, error: '空' })).catch(() => setCatalog({ ok: false, error: '请求失败' }))
+      }, [])
+
       const onSaveModel = async () => {
         await patch({ headlessModel: String(modelText || '').trim(), headlessEffort: String(effortText ?? '') }, '模型')
         setModelInfo(null)
@@ -363,6 +374,23 @@ window.__ModuleLoader__.load({
       }
 
       const sw = (k) => Boolean(cfg[k])
+      /* 模型下拉：优先用 DSH 报上来的目录；拿不到就退回内置已知的那几个 */
+      const FALLBACK_MODELS = [
+        { provider: 'deepseek-official', id: 'deepseek-flash', name: 'DeepSeek-V41-Flash' },
+        { provider: 'deepseek-official', id: 'deepseek-v4-pro', name: 'DeepSeek-V4-Pro' },
+      ]
+      const modelChoices = (() => {
+        const list = []
+        if (catalog && catalog.ok && Array.isArray(catalog.providers)) {
+          for (const pv of catalog.providers) {
+            for (const m of (pv.models || [])) {
+              list.push({ provider: pv.provider, label: pv.label || pv.provider, id: m.id, name: m.name || m.id })
+            }
+          }
+        }
+        if (!list.length) return FALLBACK_MODELS.map((m) => ({ ...m, label: 'deepseek-official' }))
+        return list
+      })()
 
       /* 看画面：按"格子数 × 清晰度"算一张拼图多大，再折算走图的 token（估算，量级对就行） */
       const fgrid = ({ 4: [2, 2], 9: [3, 3], 16: [4, 4] })[Number(cfg.frameCount) || 9] || [3, 3]
@@ -370,11 +398,12 @@ window.__ModuleLoader__.load({
       const fh = Math.round(fw * 9 / 16)
       const sheetW = fgrid[1] * fw + (fgrid[1] + 1) * 6
       const sheetH = fgrid[0] * (fh + 22) + (fgrid[0] + 1) * 6
-      // 模型那边一般会把长边缩到 1400 上下再切 patch ⇒ 清晰度对 token 影响很小，算"缩放后"的尺寸
-      const scl = Math.min(1, 1400 / Math.max(sheetW, sheetH))
-      const effW = Math.round(sheetW * scl)
-      const effH = Math.round(sheetH * scl)
-      const tokPer = Math.ceil(effW * effH / 800 / 100) * 100      // 大约 1 token / 800 像素
+      // ⭐ 用 DSH 里 deepseek 适配器写的官方算法：14px patch、每轴 3:1 下采样 ⇒ 42px 一格，
+      //    整张图封顶 1024 tokens（见 dsh-llm-deepseek/image-tokens）
+      const CELL = 42
+      const effW = sheetW
+      const effH = sheetH
+      const tokPer = Math.min(1024, Math.ceil(effW / CELL) * Math.ceil(effH / CELL))
       const nPerDay = Number(cfg.perDay) || 0
       const tokPerDay = sw('seeVideo') ? tokPer * nPerDay : 0
 
@@ -427,16 +456,39 @@ window.__ModuleLoader__.load({
         h('div', { 'data-bd-sec': '' },
           h('div', { 'data-bd-h': '' }, '这一轮用哪个模型'),
           h('div', { 'data-bd-note': '' }, '定时刷、点名看用的都是 headless 那一档。留空就跟着 profile 的默认走 —— 这是以前的黑盒。'),
-          h('div', { 'data-bd-row': '' },
-            h('div', { 'data-bd-grow': '' },
-              h('div', { 'data-bd-label': '' }, '模型'),
-              h('div', { 'data-bd-note': '' }, '填你账号里有的那个（例如 deepseek-flash）')),
-            h('input', {
-              'data-bd-input': '', style: { width: '200px', flex: '0 0 200px' },
-              value: modelText ?? '', placeholder: '留空 = 跟默认',
-              onChange: (e) => setModelText(e.target.value),
-              onBlur: () => patch({ headlessModel: String(modelText || '').trim() }, '模型'),
-            })),
+          (modelChoices.length > 0)
+            ? h('div', { 'data-bd-row': '' },
+              h('div', { 'data-bd-grow': '' },
+                h('div', { 'data-bd-label': '' }, '模型'),
+                h('div', { 'data-bd-note': '' }, '列的是这个 DSH 里**能用的**模型（接了几家就列几家；读不到目录时列内置的那几个）')),
+              h('select', {
+                'data-bd-input': '', 'data-bd-sel': '', style: { width: '280px', flex: '0 0 280px' },
+                value: selModel ?? '',
+                onChange: (e) => {
+                  const v = e.target.value
+                  setSelModel(v)
+                  const [pv, mv] = v.split('::')
+                  patch({ headlessProvider: pv || 'deepseek-official', headlessModel: mv || '' }, '模型')
+                },
+              },
+                h('option', { value: '' }, '跟默认（不覆盖）'),
+                ...modelChoices.map((m) => h('option', { key: `${m.provider}::${m.id}`, value: `${m.provider}::${m.id}` },
+                  `${m.label && m.label !== m.provider ? m.label + ' · ' : ''}${m.name}${m.name === m.id ? '' : `（${m.id}）`}`)),
+                (selModel && !modelChoices.some((m) => `${m.provider}::${m.id}` === selModel)
+                  ? h('option', { value: selModel }, `（当前保存的 ${selModel.split('::')[1] || selModel} 不在目录里）`)
+                  : null)))
+            : h('div', { 'data-bd-row': '' },
+              h('div', { 'data-bd-grow': '' },
+                h('div', { 'data-bd-label': '' }, '模型'),
+                h('div', { 'data-bd-note': '' }, catalog && !catalog.ok
+                  ? `读不到模型目录（${catalog.error || '未知原因'}）—— 先手填吧`
+                  : '读模型目录中…（读不到就只能手填）')),
+              h('input', {
+                'data-bd-input': '', style: { width: '200px', flex: '0 0 200px' },
+                value: modelText ?? '', placeholder: '留空 = 跟默认',
+                onChange: (e) => setModelText(e.target.value),
+                onBlur: () => patch({ headlessModel: String(modelText || '').trim() }, '模型'),
+              })),
           h('div', { 'data-bd-row': '' },
             h('div', { 'data-bd-grow': '' },
               h('div', { 'data-bd-label': '' }, '思考等级'),

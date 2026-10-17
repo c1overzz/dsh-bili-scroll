@@ -605,6 +605,45 @@ export function apply(ctx, config) {
    */
   let modelCache = { at: 0, val: null }
 
+
+  /** 列出这个 DSH 里**真正可用的模型**（可能不止 DeepSeek 一家）*/
+  let modelsCache = { at: 0, val: null }
+  const listAllModels = async (fresh) => {
+    if (!fresh && modelsCache.val && Date.now() - modelsCache.at < 300000) return modelsCache.val
+    let out
+    try {
+      const llm = ctx.llm
+      if (!llm || typeof llm.listProviders !== 'function') {
+        out = { ok: false, error: '这个 DSH 版本没暴露模型目录（ctx.llm 不可用）' }
+      } else {
+        const providers = llm.listProviders() || []
+        const rows = []
+        for (const p of providers) {
+          const id = String(p.id ?? p.provider ?? p.name ?? '')
+          if (!id) continue
+          let models = []
+          try {
+            models = typeof llm.listModels === 'function' ? await llm.listModels(id) : []
+          } catch { models = [] }
+          rows.push({
+            provider: id,
+            label: String(p.label || p.title || p.name || id),
+            models: (models || []).map((m) => ({
+              id: String(m.id || ''),
+              name: String(m.name || m.id || ''),
+              description: String(m.description || ''),
+            })).filter((m) => m.id),
+          })
+        }
+        out = { ok: true, providers: rows }
+      }
+    } catch (e) {
+      out = { ok: false, error: String(e?.message ?? e) }
+    }
+    modelsCache = { at: Date.now(), val: out }
+    return out
+  }
+
   const dumpModelConfig = () => new Promise((resolve) => {
     let out = ''
     let done = false
@@ -1109,6 +1148,11 @@ export function apply(ctx, config) {
   const handle = async (req, res, url) => {
     const path = url.pathname
     if (req.method === 'GET' && path === '/api/bili-duty/status') return sendJson(res, 200, status())
+
+    if (req.method === 'GET' && path === '/api/bili-duty/models') {
+      const fresh = String(url.searchParams.get('fresh') || '') === '1'
+      return sendJson(res, 200, await listAllModels(fresh))
+    }
 
     if (req.method === 'GET' && path === '/api/bili-duty/model') {
       const fresh = String(url.searchParams.get('fresh') || '') === '1'
