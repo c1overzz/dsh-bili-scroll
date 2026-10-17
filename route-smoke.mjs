@@ -423,6 +423,49 @@ const rest = String(pf1.json.full)
 ok('⭐ 有配置文件时，除人格段与那句开场，其余部分没有具体的性格规定',
   !HARD.test(rest), (rest.match(HARD) || []).join(' '))
 
+/* ⑬‴ 跑那一轮用哪个模型（2026-10-18 加）：在 overlay 里覆盖 agent-default-model
+ *  🔴 这两个值会被**直接写进 YAML** ⇒ 注入面，所以非法值必须挡掉并且如实报出来 ✗ */
+const ovOf = async () => (await call('GET', '/api/bili-duty/debug')).json
+// (a) 什么都不填 ⇒ 只覆盖 MCP，不碰模型
+await call('POST', '/api/bili-duty/config', { modelProvider: '', model: '' })
+const ov0 = await ovOf()
+ok('没填模型时，overlay 里不出现 agent-default-model（不动使用者的 profile）',
+  !/agent-default-model/.test(ov0.overlay.text), ov0.overlay.text.slice(0, 60))
+ok('但 MCP 那一段照旧在', /mcp-bili-duty/.test(ov0.overlay.text))
+ok('/debug 报出了"没覆盖"', ov0.modelPick.provider === '' && ov0.modelPick.model === '')
+
+// (b) 填了 ⇒ overlay 里多一段 id-targeted 覆盖，而且跟 MCP 共存
+await call('POST', '/api/bili-duty/config', { modelProvider: 'xinghe', model: 'DeepSeek-V4.1-Flash' })
+const ov1 = await ovOf()
+ok('填了模型 ⇒ overlay 里出现 agent-default-model', /- id: agent-default-model/.test(ov1.overlay.text))
+ok('服务商与模型都写进去了',
+  /provider: 'xinghe'/.test(ov1.overlay.text) && /model: 'DeepSeek-V4.1-Flash'/.test(ov1.overlay.text))
+ok('MCP 那段还在（两段共存）', /mcp-bili-duty/.test(ov1.overlay.text))
+ok('/status 也报出了这一轮会用哪个', 
+  (await call('GET', '/api/bili-duty/status')).json?.modelPick?.model === 'DeepSeek-V4.1-Flash')
+
+// (c) 只填模型也行
+await call('POST', '/api/bili-duty/config', { modelProvider: '', model: 'gpt-6-astra' })
+const ov2 = await ovOf()
+ok('只填模型也能覆盖', /- id: agent-default-model/.test(ov2.overlay.text) && /model: 'gpt-6-astra'/.test(ov2.overlay.text))
+ok('这时不写 provider（沿用 profile 的）', !/provider:/.test(ov2.overlay.text.split('agent-default-model')[1] || ''))
+
+// (d) 🔴 注入尝试：换行 / 引号 / 特殊字符
+const EVIL = "x'\n- insert:\n    - id: evil\n      name: '@evil/pkg'"
+await call('POST', '/api/bili-duty/config', { modelProvider: '', model: EVIL })
+const ov3 = await ovOf()
+ok('⭐⭐ 带换行的模型名被拒（否则能往 profile 里注入任意插件配置）',
+  !/evil/.test(ov3.overlay.text), ov3.overlay.text.slice(0, 80))
+ok('被拒的值如实报出来，不静默忽略', ov3.modelPick.rejected.length === 1 && /evil/.test(ov3.modelPick.rejected[0]))
+ok('这时 overlay 退回"不覆盖模型"', !/agent-default-model/.test(ov3.overlay.text))
+for (const bad of ['a b', 'a"b', "a'b", 'a\nb', '../etc', '-x', '']) {
+  await call('POST', '/api/bili-duty/config', { model: bad })
+  const t = (await ovOf()).overlay.text
+  ok(`非法模型名 ${JSON.stringify(bad)} 不写进 overlay`, !/agent-default-model/.test(t) || !/model:/.test(t.split('agent-default-model')[1] || ''))
+}
+// 恢复干净
+await call('POST', '/api/bili-duty/config', { modelProvider: '', model: '' })
+
 /* ⑭ 收拾干净 —— 沙箱里的配置别留给下一次跑 */
 await call('POST', '/api/bili-duty/config', { windows: [], noSubtitlePick: false, dmUids: [], dmUid: 0 })
 

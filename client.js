@@ -891,8 +891,10 @@ window.__ModuleLoader__.load({
       const [note, setNote] = React.useState(null)
       const [tab, setTab] = React.useState('settings')   // 设置 / 报告 / 调试
       const [kws, setKws] = React.useState(null)           // 关键词（数组草稿）
-      const [ws, setWs] = React.useState(null)
+      const [pf, setPf] = React.useState(null)          // 人格设定文件的路径
       const [rl, setRl] = React.useState(null)
+      const [mdl, setMdl] = React.useState(null)        // 模型草稿
+      const [mdlP, setMdlP] = React.useState(null)      // 服务商草稿
       const [newVer, setNewVer] = React.useState('')       // 发现的新版本号（空 = 没发现）          // 日报形态：full / brief / off
       // ⚠️ 输入框必须绑"本地草稿"：页面每 5 秒轮询 /status，服务端那份会把 config 盖掉
       //    ⇒ 直接绑 cfg 的话，用户打字打到一半就被冲没了 ✗（2026-10-14 陌生人验收时抓到）
@@ -919,7 +921,7 @@ window.__ModuleLoader__.load({
       const persona = st && st.persona
       React.useEffect(() => {
         if (cfg && kws === null) setKws(Array.isArray(cfg.keywords) ? cfg.keywords.filter(Boolean) : [])
-        if (cfg && ws === null) setWs(cfg.workspace || '')
+        if (cfg && pf === null) setPf(String(cfg.personaFile ?? ''))
         if (cfg && rl === null) setRl(cfg.reportLevel || 'full')
         if (cfg && perDay === null) setPerDay(String(cfg.perDay ?? 5))
         if (cfg && perRound === null) setPerRound(String(cfg.commentPerRound ?? 1))
@@ -937,6 +939,10 @@ window.__ModuleLoader__.load({
         if (cfg && dmMode === null) setDmMode(cfg.dmMode || 'off')
         if (cfg && aiKw === null) setAiKw(Array.isArray(cfg.aiKeywords) ? cfg.aiKeywords.filter(Boolean) : [])
         if (cfg && wins === null) setWins(Array.isArray(cfg.windows) ? cfg.windows.filter(Boolean) : [])
+        if (cfg && mdl === null) {
+          setMdl(String(cfg.model ?? ''))
+          setMdlP(String(cfg.modelProvider ?? ''))
+        }
         // ⭐ 没有桌面的机器（NAS / 服务器）上「打开文件夹」是做不到的事 ⇒ 默认就把目录摊开 ✓
         if (st && filesWhat === null) setFilesWhat(st.platform && st.platform.desktop === false ? 'out' : '')
       }, [cfg, st && st.platform && st.platform.desktop])
@@ -1150,10 +1156,14 @@ window.__ModuleLoader__.load({
       /* ⚠️ 原来的 `asList`（把"一行一个"的 textarea 拆成数组）随那几个框一起删了 ——
        *    现在列表字段都是 Chips，拆标签是它自己的事 ✓ */
 
-      const saveText = () => patch({
-        keywords: kws || [],
-        workspace: String(ws || '').trim(),
-      }, '关键词与工作区')
+      const saveText = () => patch({ keywords: kws || [] }, '关键词')
+      // ⭐ 模型 / 服务商（2026-10-18）：两个框一起存，留空就是"用 profile 默认" ✓
+      // 🔴 这个字段原来绑在 `ws` 上、存的却是 keywords ✗ —— 填了根本存不进去（2026-10-18 修）
+      const savePersonaFile = () => patch({ personaFile: String(pf || '').trim() }, '人格设定文件的位置')
+      const saveModel = () => patch({
+        modelProvider: String(mdlP || '').trim(),
+        model: String(mdl || '').trim(),
+      }, '模型')
 
       if (!cfg) {
         return h('div', { 'data-bd-page': '' }, h('div', { 'data-bd-note': '' }, '读设置中…'))
@@ -1164,6 +1174,13 @@ window.__ModuleLoader__.load({
       // ⭐ 楼中楼只在「真的会发公开评论」时才有意义：没开自动评论、或投递方式选了「只私信」时
       //    它整个不生效 —— 界面上要置灰 + 说清原因，而不是留个亮着却什么都不干的开关 ✗
       const canComment = sw('autoComment') && (dmMode || 'off') !== 'only'
+
+      // ⭐ 模型那两个值：显示"现在到底会用什么"，以及被拒的值（含非法字符那种）✓
+      const pick = st.modelPick || { provider: '', model: '', rejected: [] }
+      const modelNow = pick.model
+        ? `这一轮会用：${pick.provider || '（沿用 profile 的服务商）'} / ${pick.model}`
+        : '这一轮会用：profile 自己配的那个（没有覆盖）'
+      const modelBad = (pick.rejected || []).join(' ／ ')
 
       const TABS = [['settings', '设置'], ['report', '报告'], ['persona', '人格'], ['debug', '调试']]
 
@@ -1385,9 +1402,9 @@ window.__ModuleLoader__.load({
           },
             [
               h('input', {
-                key: 'i', 'data-bd-input': '', value: ws ?? '', placeholder: '（留空 = 数据目录里的 persona.md）',
-                onChange: (e) => { setWs(e.target.value); autoSave('ws', saveText) },
-                onBlur: () => flushSave('ws'),
+                key: 'i', 'data-bd-input': '', value: pf ?? '', placeholder: '（留空 = 数据目录里的 persona.md）',
+                onChange: (e) => { setPf(e.target.value); autoSave('pf', savePersonaFile) },
+                onBlur: () => flushSave('pf'),
               }),
               h('div', {
                 key: 's', 'data-bd-note': '',
@@ -1440,6 +1457,29 @@ window.__ModuleLoader__.load({
             st.asrTail ? h('div', null,
               h('div', { 'data-bd-note': '' }, st.asrInstalling ? '正在装（进度）：' : '日志（末尾）：'),
               h('pre', { 'data-bd-pre': '' }, st.asrTail)) : null) : null),
+
+        /* ── ⑤ 环境与账号 ── */
+        h('div', { 'data-bd-sec': '' },
+          h('div', { 'data-bd-h': '' }, '跑这一轮用哪个模型'),
+          h('div', { 'data-bd-row': '' },
+            h(Field, { label: '服务商' },
+              h('input', {
+                'data-bd-input': '', 'data-bd-narrow': '', value: mdlP ?? '', placeholder: '留空 = profile 默认',
+                onChange: (e) => { setMdlP(e.target.value); autoSave('mdlP', saveModel) },
+                onBlur: () => flushSave('mdlP'),
+              })),
+            h(Field, { label: '模型' },
+              h('input', {
+                'data-bd-input': '', value: mdl ?? '', placeholder: '留空 = profile 默认',
+                onChange: (e) => { setMdl(e.target.value); autoSave('mdl', saveModel) },
+                onBlur: () => flushSave('mdl'),
+              }))),
+          h('div', { 'data-bd-note': '' },
+            '留空就用 profile 自己配的那个（默认是 headless 那份）。'
+            + '填了的话，跑每一轮时会生成一份覆盖丢给 dsh —— 只影响这个插件跑的那一轮，不动你的 profile'),
+          modelBad ? h('div', { 'data-bd-warn': '' },
+            '这两个值只能填字母数字和 . _ : / -（要写进配置文件），下面这个没被采用：' + modelBad) : null,
+          h('div', { 'data-bd-note': '' }, modelNow)),
 
         /* ── ⑤ 环境与账号 ── */
         h('div', { 'data-bd-sec': '' },

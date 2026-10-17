@@ -109,6 +109,10 @@ export const Config = !z ? undefined : z.object({
   // ⭐ 人格设定文件（2026-10-18）：整个插件**唯一**的"性格"来源，位置可指定。
   //    留空 = 用数据目录里的 persona.md ✓
   personaFile: z.string().default('').extra('volatile', true),
+  // ⭐ 跑那一轮用哪个模型（2026-10-18 加）：留空 = 用 profile 自己的默认。
+  //    两个都留空 ⇒ 不改 profile；填了就在 overlay 里覆盖 agent-default-model ✓
+  modelProvider: z.string().default('').extra('volatile', true),
+  model: z.string().default('').extra('volatile', true),
   /** 日报形态：full=完整（现状）· brief=每条一两行 · off=不写报告（只发评论） */
   reportLevel: z.string().default('full').extra('volatile', true),
   /** 回复评论：默认关。开了之后只回「直接回复到它那条评论下面的人」 */
@@ -275,7 +279,7 @@ export function apply(ctx, config) {
   const DEFAULTS = {
     perDay: 5, peakValley: false, noon: true, night: true, windows: [], autoComment: false, transcribe: false, noSubtitlePick: false, asrModel: 'small',
     dmMode: 'off', dmUid: 0, dmUids: [], aiReply: true, aiKeywords: [],
-    keywords: [], commentPerRound: 1, mentionName: '', mentionNames: [], pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, personaFile: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1,
+    keywords: [], commentPerRound: 1, mentionName: '', mentionNames: [], pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, personaFile: '', modelProvider: '', model: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1,
   }
   const normalize = (src, base) => {
     const out = { ...base }
@@ -938,29 +942,71 @@ export function apply(ctx, config) {
   }
 
   /**
-   * 给 headless 那一轮写一份 overlay —— 把 B站 MCP 挂上去。
-   * 🔴 为什么需要它：**某个 profile 能拿到什么工具，取决于它自己那层的 patch**
-   *    （headless 里那两条 B站 MCP 就是当初手写进去的）。分发给别人时不能要求人家改 profile，
-   *    所以插件自己生成一份、跑的时候 `--patch` 带上（dsh 支持可重复的 `--patch`）。
+   * 跑那一轮的 overlay（`--patch` 带上的那份）—— 里面可能有两段：
+   *   ① 把 B站 MCP 挂上去（`overlayMcp`）；
+   *   ② 覆盖这一轮用哪个模型（`modelProvider` / `model`）。
+   *
+   * 🔴 为什么需要它：**某个 profile 能拿到什么工具、用哪个模型，取决于它自己那层的 patch**
+   *    （headless 里那两条 B站 MCP、以及 `agent-default-model` 都是当初手写进去的）。
+   *    分发给别人时不能要求人家改 profile，所以插件自己生成一份、跑的时候 `--patch` 带上
+   *    （dsh 支持可重复的 `--patch`）✓
    */
-  const ensureOverlay = () => {
-    if (!cfg.overlayMcp) return null
-    const file = join(stateDir, 'headless-overlay.yml')
+  /**
+   * ⚠️ 这两个值会被**直接写进 YAML** ⇒ 必须严格限字符：
+   *    换行能让一个值变成一整条新配置（等于往别人的 profile 里注入插件配置 ✗）——
+   *    这不是洁癖，是**注入面**，所以只放行标识符里真会出现的字符 ✓
+   */
+  const yamlSafe = (v) => {
+    const t = String(v || '').trim()
+    if (!t) return ''
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$/.test(t)) return ''
+    return t
+  }
+  const modelPick = () => ({
+    provider: yamlSafe(cfg.modelProvider),
+    model: yamlSafe(cfg.model),
+    // 使用者填了但被拒（含非法字符）⇒ 记下来告诉设置页，别静默忽略 ✗
+    rejected: [String(cfg.modelProvider || '').trim(), String(cfg.model || '').trim()]
+      .filter((x) => x && !yamlSafe(x)),
+  })
+
+  const overlayParts = () => {
+    const parts = []
     const script = join(stateDir, 'mcp_server.py')
     const posix = (p) => String(p).replace(/\\/g, '/')
-    const yml = [
-      '- insert:',
-      '    - id: mcp-bili-duty',
-      "      name: '@deepseek-ai/dsh-mcp-client'",
-      '      config:',
-      '        serverName: bili-duty',
-      '        transport: stdio',
-      `        command: '${posix(pyForSync())}'`,
-      '        args:',
-      `          - '${posix(script)}'`,
-      '',
-    ].join('\n')
-    try { writeFileSync(file, yml, 'utf8'); return file } catch (e) { log(`写 overlay 失败：${e?.message ?? e}`); return null }
+    if (cfg.overlayMcp) {
+      parts.push([
+        '- insert:',
+        '    - id: mcp-bili-duty',
+        "      name: '@deepseek-ai/dsh-mcp-client'",
+        '      config:',
+        '        serverName: bili-duty',
+        '        transport: stdio',
+        `        command: '${posix(pyForSync())}'`,
+        '        args:',
+        `          - '${posix(script)}'`,
+      ].join('\n'))
+    }
+    const mp = modelPick()
+    if (mp.provider || mp.model) {
+      parts.push([
+        '# 这一轮用哪个模型（设置页里的「模型 / 服务商」；留空就用 profile 自己的）',
+        '- id: agent-default-model',
+        "  name: '@deepseek-ai/dsh-agent-default-model'",
+        '  config:',
+        ...(mp.provider ? [`    provider: '${mp.provider}'`] : []),
+        ...(mp.model ? [`    model: '${mp.model}'`] : []),
+      ].join('\n'))
+    }
+    return parts
+  }
+
+  const ensureOverlay = () => {
+    const parts = overlayParts()
+    if (!parts.length) return null
+    const file = join(stateDir, 'headless-overlay.yml')
+    try { writeFileSync(file, parts.join('\n') + '\n', 'utf8'); return file }
+    catch (e) { log(`写 overlay 失败：${e?.message ?? e}`); return null }
   }
 
   /**
@@ -1092,6 +1138,10 @@ export function apply(ctx, config) {
       //    光看设置页只能猜"它会不会按我说的做" —— 把原文摊出来，有疑问一眼就能核 ✓
       prompt: promptFor(),
       promptChars: promptFor().length,
+      // ⭐ 这一轮用哪个模型、以及那份 overlay 里到底写了什么（2026-10-18 加）——
+      //    "我填了模型，它到底用没用" 不该靠猜 ✓
+      modelPick: modelPick(),
+      overlay: { path: join(stateDir, 'headless-overlay.yml'), text: overlayParts().join('\n') + (overlayParts().length ? '\n' : '') },
       stats,
     }
   }
@@ -1502,6 +1552,8 @@ export function apply(ctx, config) {
         return d ? d.toISOString() : null
       })(),
       builtinWindows: WINDOWS,
+      // ⭐ 这一轮用哪个模型（2026-10-18）：留空 = 用 profile 自己的；被拒的值也要报出来 ✓
+      modelPick: modelPick(),
       // ⭐ 人格设定文件的实情（2026-10-18）：哪个路径、在不在、多大 ✓
       //    ⚠️ 不带 text —— /status 是每 5 秒轮询的，几千字正文没必要跟着跑 ✓
       persona: (() => { const p = personaInfo(); return { ...p, text: '' } })(),
@@ -1558,7 +1610,7 @@ export function apply(ctx, config) {
       const patch = {}
       for (const k of ['perDay', 'peakValley', 'noon', 'night', 'windows', 'autoComment', 'transcribe', 'noSubtitlePick', 'asrModel',
         'commentPerRound', 'mentionName', 'mentionNames', 'dmMode', 'dmUid', 'dmUids', 'aiReply', 'aiKeywords',
-        'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'personaFile', 'reportLevel', 'replyToComments', 'replyPerRound']) {
+        'modelProvider', 'model', 'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'personaFile', 'reportLevel', 'replyToComments', 'replyPerRound']) {
         if (k in body) patch[k] = body[k]
       }
       if ('perDay' in patch) patch.perDay = Math.max(0, Math.min(Number(patch.perDay) || 0, 50))
