@@ -252,7 +252,21 @@ ok('并且说清了"不分析内容"、要标注',
 await call('POST', '/api/bili-duty/config', { noSubtitlePick: false })
 const prOff = (await call('GET', '/api/bili-duty/debug')).json?.prompt || ''
 ok('关着时口径变回"照老规矩跳过"', !/拿不到字幕/.test(prOff) && /照老规矩跳过/.test(prOff))
-ok('提示词里也带上了条数额度这类现算的值', /每天最多挑几条|条数上限/.test(prOn))
+// ⚠️ 别钉死文案（2026-10-18 提示词重写过），要钉的是「真把现算的数字插进去了」 ✓
+// ⭐ 这三条钉住 2026-10-18 那次重写的成果（免得日后又退化回去）
+//    ⚠️ 只能钉**插件自己拼的部分**：注入的使用者 AGENTS.md 是他自己的文件，
+//       里面爱怎么写就怎么写（本仓库那份就满是 ⭐🔴⚠️）—— 拿它来判 emoji 会误报 ✗
+const pfOn = (await call('GET', '/api/bili-duty/prompt')).json
+const composed = String(pfOn.full).replace(/===== 使用者[\s\S]*?===== 设定结束 =====/g, '')
+const EMOJI = /[\u2b50\ud83d\udd34\u26a0\ufe0f\u274c\u2705\ud83d\udcce\ud83d\udcc1]/
+ok('插件拼的部分分成了有名字的章节',
+  /【本轮任务】/.test(composed) && /【判重表】/.test(composed) && /【收尾】/.test(composed),
+  (composed.match(/【[^】]+】/g) || []).join(' '))
+ok('插件拼的部分没有装饰性 emoji（⭐🔴⚠️ 这类）', !EMOJI.test(composed),
+  (composed.match(new RegExp(EMOJI.source, 'g')) || []).join(''))
+ok('人格那段也没有', !EMOJI.test(pfOn.pieces.find((x) => x.key === 'persona').text))
+ok('提示词里真插进了现算的数额度', /每天最多挑 \d+ 条/.test(prOn) && /今天已经挑过 \d+ 条/.test(prOn),
+  (prOn.match(/每天最多挑[^；。]*/) || [''])[0])
 
 /* ⑩ 平台：这台机器是什么环境，得如实报出来（设置页据此决定按钮怎么摆） */
 const pf = st.json?.platform || {}
