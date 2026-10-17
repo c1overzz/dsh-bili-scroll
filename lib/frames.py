@@ -45,6 +45,22 @@ AUDIO_FULL_LIMIT = 600   # 10 分钟以内整条音频转写；更长只转每�
 CLIP_HALF = 6            # 每帧前后各留几秒音频
 
 
+def parse_t(v, default=None):
+    """'83' / '1:23' / '1:02:03' → 秒"""
+    t = str(v or "").strip()
+    if not t:
+        return default
+    if ":" in t:
+        total = 0.0
+        for part in t.split(":"):
+            total = total * 60 + float(part or 0)
+        return total
+    try:
+        return float(t)
+    except Exception:
+        return default
+
+
 def fail(msg):
     print(json.dumps({"ok": False, "error": str(msg)}, ensure_ascii=False))
     sys.exit(1)
@@ -306,6 +322,8 @@ def main():
     ap.add_argument("--asr-model", default="small", help="本地转写用的模型（默认 small）")
     ap.add_argument("--cookie", action="store_true",
                     help="下载时带账号 Cookie（设置页那个开关）：能拿更高清，但请求挂在账号上")
+    ap.add_argument("--from", dest="t_from", default="", help="只看这一段：起点（秒或 mm:ss）")
+    ap.add_argument("--to", dest="t_to", default="", help="只看这一段：终点（秒或 mm:ss）")
     ap.add_argument("--keep", action="store_true", help="保留下载的视频（调试用）")
     a = ap.parse_args()
 
@@ -336,7 +354,15 @@ def main():
         n = max(1, min(a.n, 16))
         if dur < 25:
             n = min(n, 4)
-        lo, hi = dur * 0.05, max(dur * 0.06, dur * 0.95)
+        seg_from = parse_t(a.t_from, None)
+        seg_to = parse_t(a.t_to, None)
+        if seg_from is not None or seg_to is not None:
+            lo = max(0.0, float(seg_from or 0))
+            hi = min(float(seg_to) if seg_to else dur, dur)
+            if hi <= lo:
+                fail("时间段不对：--from 要比 --to 早")
+        else:
+            lo, hi = dur * 0.05, max(dur * 0.06, dur * 0.95)
         step = (hi - lo) / max(1, n - 1) if n > 1 else 0
         times = [lo + i * step for i in range(n)]
 
@@ -407,6 +433,14 @@ def main():
             "cells": len(ims),
             "times": [round(t, 1) for t, _ in ims],
             "note": "用 read_image 看这张拼图；格子从左到右、从上到下排，每格左下角是时间码。",
+            "coverage": {
+                "cells": len(ims),
+                "first": round(times[0], 1),
+                "last": round(times[-1], 1) if times else None,
+                "step": round(step, 1),
+                "video_length": round(dur, 1),
+                "note": f"每 {step:.0f} 秒一格 —— 中间的画面没有看到",
+            },
             "audio_lines": audio_lines,
             "audio_source": audio_src,
         }, ensure_ascii=False))

@@ -558,6 +558,7 @@ async def bili_video_info(bvid: str) -> str:
         "title": info.get("title"),
         "description": info.get("desc"),
         "author": info.get("owner", {}).get("name"),
+        "owner_mid": info.get("owner", {}).get("mid"),
         "duration": info.get("duration"),
         "pubdate": info.get("pubdate"),
         "days_ago": (round((time.time() - info["pubdate"]) / 86400, 1)
@@ -1471,6 +1472,79 @@ async def bili_received_at_and_likes() -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
+# ========== Tool: 订阅（UP 主 / 合集的新片）==========
+
+@mcp.tool()
+async def bili_up_videos(mid: int, num: int = 10) -> str:
+    """
+    取某个 UP 主最近发布的视频（订阅用）
+
+    Args:
+        mid: UP 主的 mid（数字 UID，空间链接 space.bilibili.com/<mid> 里那个）
+        num: 取几条，默认 10，最多 50
+
+    Returns:
+        JSON：videos 里每条带 bvid / 标题 / 播放 / 时长 / pubdate / days_ago
+    """
+    cred = get_cred()
+    n = max(1, min(int(num or 10), 50))
+    try:
+        u = user.User(uid=int(mid), credential=cred)
+        data = await u.get_videos(pn=1, ps=n)
+        vlist = ((data or {}).get("list") or {}).get("vlist") or []
+        out = []
+        for v in vlist[:n]:
+            ts = v.get("created") or 0
+            out.append({
+                "bvid": v.get("bvid"),
+                "title": v.get("title"),
+                "play": v.get("play"),
+                "duration": v.get("length"),
+                "pubdate": ts,
+                "days_ago": round((time.time() - ts) / 86400, 1) if ts else None,
+            })
+        return json.dumps({"mid": mid, "count": len(out), "videos": out}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"mid": mid, "error": str(e)}, ensure_ascii=False)
+
+
+@mcp.tool()
+async def bili_collection_videos(uid: int, sid: int, num: int = 20) -> str:
+    """
+    取某个合集（season）里的视频（订阅用）
+
+    Args:
+        uid: 合集所属 UP 的 mid
+        sid: 合集 id（链接里 ?sid= 后面那个）
+        num: 最多返回几条，默认 20
+
+    Returns:
+        JSON：videos 里每条带 bvid / 标题 / pubdate / days_ago
+    """
+    from bilibili_api import channel_series
+    cred = get_cred()
+    n = max(1, min(int(num or 20), 100))
+    try:
+        cs = channel_series.ChannelSeries(
+            uid=int(uid), type_=channel_series.ChannelSeriesType.SEASON,
+            id_=int(sid), credential=cred,
+        )
+        data = await cs.get_videos(pn=1, ps=n)
+        arcs = (data or {}).get("archives") or []
+        out = []
+        for v in arcs[:n]:
+            ts = v.get("pubdate") or 0
+            out.append({
+                "bvid": v.get("bvid"),
+                "title": v.get("title"),
+                "pubdate": ts,
+                "days_ago": round((time.time() - ts) / 86400, 1) if ts else None,
+            })
+        return json.dumps({"uid": uid, "sid": sid, "count": len(out), "videos": out}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"uid": uid, "sid": sid, "error": str(e)}, ensure_ascii=False)
+
+
 # ========== Tool: 看画面（抽关键帧拼图）==========
 
 FRAMES_SCRIPT = Path(__file__).parent / "frames.py"
@@ -1506,7 +1580,7 @@ def frame_settings() -> dict:
 
 
 @mcp.tool()
-async def bili_frames(bvid: str, n: int = 0, height: int = 0) -> str:
+async def bili_frames(bvid: str, n: int = 0, height: int = 0, t_from: str = "", t_to: str = "") -> str:
     """
     把视频画面抽成一张「关键帧拼图」，返回图片路径 —— 之后用 read_image 真正"看"它。
 
@@ -1516,6 +1590,7 @@ async def bili_frames(bvid: str, n: int = 0, height: int = 0) -> str:
         bvid: 视频BV号，如"BV1awJX6HEDM"
         n: 抽几帧（0 = 用设置页里的，默认 9；最多 16）
         height: 清晰度 480/720/1080（0 = 用设置页里的，默认 480）
+        t_from / t_to: 只看这一段（秒或 mm:ss）。长视频先概览、再挑关键的一两分钟细看
 
     Returns:
         JSON：sheet=拼图绝对路径（拿去 read_image）、duration、pubdate、days_ago、
@@ -1545,6 +1620,8 @@ async def bili_frames(bvid: str, n: int = 0, height: int = 0) -> str:
     args = [sys.executable, str(FRAMES_SCRIPT), bvid, "--n", str(n), "--height", str(h)]
     if cfg["cookie"]:
         args.append("--cookie")
+    if str(t_from).strip() or str(t_to).strip():
+        args += ["--from", str(t_from).strip() or "0", "--to", str(t_to).strip() or "0"]
     if cfg.get("audio") == "always":
         args += ["--audio", "--asr-model", cfg.get("asrModel") or "small"]
 
@@ -1589,6 +1666,7 @@ async def bili_frames(bvid: str, n: int = 0, height: int = 0) -> str:
         out["line_source"] = out.get("audio_source") or "local-asr"
         out["align_note"] = ("lines = **本地从音频转的**（受 UP 改字幕影响最小）；lines_from_subtitle = B站字幕轨。"
                              "两栏不一致时优先信 lines，但专有名词两栏都可能错，交叉看。")
+
     return json.dumps(out, ensure_ascii=False)
 
 

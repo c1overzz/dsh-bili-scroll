@@ -323,6 +323,8 @@ export function apply(ctx, config) {
       bvid: { type: 'string', description: 'BV号或视频链接（BV1xxxxxxxxx / https://www.bilibili.com/video/BV1xxx）' },
       n: { type: 'number', description: '抽几帧（不填 = 跟设置页，默认 9）' },
       height: { type: 'number', description: '清晰度 480/720/1080（不填 = 跟设置页）' },
+      from: { type: 'string', description: '只看这一段：起点（秒或 mm:ss）—— 长视频先概览再挑一段细看' },
+      to: { type: 'string', description: '只看这一段：终点（秒或 mm:ss）' },
     },
     async execute(args) {
       const raw = String(args?.bvid ?? '')
@@ -331,6 +333,8 @@ export function apply(ctx, config) {
       const a = { bvid: hit[0] }
       if (Number(args?.n) > 0) a.n = Number(args.n)
       if (Number(args?.height) > 0) a.height = Number(args.height)
+      if (args?.from) a.t_from = String(args.from)
+      if (args?.to) a.t_to = String(args.to)
       return call('bili_frames', a)
     },
   })
