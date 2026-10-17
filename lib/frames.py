@@ -168,7 +168,10 @@ def download_full(yt, bvid, height, workdir):
 
 
 def download_sections(yt, bvid, height, stamps, workdir):
-    """只下每个时间点前后一小段（长视频用这个）。返回 {起始秒: 文件路径}。"""
+    """只下每个时间点前后一小段（长视频用这个）。返回 {起始秒: 文件路径}。
+
+    ⚠️ 并发反而更慢、还会把整条拖下来（实测 526MB）—— 改回一次调用串行下，简单可靠。
+    """
     cmd = [
         yt, "--no-warnings", "--no-part", "--no-playlist", "--no-cache-dir", *COOKIE_ARGS,
         "-f", f"bv*[height<={height}]/b[height<={height}]/bv*/b",
@@ -178,7 +181,7 @@ def download_sections(yt, bvid, height, stamps, workdir):
     for s in stamps:
         cmd.insert(-1, "--download-sections")
         cmd.insert(-1, f"*{int(s)}-{int(s) + SECTION_LEN}")
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     out = {}
     for f in glob.glob(os.path.join(workdir, "s_*")):
         base = os.path.basename(f)
@@ -187,8 +190,6 @@ def download_sections(yt, bvid, height, stamps, workdir):
         except Exception:
             continue
         out[key] = f
-    if r.returncode != 0 and not out:
-        raise RuntimeError((r.stderr or "").strip().splitlines()[-1:] or "分段下载失败")
     return out
 
 
@@ -341,6 +342,10 @@ def main():
     if not yt:
         fail("找不到 yt-dlp（.venv-asr/bin/yt-dlp）")
 
+    # ⭐ 拼图每格固定 480px 宽 —— 所以**下载超过 480p 没有任何收益**，只会慢 3~4 倍：
+    #    实测 21 分钟的视频，1080p 下 16 段要 2 分钟、500+ MB；480p 只要几十兆。
+    dl_height = min(int(a.height), 480)
+
     os.makedirs(TMP, exist_ok=True)
     prune()
     workdir = tempfile.mkdtemp(prefix=f"{bvid}-", dir=TMP)
@@ -349,7 +354,7 @@ def main():
     try:
         dur = float(meta.get("duration") or 0)
         if not dur:
-            dur = probe_duration(fp, download_full(yt, bvid, a.height, workdir))
+            dur = probe_duration(fp, download_full(yt, bvid, dl_height, workdir))
 
         n = max(1, min(a.n, 16))
         if dur < 25:
@@ -382,14 +387,14 @@ def main():
         ims = []
         if dur > LONG_SECONDS:
             try:
-                segs = download_sections(yt, bvid, a.height, [int(t) for t in times], workdir)
+                segs = download_sections(yt, bvid, dl_height, [int(t) for t in times], workdir)
                 if segs:
                     ims = collect([(t, segs.get(int(t), next(iter(segs.values()))),
                                     t - int(t)) for t in times])
             except Exception:
                 ims = []
         if len(ims) < 2:                       # 短视频 / 分段失败 ⇒ 整条下
-            video = download_full(yt, bvid, a.height, workdir)
+            video = download_full(yt, bvid, dl_height, workdir)
             ims = collect([(t, video, 0.0) for t in times])
         if not ims:
             fail("一帧都没抽出来（视频可能加密或格式异常）")

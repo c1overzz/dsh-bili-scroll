@@ -1580,7 +1580,7 @@ def frame_settings() -> dict:
 
 
 @mcp.tool()
-async def bili_frames(bvid: str, n: int = 0, height: int = 0, t_from: str = "", t_to: str = "") -> str:
+async def bili_frames(bvid: str, n: int = 0, height: int = 0) -> str:
     """
     把视频画面抽成一张「关键帧拼图」，返回图片路径 —— 之后用 read_image 真正"看"它。
 
@@ -1590,7 +1590,6 @@ async def bili_frames(bvid: str, n: int = 0, height: int = 0, t_from: str = "", 
         bvid: 视频BV号，如"BV1awJX6HEDM"
         n: 抽几帧（0 = 用设置页里的，默认 9；最多 16）
         height: 清晰度 480/720/1080（0 = 用设置页里的，默认 480）
-        t_from / t_to: 只看这一段（秒或 mm:ss）。长视频先概览、再挑关键的一两分钟细看
 
     Returns:
         JSON：sheet=拼图绝对路径（拿去 read_image）、duration、pubdate、days_ago、
@@ -1617,16 +1616,29 @@ async def bili_frames(bvid: str, n: int = 0, height: int = 0, t_from: str = "", 
     if h not in (480, 720, 1080):
         h = cfg["height"]
 
+    # 🔎 先看有没有字幕轨：**没有的话**，只要开了本地转写，就顺便让它把音频也转了
+    #    （以前这条兜底只在 _frame_lines 里、还卡了 20 分钟的时长上限 —— 21 分钟的视频就漏了）
+    try:
+        has_sub = bool(await _sub_body(bvid))
+    except Exception:
+        has_sub = False
+    transcribe_on = False
+    try:
+        transcribe_on = bool(json.loads((Path(__file__).parent / "config.json").read_text()).get("transcribe"))
+    except Exception:
+        transcribe_on = False
+
     args = [sys.executable, str(FRAMES_SCRIPT), bvid, "--n", str(n), "--height", str(h)]
     if cfg["cookie"]:
         args.append("--cookie")
-    if str(t_from).strip() or str(t_to).strip():
-        args += ["--from", str(t_from).strip() or "0", "--to", str(t_to).strip() or "0"]
     if cfg.get("audio") == "always":
+        args += ["--audio", "--asr-model", cfg.get("asrModel") or "small"]
+    elif (not has_sub) and transcribe_on:
+        # 没字幕轨 + 开了转写 ⇒ 让 frames.py 顺手把音频转出来（长视频它自己只转帧附近的片段）
         args += ["--audio", "--asr-model", cfg.get("asrModel") or "small"]
 
     def run():
-        return subprocess.run(args, capture_output=True, text=True, timeout=300)
+        return subprocess.run(args, capture_output=True, text=True, timeout=600)
 
     try:
         r = await asyncio.to_thread(run)
