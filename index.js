@@ -988,17 +988,31 @@ export function apply(ctx, config) {
     // 「打开文件夹」：浏览器开不了本地目录 ⇒ 让宿主去开（只认 out / home 两个，别的不受理）
     if (req.method === 'POST' && path === '/api/bili-duty/open') {
       const body = await readBody(req)
-      const dir = String(body?.what || 'out') === 'home' ? stateDir : outDir
-      if (process.platform !== 'win32') return sendJson(res, 200, { ok: false, error: '这个按钮目前只做了 Windows' })
-      // ⭐ 三种方式依次试（PATH 不全时 explorer.exe 会找不到 ✗；spawn 的失败是**异步**的，
-      //    try/catch 抓不到 ⇒ 必须挂 'error' 监听，否则会升级成未捕获异常）
-      // ⭐ 顺序很重要：把**最可能真的弹出窗口**的放第一（cmd start 走 shell 的 ShellExecute ✓）
-      //    并且**不要再传 windowsHide**（2026-10-15 实测：传了以后"成功"但窗口不出现 ✗）
-      const attempts = [
-        ['cmd.exe', ['/c', 'start', '', dir]],
-        [join(process.env.SystemRoot || 'C:\\Windows', 'explorer.exe'), [dir]],
-        ['powershell.exe', ['-NoProfile', '-Command', "Start-Process -FilePath '" + dir.replace(/'/g, "''") + "'"]],
-      ]
+      const what = String(body?.what || 'out')
+      const target = what === 'home' ? stateDir
+        : what === 'report' ? join(outDir, `${dayKey()}.md`)
+          : outDir
+      // ⭐ 不存在就给一句人话（第一次跑之前，今天的报告本来就可能还没有）
+      if (!existsSync(target)) {
+        return sendJson(res, 200, {
+          ok: false, what, dir: target,
+          error: (what === 'report' ? '今天的报告还没写' : '这个目录还不存在') + '：' + target,
+        })
+      }
+      // ⭐ 三个平台都走"系统自带的打开器"：
+      //    Windows：cmd start（ShellExecute，最可能真弹窗）→ explorer.exe → powershell 兜底
+      //    macOS  ：open（写全 /usr/bin/open —— PATH 不全也找得到；它能开目录也能开文件）
+      //    Linux  ：xdg-open → gio open
+      //    （2026-10-17：macOS/Linux 之前是硬拒绝「这个按钮目前只做了 Windows」，现在补齐）
+      const attempts = process.platform === 'win32'
+        ? [
+          ['cmd.exe', ['/c', 'start', '', target]],
+          [join(process.env.SystemRoot || 'C:\\Windows', 'explorer.exe'), [target]],
+          ['powershell.exe', ['-NoProfile', '-Command', "Start-Process -FilePath '" + target.replace(/'/g, "''") + "'"]],
+        ]
+        : process.platform === 'darwin'
+          ? [['/usr/bin/open', [target]], ['open', [target]]]
+          : [['xdg-open', [target]], ['gio', ['open', target]]]
       let lastErr = ''
       for (const [cmd, args] of attempts) {
         const err = await new Promise((resolve) => {
@@ -1008,11 +1022,14 @@ export function apply(ctx, config) {
           child.on('error', (e) => { if (!done) { done = true; resolve(String(e?.message ?? e)) } })
           setTimeout(() => { if (!done) { done = true; try { child.unref() } catch { /* 无所谓 */ } resolve('') } }, 500)
         })
-        if (!err) { log('打开文件夹：用了 ' + cmd + '（没报错；窗口不一定真弹出来了）'); return sendJson(res, 200, { ok: true, opened: dir, via: cmd }) }
+        if (!err) {
+          log(`打开 ${what}：用了 ${cmd}（没报错；窗口不一定真弹出来了）`)
+          return sendJson(res, 200, { ok: true, what, opened: target, via: cmd })
+        }
         lastErr = err
-        log('打开文件夹失败（' + cmd + '）：' + err)
+        log(`打开 ${what} 失败（${cmd}）：${err}`)
       }
-      return sendJson(res, 200, { ok: false, error: lastErr, dir })
+      return sendJson(res, 200, { ok: false, what, error: lastErr, dir: target })
     }
 
     // 「一键升级」：点了它自己跑 add（⚠️ 之后要重启才生效）

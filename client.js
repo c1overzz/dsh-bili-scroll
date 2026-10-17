@@ -555,6 +555,7 @@ window.__ModuleLoader__.load({
             h('button', { 'data-bd-btn': '', disabled: busy === 'report', onClick: onShowReport },
               report !== null ? '收起报告' : '看今天的报告'),
             h('button', { 'data-bd-btn': '', onClick: () => onOpenFolder('out') }, '打开报告文件夹'),
+            h('button', { 'data-bd-btn': '', onClick: () => onOpenFolder('report') }, '打开今天的报告'),
             h('button', { 'data-bd-btn': '', onClick: () => onOpenFolder('home') }, '打开家目录'),
             h('button', { 'data-bd-btn': '', disabled: busy === 'verify', onClick: onVerify },
               '复核评论'),
