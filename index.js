@@ -23,8 +23,9 @@ const hostDeps = await loadHostDeps()
 const z = hostDeps.z
 const defineTool = hostDeps.defineTool
 import { spawn } from 'node:child_process'
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
+import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { McpClient } from './lib/mcp.mjs'
 import { verifyRecent, appendVerifyToReport } from './lib/verify.mjs'
@@ -57,6 +58,24 @@ export const Config = !z ? undefined : z.object({
   transcribe: z.boolean().default(false).extra('volatile', true),
   /** 本地转写用哪个 Whisper 模型（tiny / base / small / medium） */
   asrModel: z.string().default('small').extra('volatile', true),
+  /** ⭐ 看画面：抽关键帧拼图交给多模态模型"看"（默认开；关掉只读字幕） */
+  seeVideo: z.boolean().default(true).extra('volatile', true),
+  /** 抽帧清晰度：480 / 720 / 1080（作为下载上限；格子宽度按帧数自动算） */
+  frameHeight: z.natural().default(480).extra('volatile', true),
+  /** 每条视频抽几帧（9 = 3×3 九宫格） */
+  frameCount: z.natural().default(9).extra('volatile', true),
+  /** 台词来源：auto=有字幕轨就用；always=总是本地转写音频（慢，但不受 UP 改字幕影响） */
+  frameAudio: z.string().default('auto').extra('volatile', true),
+  /** 订阅：UP 空间链接 / 合集链接 / 视频链接，一行一个（插件自己解析成 mid / sid） */
+  subs: z.array(z.string()).default([]).extra('volatile', true),
+  /** 刷一轮用哪个模型（留空 = 跟 headless profile 的默认） */
+  headlessModel: z.string().default('').extra('volatile', true),
+  /** provider（一般不用改） */
+  headlessProvider: z.string().default('deepseek-official').extra('volatile', true),
+  /** 思考等级：''（跟默认）/ low / medium / high / max */
+  headlessEffort: z.string().default('').extra('volatile', true),
+  /** 下载视频时带账号 Cookie（默认关：匿名够用；开了才稳拿 720p/1080p） */
+  useCookie: z.boolean().default(false).extra('volatile', true),
   /** ⭐ 每轮最多发几条评论（每条里 @ 一次下面那个人）；**有效范围 0–20，口径见 clampPatch**（0 = 不发评论）
    *  ⚠️ 这里故意**不加 `.max(20)`**：schema 校验不过 ⇒ cordis 拒收这条 entry ⇒ **整条插件不激活** ✗
    *     （跟 schemastery 拿不到时的降级同一个道理）—— 范围一律由 clampPatch 在**写**和**读**两头钳。 */
@@ -152,7 +171,8 @@ export function apply(ctx, config) {
    *     ② **定时器回调里绝不让异常外冒**（见 tick）—— 未捕获异常会杀掉整个宿主进程。
    */
   const DEFAULTS = {
-    perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
+    perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small', seeVideo: true, frameHeight: 480, frameCount: 9, useCookie: false,
+    subs: [], frameAudio: 'auto', headlessModel: '', headlessProvider: 'deepseek-official', headlessEffort: '',
     keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1,
   }
   const normalize = (src, base) => {
@@ -187,6 +207,14 @@ export function apply(ctx, config) {
     if ('replyToComments' in p) p.replyToComments = Boolean(p.replyToComments)
     if ('replyPerRound' in p) p.replyPerRound = Math.max(1, Math.min(Number(p.replyPerRound) || 1, 10))
     if ('commentPerRound' in p) p.commentPerRound = Math.max(0, Math.min(Number(p.commentPerRound) || 0, 20))
+    // 本分支新增的字段（看画面 / 订阅 / 模型）也在这里钳 —— 写和读两头都过 clampPatch
+    if ('frameHeight' in p) p.frameHeight = [480, 720, 1080].includes(Number(p.frameHeight)) ? Number(p.frameHeight) : 480
+    if ('frameCount' in p) p.frameCount = Math.max(4, Math.min(Number(p.frameCount) || 9, 16))
+    if ('frameAudio' in p) p.frameAudio = ['auto', 'always'].includes(String(p.frameAudio)) ? String(p.frameAudio) : 'auto'
+    if ('headlessEffort' in p) p.headlessEffort = ['', 'low', 'medium', 'high', 'max'].includes(String(p.headlessEffort ?? '')) ? String(p.headlessEffort ?? '') : ''
+    if ('headlessModel' in p) p.headlessModel = String(p.headlessModel ?? '').trim().slice(0, 60)
+    if ('headlessProvider' in p) p.headlessProvider = String(p.headlessProvider ?? '').trim().slice(0, 40) || 'deepseek-official'
+    if ('subs' in p) p.subs = (Array.isArray(p.subs) ? p.subs : []).map((x) => String(x ?? '').trim()).filter(Boolean).slice(0, 30)
     return p
   }
 
@@ -374,6 +402,41 @@ export function apply(ctx, config) {
     },
     async execute(args) {
       return call('bili_comments', { bvid: String(args.bvid ?? ''), num: Math.max(1, Number(args.num) || 30) })
+    },
+  })
+
+  tool({
+    name: 'bili_watch',
+    description: '点名看几条视频（BV 号或链接，逗号/换行都行）：读字幕 + 抽帧看画面 + 翻评论，'
+      + '写成一份 watch-*.md。**不占每天刷B站的名额**，也不进判重表。',
+    parameters: { items: { type: 'string', description: 'BV号或视频链接，多条用空格/逗号/换行隔开' } },
+    async execute(args) { return runWatch(args?.items) },
+  })
+
+  tool({
+    name: 'bili_frames',
+    description: '把一条视频的画面抽成一张「关键帧拼图」，返回图片路径 —— 之后用 read_image 真的看它。\n'
+      + '返回里还有 **`lines`**：每一格对应时刻的**口播原文**（来自音频字幕；没字幕时按设置走本地转写）。\n'
+      + '⭐ 画面里烧的硬字幕常是防和谐的字母/拼音/谐音 —— **以 lines 为准**。\n'
+      + '也可以用来**看使用者指定的那条视频**：他丢过来一个 BV 号或链接就调它。\n'
+      + '清晰度 / 帧数 / 要不要带 Cookie 全跟设置页走，不用传。',
+    parameters: {
+      bvid: { type: 'string', description: 'BV号或视频链接（BV1xxxxxxxxx / https://www.bilibili.com/video/BV1xxx）' },
+      n: { type: 'number', description: '抽几帧（不填 = 跟设置页，默认 9）' },
+      height: { type: 'number', description: '清晰度 480/720/1080（不填 = 跟设置页）' },
+      from: { type: 'string', description: '只看这一段：起点（秒或 mm:ss）—— 长视频先概览再挑一段细看' },
+      to: { type: 'string', description: '只看这一段：终点（秒或 mm:ss）' },
+    },
+    async execute(args) {
+      const raw = String(args?.bvid ?? '')
+      const hit = /BV[0-9A-Za-z]{10}/.exec(raw)          // 链接里抠 BV 号
+      if (!hit) return { ok: false, error: '没认出 BV 号：传 BV1xxxxxxxxx 或整条视频链接都行' }
+      const a = { bvid: hit[0] }
+      if (Number(args?.n) > 0) a.n = Number(args.n)
+      if (Number(args?.height) > 0) a.height = Number(args.height)
+      if (args?.from) a.t_from = String(args.from)
+      if (args?.to) a.t_to = String(args.to)
+      return call('bili_frames', a)
     },
   })
 
@@ -591,6 +654,37 @@ export function apply(ctx, config) {
     return { command: 'dsh', args: [], shell: true }
   }
 
+  /** 把使用者粘的订阅行解析成结构化的一项（纯正则，不打网络） */
+  const parseSub = (line) => {
+    const t = String(line || '').trim()
+    if (!t) return null
+    let m = /space\.bilibili\.com\/(\d+)/.exec(t)
+    if (m) {
+      const sid = /[?&]sid=(\d+)/.exec(t)
+      return sid
+        ? { kind: 'collection', uid: Number(m[1]), sid: Number(sid[1]), raw: t }
+        : { kind: 'up', mid: Number(m[1]), raw: t }
+    }
+    if ((m = /BV[0-9A-Za-z]{10}/.exec(t))) return { kind: 'video', bvid: m[0], raw: t }
+    if (/^\d{1,20}$/.test(t)) return { kind: 'up', mid: Number(t), raw: t }
+    return { kind: 'unknown', raw: t }
+  }
+
+  /** 订阅 → 给 agent 看的一行（结构化，省得它自己猜链接格式） */
+  const subsHint = () => {
+    const subs = (Array.isArray(cfg.subs) ? cfg.subs : []).map(parseSub).filter(Boolean)
+    if (!subs.length) return ''
+    const lines = subs.slice(0, 30).map((x) => {
+      if (x.kind === 'up') return `- UP mid=${x.mid}`
+      if (x.kind === 'collection') return `- 合集 uid=${x.uid} sid=${x.sid}`
+      if (x.kind === 'video') return `- 视频 ${x.bvid}（先用 bili_video_info 拿 owner_mid，再当 UP 订阅）`
+      return ''
+    }).filter(Boolean)
+    return `⭐ **订阅**（这些优先看，先于关键词搜索）：\n${lines.join('\n')}\n`
+      + `  · UP：调 bili_up_videos(mid, 10) 取最近发布的，挑 days_ago ≤ 7 的；\n`
+      + `  · 合集：调 bili_collection_videos(uid, sid, 20)，同样按 days_ago 筛。\n`
+  }
+
   const promptFor = () => {
     // ⭐ 章程取哪一份：家里那份优先（ensureCharter 保证铺好；他改过的话就是他那份，升级的事由 ensureCharter 记账处理）
     const duty = charterPath(pluginDir, stateDir)
@@ -636,11 +730,15 @@ export function apply(ctx, config) {
         ? `今天已经挑过 ${already} 条了 ⇒ **这一轮最多再挑 ${left} 条**（「每天最多 ${quota} 条」是全天总量，不是每轮）；`
         : `今天最多挑 ${quota} 条；`)
       + `关键词${kws.length ? `用这些：${kws.join('、')}` : '用章程里的默认那几组'}。`
+      + subsHint()
       + `本地转写：${cfg.transcribe
         ? (asrReadyNow()
           ? '开着，而且装好了（没字幕的视频用家里那份 asr.py 转，命令见章程）'
           : '**开着、但依赖没装好** ⇒ 这一轮没字幕的视频只能跳过')
         : '关着（没字幕的视频就跳过）'}；`
+      + `看画面：${cfg.seeVideo
+        ? `开着（挑中的每条调 bili_frames 再 read_image 看拼图；清晰度 ${cfg.frameHeight}p、每条 ${cfg.frameCount} 帧、下载${cfg.useCookie ? '带' : '不带'}账号 Cookie —— 这些都以设置页为准，别自己传参）`
+        : '关着（只看字幕，别调 bili_frames）'}；`
       + `⭐ 不管哪种情况，**报告里都要写一行「因无字幕跳过 N 条」**（N=0 也写）—— 别让它悄悄少几条。`
       + `判重表 = ${join(stateDir, 'seen.md')}（**就是这个绝对路径**，别写到家目录 ~、也别写到别处）；`
       + `⚠️ 它读不出来或写不进去，**必须在报告里明说** —— 那一轮宁可不发评论，也别当成"没有记录"重发一遍。`
@@ -672,31 +770,135 @@ export function apply(ctx, config) {
    *    要读全就手工改这个列表（或者直接跑 mcp_server.py，不设这个变量 = 全放）。
    */
   const mcpWhitelist = () => {
-    const list = ['bili_search', 'bili_subtitle', 'bili_comments', 'bili_video_info']
+    const list = ['bili_search', 'bili_subtitle', 'bili_comments', 'bili_video_info',
+      'bili_up_videos', 'bili_collection_videos']   // 本分支：订阅查询
+    if (cfg.seeVideo !== false) list.push('bili_frames')   // 看画面关掉就不给它这只
     if (cfg.autoComment || cfg.replyToComments) list.push('bili_reply')   // 只有真要发评论才给这只
     return list
   }
 
+  /* ─────────────── 「这一轮到底用什么模型」───────────────
+   * 以前是黑盒：插件起 headless 时不传模型，就一直吃 headless profile 的默认。
+   * 现在既能设，也能把**实际生效**的那份 dump 出来给使用者看。
+   */
+  let modelCache = { at: 0, val: null }
+
+
+  /** 列出这个 DSH 里**真正可用的模型**（可能不止 DeepSeek 一家）*/
+  let modelsCache = { at: 0, val: null }
+  const listAllModels = async (fresh) => {
+    if (!fresh && modelsCache.val && Date.now() - modelsCache.at < 300000) return modelsCache.val
+    let out
+    try {
+      const llm = (typeof ctx.get === 'function' ? ctx.get('llm') : null) || ctx.llm
+      if (!llm || typeof llm.listProviders !== 'function') {
+        out = { ok: false, error: '这个 DSH 版本没暴露模型目录（ctx.llm 不可用）' }
+      } else {
+        const providers = llm.listProviders() || []
+        const rows = []
+        for (const p of providers) {
+          const id = String(p.id ?? p.provider ?? p.name ?? '')
+          if (!id) continue
+          let models = []
+          try {
+            models = typeof llm.listModels === 'function' ? await llm.listModels(id) : []
+          } catch { models = [] }
+          rows.push({
+            provider: id,
+            label: String(p.label || p.title || p.name || id),
+            models: (models || []).map((m) => ({
+              id: String(m.id || ''),
+              name: String(m.name || m.id || ''),
+              description: String(m.description || ''),
+            })).filter((m) => m.id),
+          })
+        }
+        out = { ok: true, providers: rows }
+      }
+    } catch (e) {
+      out = { ok: false, error: String(e?.message ?? e) }
+    }
+    modelsCache = { at: Date.now(), val: out }
+    return out
+  }
+
+  const dumpModelConfig = () => new Promise((resolve) => {
+    let out = ''
+    let done = false
+    const finish = (v) => { if (!done) { done = true; resolve(v) } }
+    try {
+      const dsh = resolveDsh()
+      const child = spawn(dsh.command, [...dsh.args, '--profile', cfg.headlessProfile || 'headless', '--dump-config'], {
+        shell: dsh.shell, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'],
+      })
+      child.stdout?.on('data', (b) => { out += String(b) })
+      child.on('error', () => finish(''))
+      child.on('exit', () => finish(out))
+      setTimeout(() => { try { child.kill() } catch { /* 无所谓 */ } finish(out) }, 15000)
+    } catch { finish('') }
+  })
+
+  const modelInfo = async (fresh) => {
+    if (!fresh && modelCache.val && Date.now() - modelCache.at < 300000) return modelCache.val
+    const text = await dumpModelConfig()
+    const at = text.indexOf('agent-default-model')
+    let cur = null
+    if (at >= 0) {
+      const seg = text.slice(at, at + 500)
+      const pick = (k) => {
+        const m = new RegExp(k + ':\\s*(.+)').exec(seg)
+        return m ? m[1].trim().replace(/^['"]|['"]$/g, '') : ''
+      }
+      cur = { provider: pick('provider'), model: pick('model'), effort: pick('reasoningEffort') }
+    }
+    const val = {
+      profile: cfg.headlessProfile || 'headless',
+      current: cur,                       // profile 里那份（不注入时就是它）
+      injected: String(cfg.headlessModel || '').trim()
+        ? { provider: String(cfg.headlessProvider || 'deepseek-official').trim(), model: String(cfg.headlessModel).trim(), effort: String(cfg.headlessEffort || '').trim() || null }
+        : null,
+    }
+    modelCache = { at: Date.now(), val }
+    return val
+  }
+
   const ensureOverlay = () => {
-    if (!cfg.overlayMcp) return null
-    const file = join(stateDir, 'headless-overlay.yml')
-    const script = join(stateDir, 'mcp_server.py')
     const posix = (p) => String(p).replace(/\\/g, '/')
-    const yml = [
-      '- insert:',
-      '    - id: mcp-bili-duty',
-      "      name: '@deepseek-ai/dsh-mcp-client'",
-      '      config:',
-      '        serverName: bili-duty',
-      '        transport: stdio',
-      `        command: '${posix(cfg.pythonPath || 'python')}'`,
-      '        args:',
-      `          - '${posix(script)}'`,
-      '        env:',
-      `          BILI_MCP_TOOLS: '${mcpWhitelist().join(',')}'`,
-      '',
-    ].join('\n')
-    try { writeFileSync(file, yml, 'utf8'); return file } catch (e) { log(`写 overlay 失败：${e?.message ?? e}`); return null }
+    const parts = []
+    if (cfg.overlayMcp) {
+      const script = join(stateDir, 'mcp_server.py')
+      parts.push([
+        '- insert:',
+        '    - id: mcp-bili-duty',
+        "      name: '@deepseek-ai/dsh-mcp-client'",
+        '      config:',
+        '        serverName: bili-duty',
+        '        transport: stdio',
+        `        command: '${posix(cfg.pythonPath || 'python')}'`,
+        '        args:',
+        `          - '${posix(script)}'`,
+        '        env:',
+        `          BILI_MCP_TOOLS: '${mcpWhitelist().join(',')}'`,
+        '',
+      ].join('\n'))
+    }
+    // ⭐ 这一轮用哪个模型 / 思考到多深 —— 以前完全是黑盒（跟 headless profile 的默认走）
+    if (String(cfg.headlessModel || '').trim()) {
+      const model = String(cfg.headlessModel).trim().replace(/'/g, '')
+      const effort = String(cfg.headlessEffort || '').trim()
+      parts.push([
+        '- id: agent-default-model',
+        "  name: '@deepseek-ai/dsh-agent-default-model'",
+        '  config:',
+        `    provider: ${String(cfg.headlessProvider || 'deepseek-official').trim() || 'deepseek-official'}`,
+        `    model: ${model}`,
+        ...(effort ? [`    reasoningEffort: ${effort}`] : []),
+        '',
+      ].join('\n'))
+    }
+    if (!parts.length) return null
+    const file = join(stateDir, 'headless-overlay.yml')
+    try { writeFileSync(file, parts.join('\n'), 'utf8'); return file } catch (e) { log(`写 overlay 失败：${e?.message ?? e}`); return null }
   }
 
   /**
@@ -752,14 +954,95 @@ export function apply(ctx, config) {
     } catch (e) { log(`补占位报告失败：${e?.message ?? e}`) }
   }
 
-  const runDuty = (why = 'window') => {
+  /** 后台那一路没有界面的登录态，只能靠 API Key —— 从 DSH 的凭据文件里取一份给孩子进程 */
+  const readDshApiKey = () => {
+    try {
+      const home = process.env.DSH_HOME || join(homedir(), '.dsh')
+      const f = join(home, '.credentials.yaml')
+      if (!existsSync(f)) return ''
+      const m = /DEEPSEEK_API_KEY:\s*(\S+)/.exec(readFileSync(f, 'utf8'))
+      return m ? m[1].trim().replace(/^['"]|['"]$/g, '') : ''
+    } catch { return '' }
+  }
+
+  const dutyEnv = () => {
+    const key = process.env.DEEPSEEK_API_KEY ? '' : readDshApiKey()
+    // 🔴 2026-10-17：界面切到 deepseek-account（登录态）之后，后台那一轮直接
+    //    MISSING_CREDENTIAL 死掉（1.5 秒、无声无息）。后台进程拿不到界面的登录态，
+    //    所以这里显式把 API Key 交给它。
+    return { BILI_DUTY_HOME: stateDir, ...(key ? { DEEPSEEK_API_KEY: key } : {}) }
+  }
+
+
+  /** 只读日志尾部几 KB —— 别每 5 秒把整个 duty.log 读一遍 */
+  const readLogTail = (from, maxBytes = 8000) => {
+    try {
+      const size = statSync(logFile).size
+      const start = Math.max(0, Math.max(from || 0, size - maxBytes))
+      const len = size - start
+      if (len <= 0) return ''
+      const fd = openSync(logFile, 'r')
+      try {
+        const buf = Buffer.alloc(Math.min(len, maxBytes))
+        readSync(fd, buf, 0, buf.length, start)
+        return buf.toString('utf8')
+      } finally { closeSync(fd) }
+    } catch { return '' }
+  }
+
+  /** 从日志里猜"现在走到哪一步了" —— 取最后出现的那一个标记 */
+  const stageOf = (text) => {
+    const marks = [
+      ['bili_video_info', '查视频信息'],
+      ['bili_subtitle', '读字幕'],
+      ['bili_frames', '抽帧看画面'],
+      ['read_image', '看画面'],
+      ['bili_comments', '翻评论'],
+    ]
+    let best = -1
+    let name = ''
+    for (const [key, label] of marks) {
+      const i = text.lastIndexOf(key)
+      if (i > best) { best = i; name = label }
+    }
+    return name
+  }
+
+  const activeInfo = () => {
+    if (!activeRun) return null
+    const elapsed = Math.round((Date.now() - activeRun.startedAt) / 1000)
+    const tail = readLogTail(activeRun.logStart)
+    let quiet = elapsed
+    try {
+      quiet = Math.max(0, Math.round((Date.now() - statSync(logFile).mtimeMs) / 1000))
+    } catch { /* 读不到就按 elapsed 算 */ }
+    let stage = stageOf(tail)
+    if (activeRun.file && existsSync(activeRun.file)) stage = '写报告 / 收尾'
+    if (!stage) stage = elapsed < 8 ? '启动中' : '在跑（还没调工具）'
+    return {
+      why: activeRun.why,
+      pid: activeRun.pid,
+      startedAt: activeRun.startedAt,
+      elapsed,
+      stage,
+      quiet,
+      stalled: quiet > 60,
+      bvids: activeRun.bvids || null,
+      file: activeRun.file || null,
+    }
+  }
+
+  let lastExitInfo = null
+  let activeRun = null
+
+  const runDuty = (why = 'window', promptOverride = null) => {
    try {
     refreshCfg()          // ⭐ 设置页刚改过的值要立刻生效（config 是就地改的，快照会过期）
     const dsh = resolveDsh()
     const overlay = ensureOverlay()
     const args = [...dsh.args, '--profile', cfg.headlessProfile || 'headless']
     if (overlay) args.push('--patch', overlay)
-    args.push(promptFor())
+    args.push(promptOverride || promptFor())
     // ⭐ 这一轮的工作目录 = 使用者（或别的用户）的**工作区** —— 只有这样它的 `AGENTS.md` 才会自动加载。
     // ⭐ 工作目录 = **插件家**：那一轮**被沙箱关着**，只写得了自己工作目录里的东西 ✗
     //    （2026-10-14 教训：为了让它读工作区里的 AGENTS.md 把 cwd 改成工作区 ⇒
@@ -776,18 +1059,21 @@ export function apply(ctx, config) {
       //    中文 / emoji 打进管道会炸（用户反馈过 UnicodeDecodeError），一律按 UTF-8 来
       // ⭐ ELECTRON_RUN_AS_NODE：**桌面版（Electron）里 spawn 出去的 node 必须带这个**，
       //    否则它当成"再开一个 Electron 应用"、什么都不干就以 0 退出（issue #5：0.17 秒、code 0、什么都没做）
-      env: pyEnv({ BILI_DUTY_HOME: stateDir, ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}) }),
+      env: pyEnv({ ...dutyEnv(), ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}) }),
     })
-    // ⚠️ 2026-10-16 issue #1（用户 `miaoxingyunduo` 贴了崩溃日志）：`duty.log` 被别的进程占着时
-    //    (`EBUSY`) `appendFileSync` 会抛异常 —— 而这里是 **stream 的 data 回调**，没人接
-    //    ⇒ **未捕获异常 ⇒ 整个 DSH 宿主被杀**（所有会话一起没）。跟 10-14 定时器那次是同一类 ✗
-    //    ⇒ ⭐ 规矩：**插件里任何写日志/写文件的地方都包好 try/catch**，再错也只该"这一轮没跑成" ✓
+    let logStart = 0
+    try { logStart = statSync(logFile).size } catch { /* 第一次跑还没有日志 */ }
+    activeRun = { why, pid: child.pid, startedAt: Date.now(), logStart, file: null, bvids: null }
+    // ⚠️ 2026-10-16 issue #1：`duty.log` 被别的进程占着时（EBUSY）`appendFileSync` 会抛异常 ——
+    //    而这里是 **stream 的 data 回调**，没人接 ⇒ 整个宿主被杀。⇒ 任何写日志都包 try/catch。
     const pick = (buf) => {
       try { appendFileSync(logFile, String(buf), 'utf8') } catch { /* 写不进去就丢，绝不能抛 */ }
     }
     child.stdout?.on('data', pick)
     child.stderr?.on('data', pick)
     child.on('exit', (code) => {
+      if (activeRun && activeRun.pid === child.pid) activeRun = null
+      lastExitInfo = { why, code, at: Date.now(), ok: code === 0 }
       log(`刷B站结束（${why}，code=${code}）`)
       stubReportIfMissing(code)   // ⭐ 没写报告就补一份占位 —— 别让使用者什么都看不到
       rotateLogIfBig()            // ⭐ 日志别无声地长（三天 797KB ⇒ 一年约 100MB）
@@ -810,6 +1096,43 @@ export function apply(ctx, config) {
     log(`刷B站开跑失败（${why}）：${e?.stack ?? e}`)
     return { started: false, why, error: String(e?.message ?? e) }
    }
+  }
+
+  /* ─────────────── 「点名看这几条」（不算日常额度） ─────────────── */
+
+  const watchFile = () => {
+    const d = new Date()
+    const pad = (n) => String(n).padStart(2, '0')
+    return join(outDir, `watch-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}.md`)
+  }
+
+  const watchPrompt = (bvids, file) => `这一轮**不是**日常刷B站，是使用者点名让你看这几条：${bvids.join('、')}。
+
+规矩（和日常那一轮不一样，别混）：
+- **只处理这几条**：不要搜索、不要自己加别的视频。
+- **不占每日额度**：别去动今天"已挑几条"的计数 —— 那是日常一轮的账。
+- **不进判重表**：这几条是点名看的，seen.md 一个字都别写。
+- **不发评论**（除非使用者当场让你发）。
+
+每条依次来，看完一条再下一条：
+1. \`bili_video_info\` —— 标题 / UP / 播放 / days_ago
+2. \`bili_subtitle\` 读字幕原文；没字幕就记一笔"无字幕"，别去转写
+3. \`bili_frames\` + \`read_image\` 看画面（设置里关掉了就跳过）。返回里的 **\`lines\`** 是每一格对应时刻的**口播** —— 画面上的硬字幕常是防和谐的字母/拼音/谐音，**以 \`lines\` 为准**
+4. \`bili_comments\` 翻一眼
+
+产物写到这个绝对路径（别写别处）：\`${file}\`
+每条一段：**标题 / UP / 链接 / 播放量 / 它到底讲了什么（画面+字幕）/ 值不值得占用使用者一次注意力**。
+哪条失败就记一笔继续下一条，别卡住。最后用一句话汇报。`
+
+  const runWatch = (items) => {
+    const bvids = [...new Set(String(items || '').match(/BV[0-9A-Za-z]{10}/g) || [])]
+    if (!bvids.length) return { started: false, error: '没认出 BV 号 —— 粘 BV1xxxxxxxxx 或整条视频链接都行' }
+    if (bvids.length > 10) return { started: false, error: '一次最多 10 条，分几批来吧' }
+    const file = watchFile()
+    log(`点名看：${bvids.join(',')} → ${file}`)
+    const r = runDuty('watch', watchPrompt(bvids, file))
+    if (activeRun) { activeRun.file = file; activeRun.bvids = bvids }
+    return { ...r, bvids, file }
   }
 
   /* ─────────────── 谷时定时器 ───────────────
@@ -1119,6 +1442,8 @@ export function apply(ctx, config) {
       ranToday: st.day === today ? Number(st.count || 0) : 0,   // 今天跑了几轮
       pickedToday: countPickedToday(),                          // 今天挑到几条（从报告里数）
       lastRunAt: st.lastRunAt || null,
+      lastExit: lastExitInfo,
+      active: activeInfo(),
       lastWhy: st.lastWhy || null,
       loggedIn: hasCredential(),
       venvReady: venvReadyNow(),
@@ -1145,6 +1470,16 @@ export function apply(ctx, config) {
     const path = url.pathname
     if (req.method === 'GET' && path === '/api/bili-duty/status') return sendJson(res, 200, status())
 
+    if (req.method === 'GET' && path === '/api/bili-duty/models') {
+      const fresh = String(url.searchParams.get('fresh') || '') === '1'
+      return sendJson(res, 200, await listAllModels(fresh))
+    }
+
+    if (req.method === 'GET' && path === '/api/bili-duty/model') {
+      const fresh = String(url.searchParams.get('fresh') || '') === '1'
+      return sendJson(res, 200, { ok: true, ...(await modelInfo(fresh)) })
+    }
+
     if (req.method === 'GET' && path === '/api/bili-duty/config') {
       return sendJson(res, 200, { ok: true, config: cfg, windows: WINDOWS, home: stateDir })
     }
@@ -1153,14 +1488,20 @@ export function apply(ctx, config) {
       const body = await readBody(req)
       const patch = {}
       for (const k of ['perDay', 'peakValley', 'noon', 'night', 'autoComment', 'transcribe', 'asrModel',
+        'seeVideo', 'frameHeight', 'frameCount', 'useCookie', 'frameAudio',
         'commentPerRound', 'mentionName',
-        'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound']) {
+        'keywords', 'subs', 'headlessModel', 'headlessProvider', 'headlessEffort', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound']) {
         if (k in body) patch[k] = body[k]
       }
       // ⭐ 范围钳制 + 两份都写（config.json / DSH 原生设置页），统一走 persistCfg —— 见文件上方
       const { clean, host } = await persistCfg(patch)
       log(`设置已更新：${JSON.stringify(clean)}（DSH 那边${host.ok ? '已同步' : '没写成：' + host.error}）`)
       return sendJson(res, 200, { ok: true, config: cfg, host })
+    }
+
+    if (req.method === 'POST' && path === '/api/bili-duty/watch') {
+      const body = await readBody(req)
+      return sendJson(res, 200, { ok: true, ...runWatch(body?.items) })
     }
 
     if (req.method === 'POST' && path === '/api/bili-duty/run') {
@@ -1194,31 +1535,57 @@ export function apply(ctx, config) {
     // 「打开文件夹」：浏览器开不了本地目录 ⇒ 让宿主去开（只认 out / home 两个，别的不受理）
     if (req.method === 'POST' && path === '/api/bili-duty/open') {
       const body = await readBody(req)
-      const dir = String(body?.what || 'out') === 'home' ? stateDir : outDir
-      if (process.platform !== 'win32') return sendJson(res, 200, { ok: false, error: '这个按钮目前只做了 Windows' })
-      // ⭐ 三种方式依次试（PATH 不全时 explorer.exe 会找不到 ✗；spawn 的失败是**异步**的，
-      //    try/catch 抓不到 ⇒ 必须挂 'error' 监听，否则会升级成未捕获异常）
-      // ⭐ 顺序很重要：把**最可能真的弹出窗口**的放第一（cmd start 走 shell 的 ShellExecute ✓）
-      //    并且**不要再传 windowsHide**（2026-10-15 实测：传了以后"成功"但窗口不出现 ✗）
-      const attempts = [
-        ['cmd.exe', ['/c', 'start', '', dir]],
-        [join(process.env.SystemRoot || 'C:\\Windows', 'explorer.exe'), [dir]],
-        ['powershell.exe', ['-NoProfile', '-Command', "Start-Process -FilePath '" + dir.replace(/'/g, "''") + "'"]],
-      ]
+      const what = String(body?.what || 'out')
+      const target = what === 'home' ? stateDir
+        : what === 'report' ? join(outDir, `${dayKey()}.md`)
+          : outDir
+      // ⭐ 不存在就给一句人话（第一次跑之前，今天的报告本来就可能还没有）
+      if (!existsSync(target)) {
+        return sendJson(res, 200, {
+          ok: false, what, dir: target,
+          error: (what === 'report' ? '今天的报告还没写' : '这个目录还不存在') + '：' + target,
+        })
+      }
+      // ⭐ 三个平台都走"系统自带的打开器"：
+      //    Windows：cmd start（ShellExecute，最可能真弹窗）→ explorer.exe → powershell 兜底
+      //    macOS  ：open（写全 /usr/bin/open —— PATH 不全也找得到；它能开目录也能开文件）
+      //    Linux  ：xdg-open → gio open
+      //    （2026-10-17：macOS/Linux 之前是硬拒绝「这个按钮目前只做了 Windows」，现在补齐）
+      const attempts = process.platform === 'win32'
+        ? [
+          ['cmd.exe', ['/c', 'start', '', target]],
+          [join(process.env.SystemRoot || 'C:\\Windows', 'explorer.exe'), [target]],
+          ['powershell.exe', ['-NoProfile', '-Command', "Start-Process -FilePath '" + target.replace(/'/g, "''") + "'"]],
+        ]
+        : process.platform === 'darwin'
+          ? [['/usr/bin/open', [target]], ['open', [target]]]
+          : [['xdg-open', [target]], ['gio', ['open', target]]]
+      // 🔴 2026-10-17 实测：DSH 宿主本身是 `ELECTRON_RUN_AS_NODE=1` 起的，
+      //    而 macOS 的 LaunchServices **会把这个环境原样传给被 open 的那个 app** ——
+      //    于是「打开报告」时，只要默认关联的是个 Electron 应用（实测：CodeBuddy CN），
+      //    它就以"纯 Node 模式"启动：不弹窗、立刻退出（Dock 上弹一下就没了）。
+      //    ⇒ 打开别人家 app 之前，先把 Electron / Node 那几个变量摘掉。
+      const childEnv = { ...process.env }
+      for (const k of Object.keys(childEnv)) {
+        if (/^ELECTRON_/i.test(k) || k === 'NODE_OPTIONS' || k === 'NODE_PATH') delete childEnv[k]
+      }
       let lastErr = ''
       for (const [cmd, args] of attempts) {
         const err = await new Promise((resolve) => {
           let done = false
           let child
-          try { child = spawn(cmd, args, { detached: true, stdio: 'ignore' }) } catch (e) { resolve(String(e?.message ?? e)); return }
+          try { child = spawn(cmd, args, { detached: true, stdio: 'ignore', env: childEnv }) } catch (e) { resolve(String(e?.message ?? e)); return }
           child.on('error', (e) => { if (!done) { done = true; resolve(String(e?.message ?? e)) } })
           setTimeout(() => { if (!done) { done = true; try { child.unref() } catch { /* 无所谓 */ } resolve('') } }, 500)
         })
-        if (!err) { log('打开文件夹：用了 ' + cmd + '（没报错；窗口不一定真弹出来了）'); return sendJson(res, 200, { ok: true, opened: dir, via: cmd }) }
+        if (!err) {
+          log(`打开 ${what}：用了 ${cmd}（没报错；窗口不一定真弹出来了）`)
+          return sendJson(res, 200, { ok: true, what, opened: target, via: cmd })
+        }
         lastErr = err
-        log('打开文件夹失败（' + cmd + '）：' + err)
+        log(`打开 ${what} 失败（${cmd}）：${err}`)
       }
-      return sendJson(res, 200, { ok: false, error: lastErr, dir })
+      return sendJson(res, 200, { ok: false, what, error: lastErr, dir: target })
     }
 
     // 「一键升级」：点了它自己跑 add（⚠️ 之后要重启才生效）

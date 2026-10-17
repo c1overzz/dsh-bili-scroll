@@ -20,6 +20,7 @@ import base64
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
@@ -301,6 +302,9 @@ async def bili_search(keyword: str, num: int = 10, order: str = "totalrank") -> 
             "review": item.get("review", 0),
             "danmaku": item.get("video_review", 0),
             "duration": item.get("duration", ""),
+            "pubdate": item.get("pubdate", 0),
+            "days_ago": (round((time.time() - item["pubdate"]) / 86400, 1)
+                         if item.get("pubdate") else None),
             "description": item.get("description", "")[:200],
         })
 
@@ -381,6 +385,107 @@ async def bili_comments(bvid: str, num: int = 30) -> str:
 
 # ========== Tool 3: 获取字幕 ==========
 
+async def _sub_body(bvid: str):
+    """字幕轨的原始 body（每条带 from/to/content）。
+
+    ⚠️ 为什么要它：画面里烧的硬字幕可能是 UP 的**规避写法**（字母 / 拼音 / 谐音 / 干脆写别的），
+    而字幕轨是拿**音频**转出来的 —— 那才是他嘴里真说的。抽帧时把两者按时间对齐，
+    才能看懂"这帧上写着 X，其实他说的是 Y"。
+    """
+    cred = get_cred()
+    v = video.Video(bvid=bvid, credential=cred)
+    info = await v.get_info()
+    cid = info.get("cid", 0)
+    if not cid and info.get("pages"):
+        cid = info["pages"][0].get("cid", 0)
+    if not cid:
+        return []
+    data = await v.get_subtitle(cid=cid)
+    subs = data.get("subtitles") or []
+    target = None
+    for sp in subs:
+        if sp.get("lan") in ["ai-zh", "zh-CN", "zh"]:
+            target = sp
+            break
+    if not target and subs:
+        target = subs[0]
+    if not target:
+        return []
+    import aiohttp
+    url = target.get("subtitle_url", "") or ""
+    if url.startswith("//"):
+        url = "https:" + url
+    if not url:
+        return []
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            body = await resp.json()
+    return body.get("body", []) or []
+
+
+def _asr_python() -> str:
+    """ASR 独立环境里的解释器（没装就返回空）"""
+    home = Path(__file__).parent
+    cands = [
+        home / ".venv-asr" / "bin" / "python",
+        home / ".venv-asr" / "Scripts" / "python.exe",
+        home / ".venv-asr" / "Scripts" / "python",
+    ]
+    for c in cands:
+        if c.exists():
+            return str(c)
+    return ""
+
+
+def _asr_segments(bvid: str, model: str = "small", timeout: int = 900):
+    """本地转写拿带时间轴的片段（只在没字幕轨时才用，慢）"""
+    py = _asr_python()
+    script = Path(__file__).parent / "asr.py"
+    if not py or not script.exists():
+        return []
+    import subprocess
+    try:
+        r = subprocess.run(
+            [py, str(script), bvid, "--json", "--model", model],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        if r.returncode != 0:
+            return []
+        data = json.loads((r.stdout or "").strip().splitlines()[-1])
+        return [{"from": x["start"], "to": x["end"], "content": x["text"]}
+                for x in data.get("segments", [])]
+    except Exception:
+        return []
+
+
+async def _frame_lines(bvid: str, times: list, duration: float):
+    """把每个抽帧时刻前后的话对齐出来 → [(第几帧, 时刻, 台词)]"""
+    segs = await _sub_body(bvid)
+    src = "bilibili-subtitle"
+    if not segs:
+        try:
+            cfgp = Path(__file__).parent / "config.json"
+            cfg = json.loads(cfgp.read_text())
+        except Exception:
+            cfg = {}
+        if cfg.get("transcribe") and duration and duration <= 1200:
+            segs = _asr_segments(bvid, str(cfg.get("asrModel") or "small"))
+            src = "local-asr"
+        else:
+            src = "none"
+    if not segs:
+        return [], src
+
+    out = []
+    for i, t in enumerate(times):
+        lo, hi = float(t) - 2.0, float(t) + 4.0
+        txt = "".join(
+            str(sg.get("content", "")).strip()
+            for sg in segs
+            if float(sg.get("to", 0) or 0) >= lo and float(sg.get("from", 0) or 0) <= hi
+        )
+        out.append({"i": i + 1, "t": t, "text": txt[:140]})
+    return out, src
 @tool()
 async def bili_subtitle(bvid: str) -> str:
     """
@@ -492,7 +597,12 @@ async def bili_video_info(bvid: str) -> str:
         "title": info.get("title"),
         "description": info.get("desc"),
         "author": info.get("owner", {}).get("name"),
+        "owner_mid": info.get("owner", {}).get("mid"),
         "duration": info.get("duration"),
+        "pubdate": info.get("pubdate"),
+        "days_ago": (round((time.time() - info["pubdate"]) / 86400, 1)
+                     if info.get("pubdate") else None),
+        "cover": info.get("pic"),
         "pages": len(info.get("pages", [])),
         "tags": [t.get("tag_name") for t in info.get("tag", []) if t.get("tag_name")],
         "stat": {
@@ -1408,6 +1518,216 @@ async def bili_received_at_and_likes() -> str:
     except Exception as e:
         result["likes_error"] = str(e)
     return json.dumps(result, ensure_ascii=False)
+
+
+# ========== Tool: 订阅（UP 主 / 合集的新片）==========
+
+@tool()
+async def bili_up_videos(mid: int, num: int = 10) -> str:
+    """
+    取某个 UP 主最近发布的视频（订阅用）
+
+    Args:
+        mid: UP 主的 mid（数字 UID，空间链接 space.bilibili.com/<mid> 里那个）
+        num: 取几条，默认 10，最多 50
+
+    Returns:
+        JSON：videos 里每条带 bvid / 标题 / 播放 / 时长 / pubdate / days_ago
+    """
+    cred = get_cred()
+    n = max(1, min(int(num or 10), 50))
+    try:
+        u = user.User(uid=int(mid), credential=cred)
+        data = await u.get_videos(pn=1, ps=n)
+        vlist = ((data or {}).get("list") or {}).get("vlist") or []
+        out = []
+        for v in vlist[:n]:
+            ts = v.get("created") or 0
+            out.append({
+                "bvid": v.get("bvid"),
+                "title": v.get("title"),
+                "play": v.get("play"),
+                "duration": v.get("length"),
+                "pubdate": ts,
+                "days_ago": round((time.time() - ts) / 86400, 1) if ts else None,
+            })
+        return json.dumps({"mid": mid, "count": len(out), "videos": out}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"mid": mid, "error": str(e)}, ensure_ascii=False)
+
+
+@tool()
+async def bili_collection_videos(uid: int, sid: int, num: int = 20) -> str:
+    """
+    取某个合集（season）里的视频（订阅用）
+
+    Args:
+        uid: 合集所属 UP 的 mid
+        sid: 合集 id（链接里 ?sid= 后面那个）
+        num: 最多返回几条，默认 20
+
+    Returns:
+        JSON：videos 里每条带 bvid / 标题 / pubdate / days_ago
+    """
+    from bilibili_api import channel_series
+    cred = get_cred()
+    n = max(1, min(int(num or 20), 100))
+    try:
+        cs = channel_series.ChannelSeries(
+            uid=int(uid), type_=channel_series.ChannelSeriesType.SEASON,
+            id_=int(sid), credential=cred,
+        )
+        data = await cs.get_videos(pn=1, ps=n)
+        arcs = (data or {}).get("archives") or []
+        out = []
+        for v in arcs[:n]:
+            ts = v.get("pubdate") or 0
+            out.append({
+                "bvid": v.get("bvid"),
+                "title": v.get("title"),
+                "pubdate": ts,
+                "days_ago": round((time.time() - ts) / 86400, 1) if ts else None,
+            })
+        return json.dumps({"uid": uid, "sid": sid, "count": len(out), "videos": out}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"uid": uid, "sid": sid, "error": str(e)}, ensure_ascii=False)
+
+
+# ========== Tool: 看画面（抽关键帧拼图）==========
+
+FRAMES_SCRIPT = Path(__file__).parent / "frames.py"
+CONFIG_FILE = Path(__file__).parent / "config.json"
+
+
+def frame_settings() -> dict:
+    """设置页里那几个「看不看画面」的开关 —— 插件写在家目录的 config.json 里。"""
+    try:
+        with open(CONFIG_FILE) as f:
+            c = json.load(f)
+    except Exception:
+        c = {}
+    h = c.get("frameHeight", 480)
+    try:
+        h = int(h)
+    except Exception:
+        h = 480
+    if h not in (480, 720, 1080):
+        h = 480
+    try:
+        cnt = int(c.get("frameCount", 9))
+    except Exception:
+        cnt = 9
+    return {
+        "seeVideo": bool(c.get("seeVideo", True)),
+        "height": h,
+        "count": max(4, min(cnt, 16)),
+        "cookie": bool(c.get("useCookie", False)),
+        "audio": "always" if str(c.get("frameAudio") or "auto") == "always" else "auto",
+        "asrModel": str(c.get("asrModel") or "small"),
+    }
+
+
+@tool()
+async def bili_frames(bvid: str, n: int = 0, height: int = 0) -> str:
+    """
+    把视频画面抽成一张「关键帧拼图」，返回图片路径 —— 之后用 read_image 真正"看"它。
+
+    清晰度/帧数/要不要带 Cookie 都跟设置页里的「看不看画面」走，一般不用传参数。
+
+    Args:
+        bvid: 视频BV号，如"BV1awJX6HEDM"
+        n: 抽几帧（0 = 用设置页里的，默认 9；最多 16）
+        height: 清晰度 480/720/1080（0 = 用设置页里的，默认 480）
+
+    Returns:
+        JSON：sheet=拼图绝对路径（拿去 read_image）、duration、pubdate、days_ago、
+        times=每格对应的时间点、note=怎么读这张图
+    """
+    import subprocess
+
+    cfg = frame_settings()
+    if not cfg["seeVideo"]:
+        return json.dumps({"ok": False, "skipped": True,
+                           "error": "设置页里关掉了「看视频画面」—— 这一轮只读字幕，别抽帧"},
+                          ensure_ascii=False)
+    if not FRAMES_SCRIPT.exists():
+        return json.dumps({"ok": False, "error": f"家目录里没有 frames.py：{FRAMES_SCRIPT}"},
+                          ensure_ascii=False)
+    try:
+        n = max(4, min(int(n) or cfg["count"], 16))
+    except Exception:
+        n = cfg["count"]
+    try:
+        h = int(height) or cfg["height"]
+    except Exception:
+        h = cfg["height"]
+    if h not in (480, 720, 1080):
+        h = cfg["height"]
+
+    # 🔎 先看有没有字幕轨：**没有的话**，只要开了本地转写，就顺便让它把音频也转了
+    #    （以前这条兜底只在 _frame_lines 里、还卡了 20 分钟的时长上限 —— 21 分钟的视频就漏了）
+    try:
+        has_sub = bool(await _sub_body(bvid))
+    except Exception:
+        has_sub = False
+    transcribe_on = False
+    try:
+        transcribe_on = bool(json.loads((Path(__file__).parent / "config.json").read_text()).get("transcribe"))
+    except Exception:
+        transcribe_on = False
+
+    args = [sys.executable, str(FRAMES_SCRIPT), bvid, "--n", str(n), "--height", str(h)]
+    if cfg["cookie"]:
+        args.append("--cookie")
+    if cfg.get("audio") == "always":
+        args += ["--audio", "--asr-model", cfg.get("asrModel") or "small"]
+    elif (not has_sub) and transcribe_on:
+        # 没字幕轨 + 开了转写 ⇒ 让 frames.py 顺手把音频转出来（长视频它自己只转帧附近的片段）
+        args += ["--audio", "--asr-model", cfg.get("asrModel") or "small"]
+
+    def run():
+        return subprocess.run(args, capture_output=True, text=True, timeout=600)
+
+    try:
+        r = await asyncio.to_thread(run)
+    except Exception as e:
+        return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
+
+    outline = [ln for ln in (r.stdout or "").strip().splitlines() if ln.strip()]
+    last = outline[-1] if outline else ""
+    if r.returncode != 0 or not last.startswith("{"):
+        err = (r.stderr or "").strip()[-400:] or (r.stdout or "").strip()[-400:] or "抽帧失败"
+        return json.dumps({"ok": False, "bvid": bvid, "error": err}, ensure_ascii=False)
+
+    try:
+        out = json.loads(last)
+    except Exception:
+        return last
+    if not out.get("ok"):
+        return last
+
+    # ⭐ 帧对齐台词：画面上写的可能是规避写法，这里给的是**那几秒他嘴里说的**
+    try:
+        lines, srcname = await _frame_lines(bvid, out.get("times") or [], float(out.get("duration") or 0))
+        out["lines"] = lines
+        out["line_source"] = srcname
+        if lines:
+            out["align_note"] = ("每一格底下的台词（lines）是那个时刻前后的话，来自音频字幕/本地转写；"
+                                 "画面里若是字母/拼音/谐音，以这里为准。")
+    except Exception as e:
+        out["lines"] = []
+        out["line_source"] = "error"
+        out["lines_err"] = str(e)
+
+    # ⭐ 音频来源的台词（没改过的）：既不受画面硬字幕影响，也不受 UP 改字幕轨影响
+    if out.get("audio_lines"):
+        out["lines_from_subtitle"] = out.get("lines") or []
+        out["lines"] = out["audio_lines"]
+        out["line_source"] = out.get("audio_source") or "local-asr"
+        out["align_note"] = ("lines = **本地从音频转的**（受 UP 改字幕影响最小）；lines_from_subtitle = B站字幕轨。"
+                             "两栏不一致时优先信 lines，但专有名词两栏都可能错，交叉看。")
+
+    return json.dumps(out, ensure_ascii=False)
 
 
 # ========== 启动 ==========
