@@ -1013,12 +1013,21 @@ export function apply(ctx, config) {
         : process.platform === 'darwin'
           ? [['/usr/bin/open', [target]], ['open', [target]]]
           : [['xdg-open', [target]], ['gio', ['open', target]]]
+      // 🔴 2026-10-17 实测：DSH 宿主本身是 `ELECTRON_RUN_AS_NODE=1` 起的，
+      //    而 macOS 的 LaunchServices **会把这个环境原样传给被 open 的那个 app** ——
+      //    于是「打开报告」时，只要默认关联的是个 Electron 应用（实测：CodeBuddy CN），
+      //    它就以"纯 Node 模式"启动：不弹窗、立刻退出（Dock 上弹一下就没了）。
+      //    ⇒ 打开别人家 app 之前，先把 Electron / Node 那几个变量摘掉。
+      const childEnv = { ...process.env }
+      for (const k of Object.keys(childEnv)) {
+        if (/^ELECTRON_/i.test(k) || k === 'NODE_OPTIONS' || k === 'NODE_PATH') delete childEnv[k]
+      }
       let lastErr = ''
       for (const [cmd, args] of attempts) {
         const err = await new Promise((resolve) => {
           let done = false
           let child
-          try { child = spawn(cmd, args, { detached: true, stdio: 'ignore' }) } catch (e) { resolve(String(e?.message ?? e)); return }
+          try { child = spawn(cmd, args, { detached: true, stdio: 'ignore', env: childEnv }) } catch (e) { resolve(String(e?.message ?? e)); return }
           child.on('error', (e) => { if (!done) { done = true; resolve(String(e?.message ?? e)) } })
           setTimeout(() => { if (!done) { done = true; try { child.unref() } catch { /* 无所谓 */ } resolve('') } }, 500)
         })
