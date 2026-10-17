@@ -300,6 +300,27 @@ export function apply(ctx, config) {
   })
 
   tool({
+    name: 'bili_frames',
+    description: '把一条视频的画面抽成一张「关键帧拼图」，返回图片路径 —— 之后用 read_image 真的看它。\n'
+      + '也可以用来**看使用者指定的那条视频**：他丢过来一个 BV 号或链接就调它。\n'
+      + '清晰度 / 帧数 / 要不要带 Cookie 全跟设置页走，不用传。',
+    parameters: {
+      bvid: { type: 'string', description: 'BV号或视频链接（BV1xxxxxxxxx / https://www.bilibili.com/video/BV1xxx）' },
+      n: { type: 'number', description: '抽几帧（不填 = 跟设置页，默认 9）' },
+      height: { type: 'number', description: '清晰度 480/720/1080（不填 = 跟设置页）' },
+    },
+    async execute(args) {
+      const raw = String(args?.bvid ?? '')
+      const hit = /BV[0-9A-Za-z]{10}/.exec(raw)          // 链接里抠 BV 号
+      if (!hit) return { ok: false, error: '没认出 BV 号：传 BV1xxxxxxxxx 或整条视频链接都行' }
+      const a = { bvid: hit[0] }
+      if (Number(args?.n) > 0) a.n = Number(args.n)
+      if (Number(args?.height) > 0) a.height = Number(args.height)
+      return call('bili_frames', a)
+    },
+  })
+
+  tool({
     name: 'bili_reply',
     description: '在视频下发评论（或回复某条评论）。这就是"@ 本人"那一下：短、干净、纯文本 @ 写在正文里。\n'
       + '🔴 安全闸：设置页的「自动评论并 @ 你」**默认是关的**；关着的时候这个工具会拒绝 —— '
