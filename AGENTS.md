@@ -5,11 +5,11 @@
 ## 帮用户安装时，按这个顺序
 
 1. **前提**：机器上有 `Python 3.10+` **或** `uv`（有一个即可）。
-   两个都没有**也不用让用户先装** —— 插件点「装依赖」时会**自己下一份 `uv` 到自己的家目录**（免管理员、不用 PATH）；
+   两个都没有**也不用让用户先装** —— 插件点「装依赖」时会**自己下一份 `uv` 到自己的数据目录**（免管理员、不用 PATH）；
    只有它自己也下不动时（网络到不了 GitHub / 加速代理 / PyPI 镜像），才需要引导用户手动装。
    · 它是**直连 GitHub → 国内加速代理 → PyPI 镜像**依次试的，并且会**核对官方 sha256** ✓
    · ⚠️ **Windows** 上若杀软拦了这次下载：让他把 `%USERPROFILE%\.dsh\bili-duty\bin\` 加白，或干脆自己装 uv / Python 3.10+ ✓
-   · ⭐ **万一下载链路都不通**（有用户反馈"桌面版上这条链路经常不通"）：**手动放一份 uv 到 `<家目录>/bin/` 就行**
+   · ⭐ **万一下载链路都不通**（有用户反馈"桌面版上这条链路经常不通"）：**手动放一份 uv 到 `<数据目录>/bin/` 就行**
      （Windows 是 `uv.exe`，Linux / macOS 是 `uv`）
      —— 插件会**优先用那里那一份**，跳过下载 ✓
 2. `dsh plugin --profile web add dsh-bili-scroll`（npm，推荐）
@@ -41,7 +41,7 @@
 - `index.js` —— host 半端：12 个工具 + 时段定时器 + HTTP 接口 + 设置命名空间
   · 里面有一节「跨平台的那点基础设施」（`whichSync` / `asCommand` / `resolvePy`），**改命令之前先读它**
 - `client.js` —— 浏览器半端：设置页（注册在 `settings.section`）
-- `lib/` —— 状态目录与家目录 / 极小的 MCP stdio 客户端 / 扫码登录 / **`hostdeps.mjs`（从宿主树取 `@deepseek-ai/*`，拿不到就退到自己依赖 / 本地等价实现）** / **`verify.mjs`（评论发出后复核）**
+- `lib/` —— 数据目录（`stateDir`，配置 / 报告 / 凭证都在这儿）/ 极小的 MCP stdio 客户端 / 扫码登录 / **`hostdeps.mjs`（从宿主树取 `@deepseek-ai/*`，拿不到就退到自己依赖 / 本地等价实现）** / **`verify.mjs`（评论发出后复核）**
 - `prompts/duty.md` —— 一轮要做的事（判定口径 + 红线，**用户可以改**）
 - `vendor/bilibili-mcp/` —— 内置的 Python MCP（MIT，AGI_Ananas）
 - `selfcheck.mjs` + `tools/` —— 本地预检：`node selfcheck.mjs`（**现在不用解析钩子了**；`tools/register.mjs` 那条还留着当备份）

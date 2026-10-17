@@ -6,13 +6,13 @@
  * 这里把注册进去的 handler 抓下来，喂假 req/res 真跑，用**真报告**当夹具。
  *
  * 用法：node --import ./tools/register.mjs route-smoke.mjs
- * 夹具：把线上 out/*.md 拷进沙箱家目录（只读线上，不往真家目录写任何东西）
+ * 夹具：把线上 out/*.md 拷进沙箱的数据目录（只读线上，不往真数据目录写任何东西）
  */
 import { mkdirSync, copyFileSync, writeFileSync, rmSync, existsSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
-// 有真家目录就拿真报告当夹具（最有说服力）；没有就用合成夹具，别让外人一跑就挂
+// 有真数据目录就拿真报告当夹具（最有说服力）；没有就用合成夹具，别让外人一跑就挂
 const REAL_HOME = process.env.BILI_DUTY_HOME || '/vol1/@apphome/fn-deepseek-harness/bili-duty'
 const SANDBOX = join(tmpdir(), 'dsh-bili-duty-routecheck')
 
@@ -24,7 +24,7 @@ const ok = (name, pass, extra) => {
 
 /* ── 备沙箱：真报告 + 假的进度流 / 日志 ────────────────────────── */
 rmSync(SANDBOX, { recursive: true, force: true })
-// ⚠️ 插件拿到的家目录是 dshHomePath('bili-duty') ⇒ 夹具必须放在 <沙箱>/bili-duty 底下
+// ⚠️ 插件拿到的数据目录是 dshHomePath('bili-duty') ⇒ 夹具必须放在 <沙箱>/bili-duty 底下
 const HOME = join(SANDBOX, 'bili-duty')
 mkdirSync(join(HOME, 'out'), { recursive: true })
 
@@ -36,7 +36,7 @@ try {
       days.push(f.slice(0, -3))
     }
   }
-} catch { /* 没有真家目录（换台机器跑）*/ }
+} catch { /* 没有真数据目录（换台机器跑）*/ }
 
 if (days.length) {
   console.log(`（夹具：${days.length} 天的真报告 —— ${days.sort().reverse().join('、')}）`)

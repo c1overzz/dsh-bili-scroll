@@ -753,7 +753,7 @@ window.__ModuleLoader__.load({
 
       return h('div', { 'data-bd-sub': '' },
         h('div', { 'data-bd-crumb': '' },
-          h('span', null, what === 'out' ? '报告目录：' : '插件家目录：'),
+          h('span', null, what === 'out' ? '报告目录：' : '刷B站的数据目录：'),
           h('b', null, (st && st.dir) || '…'),
           sub ? h('button', {
             'data-bd-btn': '', 'data-bd-tiny': '',
@@ -1352,7 +1352,7 @@ window.__ModuleLoader__.load({
         /* ── ⑥ 文件在哪儿 ── */
         h('div', { 'data-bd-sec': '' },
           h('div', { 'data-bd-h': '' }, '文件在哪儿'),
-          h('div', { 'data-bd-kv': '' }, `家目录：${st.home}`, h('br'), `今天的报告：${st.report}`),
+          h('div', { 'data-bd-kv': '' }, `数据目录：${st.home}`, h('br'), `今天的报告：${st.report}`),
           h('div', { 'data-bd-row': '' },
             h('button', { 'data-bd-btn': '', disabled: busy === 'report', onClick: onShowReport },
               report !== null ? '收起报告' : '看今天的报告'),
@@ -1360,13 +1360,13 @@ window.__ModuleLoader__.load({
             // ⚠️ "让系统去打开"这回事**只有在有桌面的机器上才存在** ⇒ 没有就别摆这个按钮，
             //    换成下面那两个"翻目录"（那才是服务器 / NAS 上真能做到的 ✓）
             noDesktop ? null : h('button', { 'data-bd-btn': '', onClick: () => onOpenFolder('out') }, '打开报告文件夹'),
-            noDesktop ? null : h('button', { 'data-bd-btn': '', onClick: () => onOpenFolder('home') }, '打开家目录'),
+            noDesktop ? null : h('button', { 'data-bd-btn': '', onClick: () => onOpenFolder('home') }, '打开数据目录'),
             h('button', {
               'data-bd-btn': '', onClick: () => setFilesWhat(filesWhat === 'out' ? '' : 'out'),
             }, filesWhat === 'out' ? '收起目录' : '翻报告目录'),
             h('button', {
               'data-bd-btn': '', onClick: () => setFilesWhat(filesWhat === 'home' ? '' : 'home'),
-            }, filesWhat === 'home' ? '收起目录' : '翻家目录'),
+            }, filesWhat === 'home' ? '收起目录' : '翻数据目录'),
             h('button', { 'data-bd-btn': '', onClick: () => copyText(st.report) }, '复制报告路径')),
           noDesktop ? h('div', { 'data-bd-note': '' },
             '这台机器上没有桌面（多半是服务器 / NAS）—— 让系统"打开文件夹"在这儿是做不到的事，'

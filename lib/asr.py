@@ -28,7 +28,7 @@ try:
 except Exception:
     pass
 
-# ⚠️ 临时目录必须待在家目录里：值班那一轮跑在沙箱里（只允许写工作区/cwd），
+# ⚠️ 临时目录必须待在数据目录里：值班那一轮跑在沙箱里（只允许写工作区/cwd），
 #    yt-dlp 默认往 %TEMP% 写、会被直接拒掉（2026-10-14 在主人机器上实证：
 #    yt_dlp DownloadError: unable to open for writing: [Errno 13] Permission denied）
 _HOME = os.path.dirname(os.path.abspath(__file__))

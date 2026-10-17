@@ -116,4 +116,4 @@ console.log(`✓ client 半端 OK：id=${loaded.id}  注入=${JSON.stringify(cli
 for (const s of slotsReg) console.log(`    slot ${s.name}  id=${s.id}  order=${s.order}  组件=${s.hasComponent ? '有' : '无 ✗'}`)
 
 try { rmSync(SANDBOX_HOME, { recursive: true, force: true }) } catch { /* 留着也无所谓 */ }
-console.log(`\n（预检不碰真家目录：host 用 ${SANDBOX_HOME}）`)
+console.log(`\n（预检不碰真数据目录：host 用 ${SANDBOX_HOME}）`)

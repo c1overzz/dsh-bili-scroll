@@ -44,7 +44,7 @@ _PROG_MAX_BYTES = 400_000
 
 
 def _duty_home() -> Path:
-    """插件家目录：优先 BILI_DUTY_HOME（插件起这一轮时会设），退回本文件所在目录。"""
+    """插件的数据目录：优先 BILI_DUTY_HOME（插件起这一轮时会设），退回本文件所在目录。"""
     return Path(os.environ.get("BILI_DUTY_HOME") or Path(__file__).resolve().parent)
 
 
