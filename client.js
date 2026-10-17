@@ -646,6 +646,10 @@ window.__ModuleLoader__.load({
           h('div', { 'data-bd-row': '' },
             h('button', { 'data-bd-btn': '', disabled: busy === 'watch', onClick: onWatch }, '看这些'),
             watchMsg ? h('div', { 'data-bd-note': '' }, watchMsg) : null),
+          st.lastExit && !st.lastExit.ok
+            ? h('div', { 'data-bd-msg': '', 'data-warn': '' },
+              `上一次跑（${st.lastExit.why || '一轮'}）失败：exit=${st.lastExit.code} —— 详情在 duty.log`)
+            : null,
           h('div', { 'data-bd-note': '' }, '结果写到 out/watch-<时间>.md；一次最多 10 条。')),
 
         h('div', { 'data-bd-sec': '' },

@@ -25,6 +25,7 @@ const defineTool = hostDeps.defineTool
 import { spawn } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
+import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { McpClient } from './lib/mcp.mjs'
 import { verifyRecent, appendVerifyToReport } from './lib/verify.mjs'
@@ -612,7 +613,7 @@ export function apply(ctx, config) {
     if (!fresh && modelsCache.val && Date.now() - modelsCache.at < 300000) return modelsCache.val
     let out
     try {
-      const llm = ctx.llm
+      const llm = (typeof ctx.get === 'function' ? ctx.get('llm') : null) || ctx.llm
       if (!llm || typeof llm.listProviders !== 'function') {
         out = { ok: false, error: '这个 DSH 版本没暴露模型目录（ctx.llm 不可用）' }
       } else {
@@ -774,6 +775,27 @@ export function apply(ctx, config) {
     } catch (e) { log(`补占位报告失败：${e?.message ?? e}`) }
   }
 
+  /** 后台那一路没有界面的登录态，只能靠 API Key —— 从 DSH 的凭据文件里取一份给孩子进程 */
+  const readDshApiKey = () => {
+    try {
+      const home = process.env.DSH_HOME || join(homedir(), '.dsh')
+      const f = join(home, '.credentials.yaml')
+      if (!existsSync(f)) return ''
+      const m = /DEEPSEEK_API_KEY:\s*(\S+)/.exec(readFileSync(f, 'utf8'))
+      return m ? m[1].trim().replace(/^['"]|['"]$/g, '') : ''
+    } catch { return '' }
+  }
+
+  const dutyEnv = () => {
+    const key = process.env.DEEPSEEK_API_KEY ? '' : readDshApiKey()
+    // 🔴 2026-10-17：界面切到 deepseek-account（登录态）之后，后台那一轮直接
+    //    MISSING_CREDENTIAL 死掉（1.5 秒、无声无息）。后台进程拿不到界面的登录态，
+    //    所以这里显式把 API Key 交给它。
+    return { BILI_DUTY_HOME: stateDir, ...(key ? { DEEPSEEK_API_KEY: key } : {}) }
+  }
+
+  let lastExitInfo = null
+
   const runDuty = (why = 'window', promptOverride = null) => {
    try {
     const dsh = resolveDsh()
@@ -795,12 +817,13 @@ export function apply(ctx, config) {
       stdio: ['ignore', 'pipe', 'pipe'],
       // ⭐ PYTHONUTF8 / PYTHONIOENCODING：Windows 上 Python 默认按 GBK 编解码，
       //    中文 / emoji 打进管道会炸（用户反馈过 UnicodeDecodeError），一律按 UTF-8 来
-      env: pyEnv({ BILI_DUTY_HOME: stateDir }),
+      env: pyEnv(dutyEnv()),
     })
     const pick = (buf) => appendFileSync(logFile, String(buf), 'utf8')
     child.stdout?.on('data', pick)
     child.stderr?.on('data', pick)
     child.on('exit', (code) => {
+      lastExitInfo = { why, code, at: Date.now(), ok: code === 0 }
       log(`刷B站结束（${why}，code=${code}）`)
       stubReportIfMissing(code)   // ⭐ 没写报告就补一份占位 —— 别让使用者什么都看不到
       // ⭐ 发完评论之后**过一会儿再核一次**（2026-10-16 加的「评论发出后复核」）：
@@ -1124,6 +1147,7 @@ export function apply(ctx, config) {
       today,
       ranToday: st.day === today ? Number(st.count || 0) : 0,
       lastRunAt: st.lastRunAt || null,
+      lastExit: lastExitInfo,
       lastWhy: st.lastWhy || null,
       loggedIn: hasCredential(),
       venvReady: venvReadyNow(),

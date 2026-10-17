@@ -105,6 +105,17 @@
   14px patch、每轴 3:1 下采样 ⇒ 42px 一格、**单图封顶 1024 tokens**。
   以前用的"按像素估 800"偏高，现在一张九宫格实测约 700 出头、16 格封顶 1024。
 
+**修：换了登录方式以后，后台那一轮静悄悄死掉**
+- 现象：点了「看这些」，界面显示"已经在看了"，然后几分钟什么都没有。
+  实际是后台那一轮 **1.5 秒就退出了**（exit=1），日志里只有一句
+  `MISSING_CREDENTIAL: llm-deepseek: no API key for provider route "deepseek-official"`。
+- 原因：界面切到 `deepseek-account`（登录态）之后，**后台子进程拿不到界面那份登录态**，
+  而 `deepseek-official` 这条路由又没有 API Key 可用。
+- 修法：起 headless 之前，从 `~/.dsh/.credentials.yaml` 里读 `DEEPSEEK_API_KEY`，
+  显式塞进子进程环境（父进程已有就不覆盖）。实测手动带这个变量，同一轮能正常跑完。
+- 顺带：`/status` 多了 `lastExit`，设置页会直接显示「上一次跑失败：exit=1」，
+  不再让人干等。
+
 **兼容**
 - 全部默认值与老版本一致（看画面默认开，但只用 480p/9 帧，成本可关）；
   关掉「看画面」= 完全回到只读字幕的老行为。
