@@ -330,7 +330,12 @@ window.__ModuleLoader__.load({
             setWatchMsg(`已经在看了（${n} 条）→ ${r.file}`)
             say(`点名看 ${n} 条：结果会写到 ${r.file}`, 'good')
           } else { setWatchMsg('没起来：' + (r?.error || '未知原因')); say(String(r?.error || '没起来'), 'warn') }
-        } catch (e) { setWatchMsg(String(e?.message ?? e)) } finally { setBusy('') }
+        } catch (e) {
+          const m = String(e?.message ?? e)
+          setWatchMsg(/unknown POST/i.test(m)
+            ? '宿主还没加载这个接口 —— 重启一次 DSH 再试（不是设置的问题）'
+            : m)
+        } finally { setBusy('') }
       }
 
       const onSaveSubs = async () => {
