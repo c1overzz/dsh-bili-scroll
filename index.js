@@ -69,6 +69,11 @@ export const Config = !z ? undefined : z.object({
   dmMode: z.string().default('off').extra('volatile', true),
   /** ⭐ 私信发给谁的 UID（数字）。要在 dmMode 不是 off 时填 */
   dmUid: z.natural().default(0).extra('volatile', true),
+  /**
+   * ⭐⭐ 私信收件人（**一个列表**，一个 UID 一条；非空时优先于 dmUid）。
+   * 一轮会给名单里**每个人各发一条**（私信是点对点的，不是群发同一封）。
+   */
+  dmUids: z.array(z.string()).default([]).extra('volatile', true),
   /** ⭐ 楼中楼回复：开=只在「明确是 AI / 机器人」的账号下面回；关=永远只发自己的顶层评论，绝不回复任何人 */
   aiReply: z.boolean().default(true).extra('volatile', true),
   /** ⭐ 自定义的 AI 识别特征词（**补充**，不是替换 —— 内置那批一直有效；留空 = 只用内置） */
@@ -173,7 +178,7 @@ export function apply(ctx, config) {
    */
   const DEFAULTS = {
     perDay: 5, peakValley: false, noon: true, night: true, windows: [], autoComment: false, transcribe: false, asrModel: 'small',
-    dmMode: 'off', dmUid: 0, aiReply: true, aiKeywords: [],
+    dmMode: 'off', dmUid: 0, dmUids: [], aiReply: true, aiKeywords: [],
     keywords: [], commentPerRound: 1, mentionName: '', mentionNames: [], pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1,
   }
   const normalize = (src, base) => {
@@ -199,6 +204,21 @@ export function apply(ctx, config) {
   /** 要 @ 的那串标签：`@A @B`（⚠️ 每个 @ 后面都带一个空格，B站 才认得出这个 @） */
   const mentionTag = (c = cfg) => mentionList(c).map((m) => `@${m}`).join(' ')
 
+  /**
+   * ⭐ 私信收件人名单：dmUids（新）优先，回落到老的单个 dmUid（向后兼容）。
+   * 顺手把 UID 规范化成**纯数字字符串**（用户从别处复制过来常带空格 / 全角数字 / @ 前缀），
+   * 去重、丢零、上限 10 个 —— 一轮给每人各发一条，再多就不是"投递"是"骚扰"了。
+   */
+  const dmList = (c = cfg) => {
+    const raw = Array.isArray(c?.dmUids) && c.dmUids.length ? c.dmUids : [c?.dmUid]
+    const out = []
+    for (const x of raw) {
+      const n = String(x ?? '').replace(/[^\d]/g, '').replace(/^0+/, '')
+      if (n && !out.includes(n)) out.push(n)
+      if (out.length >= 10) break
+    }
+    return out
+  }
 
   /** ⭐ 真正生效的时段表：自定义优先，空了才回落到内置的中午 / 夜间 */
   const winList = (c = cfg) => effectiveWindows(c)
@@ -410,6 +430,8 @@ export function apply(ctx, config) {
         mentionNames: mentionList(),
         mentionTag: mentionTag(),
         dmMode: cfg.dmMode,
+        // ⭐ 私信收件人名单（dmUids 优先，回落老的单个 dmUid）+ 原来那个单独的值（向后兼容）
+        dmUids: dmList(),
         dmUid: Number(cfg.dmUid) || 0,
         aiReply: cfg.aiReply !== false,
         aiKeywords: Array.isArray(cfg.aiKeywords) ? cfg.aiKeywords : [],
@@ -500,7 +522,8 @@ export function apply(ctx, config) {
       + '⭐ **自定义时段**（24 小时制，可多条）：`{"windows":["12:00-14:00","18:00-09:00","07:30-08:15"]}` —— '
       + '**非空就完全接管**（内置的中午 `noon` / 夜间 `night` 两个开关就此失效），清成 `[]` 才回到内置那两组；'
       + '跨零点照写（`"18:00-09:00"`）、起止相同 = 全天（`"00:00-00:00"`）；时段之间**允许重叠**，允许但会告警。'
-      + '私信投递：`{"dmMode":"only","dmUid":10967510}`（dmMode = off / only / both）；'
+      + '私信投递：`{"dmMode":"only","dmUids":["10967510","123456"]}`（dmMode = off / only / both；'
+      + '`dmUids` 是**名单**，一轮给每人各发一条；老的单个 `dmUid` 仍然认，但名单优先）；'
       + '楼中楼开关 `{"aiReply":false}`；自定义 AI 识别词 `{"aiKeywords":["XX助手","YBot"]}`（**补充**内置那批，不是替换）；'
       + '要 @ 的名单 `{"mentionNames":["某人","另一个人"]}`（按顺序全部 @ 上；老的单个 `mentionName` 仍然认，但名单优先）。',
     parameters: { patch: { type: 'object', additionalProperties: true, description: '要改的字段（可省）' } },
@@ -622,7 +645,8 @@ export function apply(ctx, config) {
     // ⭐ 评论开头要原样写的那串：`@A @B`；**结尾必须再跟一个空格**，B站 才认得出这些 @
     const mentionTagText = mentions.map((m) => `@${m}`).join(' ')
     const commentOn = Boolean(cfg.autoComment && mentions.length && cfg.dmMode !== 'only')
-    const dmOn = Boolean(cfg.dmMode !== 'off' && Number(cfg.dmUid) > 0)
+    const dmTo = dmList()
+    const dmOn = Boolean(cfg.dmMode !== 'off' && dmTo.length)
     // 楼中楼开关（默认开 = 只在 AI 号下面回；关了 = 永远只发自己的顶层评论）
     const aiReplyOn = cfg.aiReply !== false
     // 使用者自定义的 AI 识别词 —— **补充**内置那批，不是替换
@@ -678,7 +702,13 @@ export function apply(ctx, config) {
           + `⭐ 名字按上面给的顺序 @，**一个都不能漏**。`
         : '')
       + (dmOn
-        ? `⭐⭐ **私信投递**：用 bili_send_message 把这一轮的结果发到 UID **${Number(cfg.dmUid)}**。`
+        ? `⭐⭐ **私信投递**：用 bili_send_message 把这一轮的结果发给 ${dmTo.length > 1
+          ? `这 **${dmTo.length} 个** UID：${dmTo.join('、')}`
+          : `UID **${dmTo[0]}**`}。`
+          + (dmTo.length > 1
+            ? `⚠️ **一人一条**（私信是点对点的，不是群发同一封）—— 逐个发，` +
+              `每条都按下面的规矩写完整，**别把几个人的 UID 塞进同一次调用** ✗。`
+            : '')
           + `内容**别照抄评论那套**：把本轮每条值得的写成 **标题 + 链接 + 一句话理由**`
           + `（私信是私人渠道、不占别人的地方，可以比评论长一点，但**别啰嗦**）。`
           + `🔴🔴 **但私信有长度上限 —— 实测 500 字符就顶了**：`
@@ -692,7 +722,7 @@ export function apply(ctx, config) {
           + `（那是在跟使用者念操作手册，可读性极差）。他关心的只有：**这次挑了哪几条、为什么值得**。`
           + `（想交代"没别的了"就用一句人话，比如「今天没什么新的了」；`
           + `⚠️ **不要**把「无字幕跳过 N 条」这种统计口径搬进私信 —— 那是**报告**里写的，不是私信里写的。）`
-          + `⚠️ 私信里**不用 @ 任何人**；⚠️ **一轮只发一条私信**（多条合并成一条）；`
+          + `⚠️ 私信里**不用 @ 任何人**；⚠️ **一轮给一个人只发一条私信**（多条合并成一条）；`
           + `⚠️ 私信里**不要**写"本鱼 / 本鲸 / 主人 / 人家"那套；⚠️ 发完把"已私信"记进报告（**报告里**可以写口径）。`
           + (cfg.dmMode === 'both' ? `⚠️ 现在是 **both**：公开评论照发（走下面那一整套规矩），私信**另外**再发一条。` : '')
         : '')
@@ -1260,7 +1290,7 @@ export function apply(ctx, config) {
       const body = await readBody(req)
       const patch = {}
       for (const k of ['perDay', 'peakValley', 'noon', 'night', 'windows', 'autoComment', 'transcribe', 'asrModel',
-        'commentPerRound', 'mentionName', 'mentionNames', 'dmMode', 'dmUid', 'aiReply', 'aiKeywords',
+        'commentPerRound', 'mentionName', 'mentionNames', 'dmMode', 'dmUid', 'dmUids', 'aiReply', 'aiKeywords',
         'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound']) {
         if (k in body) patch[k] = body[k]
       }
@@ -1270,6 +1300,11 @@ export function apply(ctx, config) {
       if ('windows' in patch) patch.windows = normWindows(patch.windows).map(windowText)
       if ('dmMode' in patch) patch.dmMode = ['off', 'only', 'both'].includes(String(patch.dmMode)) ? String(patch.dmMode) : 'off'
       if ('dmUid' in patch) patch.dmUid = Math.max(0, Math.min(Number(patch.dmUid) || 0, Number.MAX_SAFE_INTEGER))
+      // ⭐ 私信名单：只留数字（顺手吃掉用户粘进来的空格 / 全角 / @ 前缀），去重、丢零、上限 10
+      if ('dmUids' in patch) patch.dmUids = (Array.isArray(patch.dmUids) ? patch.dmUids : [])
+        .map((x) => String(x ?? '').replace(/[^\d]/g, '').replace(/^0+/, ''))
+        .filter((x, i, a) => x && a.indexOf(x) === i)
+        .slice(0, 10)
       if ('aiReply' in patch) patch.aiReply = Boolean(patch.aiReply)
       if ('aiKeywords' in patch) patch.aiKeywords = Array.isArray(patch.aiKeywords)
         ? patch.aiKeywords.map((x) => String(x).trim()).filter(Boolean).slice(0, 50) : []

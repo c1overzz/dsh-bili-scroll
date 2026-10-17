@@ -86,6 +86,23 @@ window.__ModuleLoader__.load({
 [data-bd-grow2]{flex:1;min-width:0;}
 [data-bd-dim]{opacity:.5;}
 [data-bd-note][data-warn]{color:#f59e0b;}
+/* ── 多标签输入（2026-10-18）── */
+[data-bd-chips]{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:6px 8px;border-radius:8px;
+  border:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.14));
+  background:var(--dsw-alias-bg-overlay,rgba(128,128,128,.12));}
+[data-bd-chips]:focus-within{border-color:#3b82f6;}
+[data-bd-chip]{display:inline-flex;align-items:center;gap:4px;max-width:100%;padding:3px 4px 3px 9px;
+  border-radius:999px;font-size:12px;line-height:18px;
+  background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.26));
+  color:var(--dsw-alias-label-primary,inherit);}
+[data-bd-chip-t]{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+[data-bd-chip-x]{flex:none;width:16px;height:16px;padding:0;border:0;border-radius:50%;cursor:pointer;
+  font-size:12px;line-height:1;font-family:inherit;background:transparent;
+  color:var(--dsw-alias-label-tertiary,#9aa0a6);}
+[data-bd-chip-x]:hover{background:rgba(239,68,68,.22);color:#ef4444;}
+[data-bd-chip-in]{flex:1;min-width:90px;padding:3px 2px;border:0;background:transparent;color:inherit;
+  font-size:12px;font-family:inherit;}
+[data-bd-chip-in]:focus{outline:none;}
 /* ── 时段编辑器（2026-10-18）── */
 [data-bd-wins]{display:flex;flex-direction:column;gap:8px;}
 [data-bd-win]{display:flex;flex-wrap:wrap;gap:8px;align-items:center;}
@@ -219,6 +236,54 @@ window.__ModuleLoader__.load({
         label ? h('div', { 'data-bd-label': '' }, label) : null,
         children,
         note ? h('div', { 'data-bd-note': '' }, note) : null)
+    }
+
+    /* ────────────── 多标签输入（2026-10-18）──────────────
+     * 换掉原来那一排"一行一个"的 textarea：那种框里**看不出一共有几个**，删一个还得精确地
+     * 选中一行、多敲一个空行就多出一个空标签，粘一整串进来还得自己数行数 ✗。
+     * 现在每个值是一个小标签，点 × 就没了，粘一串（逗号 / 顿号 / 换行分隔）会自动拆成多个 ✓。
+     *
+     * ⚠️ 分隔符**故意不含普通空格**：关键词里有 "DeepSeek Harness"、"dsh 教程" 这种带空格的，
+     *    把空格当分隔符会把它们劈成两半 ✗。要按空格拆的场合（UID 那种）由调用方传 split 覆盖。
+     */
+    const SEP_DEFAULT = /[,，、;；\n\r]+/
+
+    function Chips({ value, onChange, placeholder, split, max, normalize }) {
+      const list = Array.isArray(value) ? value : []
+      const [draft, setDraft] = React.useState('')
+      const sep = split || SEP_DEFAULT
+      const add = (raw) => {
+        const parts = String(raw).split(sep)
+          .map((s) => (normalize ? normalize(s) : s.trim()))
+          .filter(Boolean)
+        if (!parts.length) { setDraft(''); return }
+        const next = list.slice()
+        for (const p of parts) if (!next.includes(p)) next.push(p)
+        onChange(max ? next.slice(0, max) : next)
+        setDraft('')
+      }
+      const del = (i) => onChange(list.filter((_, k) => k !== i))
+      return h('div', { 'data-bd-chips': '' },
+        list.map((it, i) => h('span', { 'data-bd-chip': '', key: i },
+          h('span', { 'data-bd-chip-t': '' }, it),
+          h('button', { 'data-bd-chip-x': '', title: '删掉这一个', onClick: () => del(i) }, '×'))),
+        h('input', {
+          'data-bd-chip-in': '',
+          value: draft,
+          placeholder: list.length ? '继续加…' : (placeholder || '输入后回车'),
+          onChange: (e) => {
+            const v = e.target.value
+            // 打进来一个分隔符就当场落成标签 —— 不必非按回车（粘一串时也不会卡住）
+            if (v && sep.test(v.slice(-1))) add(v)
+            else setDraft(v)
+          },
+          onKeyDown: (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); add(draft) }
+            // 空框上按退格 = 删掉最后一个（跟主流标签输入一致的手感）
+            else if (e.key === 'Backspace' && !draft && list.length) del(list.length - 1)
+          },
+          onBlur: () => { if (draft.trim()) add(draft) },
+        }))
     }
 
     /* ────────────── 时段编辑器（2026-10-18）──────────────
@@ -589,7 +654,7 @@ window.__ModuleLoader__.load({
       // ⭐ 全页**唯一**的反馈位 —— 原来 msg / runNote 各存一份、上下各渲染一遍，同一句话出现两遍 ✗
       const [note, setNote] = React.useState(null)
       const [tab, setTab] = React.useState('settings')   // 设置 / 报告 / 调试
-      const [kws, setKws] = React.useState(null)
+      const [kws, setKws] = React.useState(null)           // 关键词（数组草稿）
       const [ws, setWs] = React.useState(null)
       const [rl, setRl] = React.useState(null)
       const [newVer, setNewVer] = React.useState('')       // 发现的新版本号（空 = 没发现）          // 日报形态：full / brief / off
@@ -598,10 +663,11 @@ window.__ModuleLoader__.load({
       const [perDay, setPerDay] = React.useState(null)
       const [perRound, setPerRound] = React.useState(null)
       const [replyPer, setReplyPer] = React.useState(null)
-      const [dmUid, setDmUid] = React.useState(null)        // 私信收件人 UID（本地草稿）
+      // ⭐ 列表类字段现在都是**数组草稿**（标签输入是"加一个 / 删一个"的离散操作，改完直接存，不用防抖）
+      const [dmUids, setDmUids] = React.useState(null)      // 私信收件人名单
       const [dmMode, setDmMode] = React.useState(null)      // 投递方式：off / only / both
-      const [aiKw, setAiKw] = React.useState(null)          // 自定义 AI 识别词（本地草稿，一行一个）
-      const [mention, setMention] = React.useState(null)
+      const [aiKw, setAiKw] = React.useState(null)          // 自定义 AI 识别词
+      const [mention, setMention] = React.useState(null)    // 要 @ 的名单
       const [wins, setWins] = React.useState(null)          // 自定义时段（"HH:MM-HH:MM"）
       const [login, setLogin] = React.useState(null)
       const [report, setReport] = React.useState(null)        // 非 null = 报告已展开
@@ -610,7 +676,7 @@ window.__ModuleLoader__.load({
 
       const cfg = st?.config
       React.useEffect(() => {
-        if (cfg && kws === null) setKws((cfg.keywords || []).join('\n'))
+        if (cfg && kws === null) setKws(Array.isArray(cfg.keywords) ? cfg.keywords.filter(Boolean) : [])
         if (cfg && ws === null) setWs(cfg.workspace || '')
         if (cfg && rl === null) setRl(cfg.reportLevel || 'full')
         if (cfg && perDay === null) setPerDay(String(cfg.perDay ?? 5))
@@ -619,11 +685,15 @@ window.__ModuleLoader__.load({
         if (cfg && mention === null) {
           // ⭐ 新配置是列表（mentionNames）；老配置是单名字（mentionName）—— 这里自动迁移着显示
           const list = Array.isArray(cfg.mentionNames) ? cfg.mentionNames.filter(Boolean) : []
-          setMention(list.length ? list.join('\n') : (cfg.mentionName || ''))
+          setMention(list.length ? list : (cfg.mentionName ? [String(cfg.mentionName)] : []))
         }
-        if (cfg && dmUid === null) setDmUid(cfg.dmUid ? String(cfg.dmUid) : '')
+        if (cfg && dmUids === null) {
+          // 同理：老的单个 dmUid 也自动并进名单里显示
+          const list = Array.isArray(cfg.dmUids) ? cfg.dmUids.filter(Boolean) : []
+          setDmUids(list.length ? list : (cfg.dmUid ? [String(cfg.dmUid)] : []))
+        }
         if (cfg && dmMode === null) setDmMode(cfg.dmMode || 'off')
-        if (cfg && aiKw === null) setAiKw((cfg.aiKeywords || []).join('\n'))
+        if (cfg && aiKw === null) setAiKw(Array.isArray(cfg.aiKeywords) ? cfg.aiKeywords.filter(Boolean) : [])
         if (cfg && wins === null) setWins(Array.isArray(cfg.windows) ? cfg.windows.filter(Boolean) : [])
       }, [cfg])
 
@@ -828,13 +898,12 @@ window.__ModuleLoader__.load({
         for (const k of Object.keys(timers.current)) clearTimeout(timers.current[k])
       }, [])
 
-      /** 一行一个 → 去空行、去首尾空格、**顺手去重**（原来同一个词填两遍会原样存进去） */
-      const asList = (v) => String(v || '').split('\n').map((s) => s.trim()).filter(Boolean)
-        .filter((x, i, a) => a.indexOf(x) === i)
+      /* ⚠️ 原来的 `asList`（把"一行一个"的 textarea 拆成数组）随那几个框一起删了 ——
+       *    现在列表字段都是 Chips，拆标签是它自己的事 ✓ */
 
-      const saveText = (over) => patch({
-        keywords: asList(over?.kws ?? kws),
-        workspace: String((over?.ws ?? ws) || '').trim(),
+      const saveText = () => patch({
+        keywords: kws || [],
+        workspace: String(ws || '').trim(),
       }, '关键词与工作区')
 
       if (!cfg) {
@@ -970,19 +1039,15 @@ window.__ModuleLoader__.load({
               onDone: (n) => patch({ commentPerRound: n }, '每轮几条评论'),
             }),
             h(Field, {
-              label: '要 @ 谁（一行一个 B站 昵称）',
+              label: '要 @ 谁',
               note: '⭐ 按顺序全部 @ 上、中间自动留空格（B站 靠空格才认得出 @）'
-                + ' · 留空 = 只写报告不发评论 · 昵称要跟 B站 上完全一致，错一个字那个 @ 就不亮',
+                + ' · 留空 = 只写报告不发评论 · 昵称要跟 B站 上**完全一致**，错一个字那个 @ 就不亮',
             },
-              h('textarea', {
-                'data-bd-input': '', rows: 3,
-                placeholder: '一行一个昵称',
-                value: mention ?? '',
-                onChange: (e) => {
-                  setMention(e.target.value)
-                  autoSave('mention', () => patch({ mentionNames: asList(e.target.value), mentionName: '' }, '要 @ 谁'))
-                },
-                onBlur: () => { setMention(asList(mention).join('\n')); flushSave('mention') },
+              h(Chips, {
+                value: mention || [],
+                placeholder: '输入昵称后回车，可加多个',
+                max: 20,
+                onChange: (next) => { setMention(next); patch({ mentionNames: next, mentionName: '' }, '要 @ 谁') },
               }))) : null,
 
           h(Field, {
@@ -998,15 +1063,18 @@ window.__ModuleLoader__.load({
               h('option', { value: 'both' }, '评论 + 私信 —— 两边都发'))),
           (dmMode && dmMode !== 'off') ? h('div', { 'data-bd-sub': '' },
             h(Field, {
-              label: '私信发给谁（B站 UID）',
-              note: '⚠️ 要跟对方**互关**，否则会被限流、还可能不弹提醒'
-                + ' · 内容 = 每条的「标题 + 链接 + 一句话」，一轮合成一条',
+              label: '私信发给谁',
+              note: '填 B站 UID（主页地址里那串数字），可以填多个 · ⚠️ 要跟对方**互关**，'
+                + '否则会被限流、还可能不弹提醒 · 内容 = 每条的「标题 + 链接 + 一句话」',
             },
-              h('input', {
-                'data-bd-input': '', type: 'number', min: 0, value: dmUid ?? '',
-                placeholder: '对方的数字 UID',
-                onChange: (e) => setDmUid(e.target.value),
-                onBlur: () => { const n = Math.max(0, Number(dmUid) || 0); setDmUid(n ? String(n) : ''); patch({ dmUid: n }, '私信收件人') },
+              h(Chips, {
+                value: dmUids || [],
+                placeholder: '输入 UID 后回车（可粘一串，用空格或逗号隔开）',
+                max: 10,
+                // UID 没有空格，所以这里**允许按空格拆**；顺手把非数字字符都吃掉
+                split: /[\s,，、;；]+/,
+                normalize: (s) => String(s).replace(/[^\d]/g, '').replace(/^0+/, ''),
+                onChange: (next) => { setDmUids(next); patch({ dmUids: next, dmUid: 0 }, '私信收件人') },
               }))) : null,
 
           h(ToggleRow, {
@@ -1037,32 +1105,28 @@ window.__ModuleLoader__.load({
             })),
           (canComment && sw('aiReply')) ? h('div', { 'data-bd-sub': '' },
             h(Field, {
-              label: '额外用来识别 AI 的词（一行一个）',
+              label: '额外用来识别 AI 的词',
               note: '补充、不是替换 —— 内置那批（AI / Bot / 机器人 / 助手 / Agent / 大肥鱼 / 鲸鱼娘 …）一直在用',
             },
-              h('textarea', {
-                'data-bd-input': '', rows: 3,
-                placeholder: '填了会额外认这些词',
-                value: aiKw ?? '',
-                onChange: (e) => {
-                  setAiKw(e.target.value)
-                  autoSave('aiKw', () => patch({ aiKeywords: asList(e.target.value) }, '自定义 AI 识别词'))
-                },
-                onBlur: () => { setAiKw(asList(aiKw).join('\n')); flushSave('aiKw') },
+              h(Chips, {
+                value: aiKw || [],
+                placeholder: '输入一个词后回车',
+                max: 50,
+                onChange: (next) => { setAiKw(next); patch({ aiKeywords: next }, '自定义 AI 识别词') },
               }))) : null),
 
         /* ── ③ 刷什么 ── */
         h('div', { 'data-bd-sec': '' },
           h('div', { 'data-bd-h': '' }, '刷什么'),
           h(Field, {
-            label: '关键词（一行一个）',
-            note: '留空 = 用内置那几组（日语翻唱 / 音乐 / LIVE / 现场 …）',
+            label: '关键词',
+            note: '留空 = 用内置那几组（日语翻唱 / 音乐 / LIVE / 现场 …）· 带空格的关键词没问题（逗号或回车才断一个）',
           },
-            h('textarea', {
-              'data-bd-input': '', rows: 5, placeholder: '一行一个关键词',
-              value: kws ?? '',
-              onChange: (e) => { setKws(e.target.value); autoSave('kws', () => saveText({ kws: e.target.value })) },
-              onBlur: () => flushSave('kws'),
+            h(Chips, {
+              value: kws || [],
+              placeholder: '输入关键词后回车，可加多个',
+              max: 60,
+              onChange: (next) => { setKws(next); patch({ keywords: next }, '关键词') },
             })),
           h(Field, {
             label: '工作区',
@@ -1070,7 +1134,7 @@ window.__ModuleLoader__.load({
           },
             h('input', {
               'data-bd-input': '', value: ws ?? '', placeholder: '/path/to/your/notes',
-              onChange: (e) => { setWs(e.target.value); autoSave('ws', () => saveText({ ws: e.target.value })) },
+              onChange: (e) => { setWs(e.target.value); autoSave('ws', saveText) },
               onBlur: () => flushSave('ws'),
             })),
           h(Field, { label: '日报写多细' },
