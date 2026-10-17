@@ -344,6 +344,109 @@ async def bili_comments(bvid: str, num: int = 30) -> str:
 
 # ========== Tool 3: 获取字幕 ==========
 
+async def _sub_body(bvid: str):
+    """字幕轨的原始 body（每条带 from/to/content）。
+
+    ⚠️ 为什么要它：画面里烧的硬字幕可能是 UP 的**规避写法**（字母 / 拼音 / 谐音 / 干脆写别的），
+    而字幕轨是拿**音频**转出来的 —— 那才是他嘴里真说的。抽帧时把两者按时间对齐，
+    才能看懂"这帧上写着 X，其实他说的是 Y"。
+    """
+    cred = get_cred()
+    v = video.Video(bvid=bvid, credential=cred)
+    info = await v.get_info()
+    cid = info.get("cid", 0)
+    if not cid and info.get("pages"):
+        cid = info["pages"][0].get("cid", 0)
+    if not cid:
+        return []
+    data = await v.get_subtitle(cid=cid)
+    subs = data.get("subtitles") or []
+    target = None
+    for sp in subs:
+        if sp.get("lan") in ["ai-zh", "zh-CN", "zh"]:
+            target = sp
+            break
+    if not target and subs:
+        target = subs[0]
+    if not target:
+        return []
+    import aiohttp
+    url = target.get("subtitle_url", "") or ""
+    if url.startswith("//"):
+        url = "https:" + url
+    if not url:
+        return []
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            body = await resp.json()
+    return body.get("body", []) or []
+
+
+def _asr_python() -> str:
+    """ASR 独立环境里的解释器（没装就返回空）"""
+    home = Path(__file__).parent
+    cands = [
+        home / ".venv-asr" / "bin" / "python",
+        home / ".venv-asr" / "Scripts" / "python.exe",
+        home / ".venv-asr" / "Scripts" / "python",
+    ]
+    for c in cands:
+        if c.exists():
+            return str(c)
+    return ""
+
+
+def _asr_segments(bvid: str, model: str = "small", timeout: int = 900):
+    """本地转写拿带时间轴的片段（只在没字幕轨时才用，慢）"""
+    py = _asr_python()
+    script = Path(__file__).parent / "asr.py"
+    if not py or not script.exists():
+        return []
+    import subprocess
+    try:
+        r = subprocess.run(
+            [py, str(script), bvid, "--json", "--model", model],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        if r.returncode != 0:
+            return []
+        data = json.loads((r.stdout or "").strip().splitlines()[-1])
+        return [{"from": x["start"], "to": x["end"], "content": x["text"]}
+                for x in data.get("segments", [])]
+    except Exception:
+        return []
+
+
+async def _frame_lines(bvid: str, times: list, duration: float):
+    """把每个抽帧时刻前后的话对齐出来 → [(第几帧, 时刻, 台词)]"""
+    segs = await _sub_body(bvid)
+    src = "bilibili-subtitle"
+    if not segs:
+        try:
+            cfgp = Path(__file__).parent / "config.json"
+            cfg = json.loads(cfgp.read_text())
+        except Exception:
+            cfg = {}
+        if cfg.get("transcribe") and duration and duration <= 1200:
+            segs = _asr_segments(bvid, str(cfg.get("asrModel") or "small"))
+            src = "local-asr"
+        else:
+            src = "none"
+    if not segs:
+        return [], src
+
+    out = []
+    for i, t in enumerate(times):
+        lo, hi = float(t) - 2.0, float(t) + 4.0
+        txt = "".join(
+            str(sg.get("content", "")).strip()
+            for sg in segs
+            if float(sg.get("to", 0) or 0) >= lo and float(sg.get("from", 0) or 0) <= hi
+        )
+        out.append({"i": i + 1, "t": t, "text": txt[:140]})
+    return out, src
+
+
 @mcp.tool()
 async def bili_subtitle(bvid: str) -> str:
     """
@@ -1449,12 +1552,32 @@ async def bili_frames(bvid: str, n: int = 0, height: int = 0) -> str:
     except Exception as e:
         return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
 
-    lines = [ln for ln in (r.stdout or "").strip().splitlines() if ln.strip()]
-    last = lines[-1] if lines else ""
+    outline = [ln for ln in (r.stdout or "").strip().splitlines() if ln.strip()]
+    last = outline[-1] if outline else ""
     if r.returncode != 0 or not last.startswith("{"):
         err = (r.stderr or "").strip()[-400:] or (r.stdout or "").strip()[-400:] or "抽帧失败"
         return json.dumps({"ok": False, "bvid": bvid, "error": err}, ensure_ascii=False)
-    return last
+
+    try:
+        out = json.loads(last)
+    except Exception:
+        return last
+    if not out.get("ok"):
+        return last
+
+    # ⭐ 帧对齐台词：画面上写的可能是规避写法，这里给的是**那几秒他嘴里说的**
+    try:
+        lines, srcname = await _frame_lines(bvid, out.get("times") or [], float(out.get("duration") or 0))
+        out["lines"] = lines
+        out["line_source"] = srcname
+        if lines:
+            out["align_note"] = ("每一格底下的台词（lines）是那个时刻前后的话，来自音频字幕/本地转写；"
+                                 "画面里若是字母/拼音/谐音，以这里为准。")
+    except Exception as e:
+        out["lines"] = []
+        out["line_source"] = "error"
+        out["lines_err"] = str(e)
+    return json.dumps(out, ensure_ascii=False)
 
 
 # ========== 启动 ==========

@@ -15,6 +15,7 @@ asr.py —— 把一条 B站 视频（或本地音视频文件）转成文字。
   ② **音频不落盘到别处**：yt-dlp 下到临时目录，转写完就随系统清理
 """
 import argparse
+import json
 import os
 import re
 import sys
@@ -85,6 +86,8 @@ def main() -> int:
     ap.add_argument('--model', default=os.environ.get('BILI_DUTY_ASR_MODEL', 'small'),
                     help='Whisper 模型大小：tiny / base / small / medium（默认 small）')
     ap.add_argument('--lang', default='zh', help='语言（默认 zh；不给就自动判断请传 auto）')
+    ap.add_argument('--json', action='store_true',
+                    help='输出带时间轴的 JSON（给「帧对齐台词」用）：{"segments":[{start,end,text}],"text":"…"}')
     args = ap.parse_args()
 
     src = args.target
@@ -112,7 +115,13 @@ def main() -> int:
             language=None if args.lang == 'auto' else args.lang,
             vad_filter=True,          # 掐掉静音段，省时间也少出错
         )
-        text = ''.join(seg.text for seg in segments).strip()
+        segs = []
+        for seg in segments:
+            t = (seg.text or '').strip()
+            if not t:
+                continue
+            segs.append({'start': round(float(seg.start), 2), 'end': round(float(seg.end), 2), 'text': t})
+        text = ''.join(x['text'] for x in segs).strip()
     finally:
         # 临时音频不留在磁盘上
         try:
@@ -125,12 +134,13 @@ def main() -> int:
         except Exception:
             pass
 
+    payload = text if not args.json else json.dumps({'segments': segs, 'text': text}, ensure_ascii=False)
     if args.out:
         with open(args.out, 'w', encoding='utf-8') as f:
-            f.write(text)
+            f.write(payload)
         print('[asr] 已写入：' + args.out, file=sys.stderr)
     else:
-        print(text)
+        print(payload)
     return 0
 
 

@@ -313,6 +313,8 @@ export function apply(ctx, config) {
   tool({
     name: 'bili_frames',
     description: '把一条视频的画面抽成一张「关键帧拼图」，返回图片路径 —— 之后用 read_image 真的看它。\n'
+      + '返回里还有 **`lines`**：每一格对应时刻的**口播原文**（来自音频字幕；没字幕时按设置走本地转写）。\n'
+      + '⭐ 画面里烧的硬字幕常是防和谐的字母/拼音/谐音 —— **以 lines 为准**。\n'
       + '也可以用来**看使用者指定的那条视频**：他丢过来一个 BV 号或链接就调它。\n'
       + '清晰度 / 帧数 / 要不要带 Cookie 全跟设置页走，不用传。',
     parameters: {
@@ -718,7 +720,7 @@ export function apply(ctx, config) {
 每条依次来，看完一条再下一条：
 1. \`bili_video_info\` —— 标题 / UP / 播放 / days_ago
 2. \`bili_subtitle\` 读字幕原文；没字幕就记一笔"无字幕"，别去转写
-3. \`bili_frames\` + \`read_image\` 看画面（设置里关掉了就跳过）
+3. \`bili_frames\` + \`read_image\` 看画面（设置里关掉了就跳过）。返回里的 **\`lines\`** 是每一格对应时刻的**口播** —— 画面上的硬字幕常是防和谐的字母/拼音/谐音，**以 \`lines\` 为准**
 4. \`bili_comments\` 翻一眼
 
 产物写到这个绝对路径（别写别处）：\`${file}\`
