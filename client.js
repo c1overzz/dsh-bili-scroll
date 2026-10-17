@@ -80,6 +80,11 @@ window.__ModuleLoader__.load({
 [data-bd-kv]{font-size:11px;line-height:18px;color:var(--dsw-alias-label-tertiary,#9aa0a6);word-break:break-all;}
 [data-bd-badge]{font-size:11px;padding:2px 7px;border-radius:6px;
   background:var(--dsw-alias-bg-overlay,rgba(128,128,128,.14));color:var(--dsw-alias-label-secondary,#c9ccd1);}
+[data-bd-badge][data-tone="ok"]{color:#22c55e;}
+[data-bd-badge][data-tone="off"]{color:#f59e0b;}
+[data-bd-field]{display:flex;flex-direction:column;gap:6px;}
+[data-bd-grow2]{flex:1;min-width:0;}
+[data-bd-dim]{opacity:.5;}
 `
 
     // ⚠️ 与 lib/state.mjs 的 WINDOWS 保持一致（官方口径：工作日 9–12、14–18 是高峰，其余都是谷时）
@@ -108,6 +113,29 @@ window.__ModuleLoader__.load({
         h(Switch, { on, onChange, disabled }))
     }
 
+    /** 数字项（label + 说明 + 右边一个窄框）—— 原来这段 JSX 在页面里手抄了 3 遍 */
+    function NumRow({ label, note, value, min, max, onInput, onDone }) {
+      const clamp = (raw) => Math.max(min, Math.min(Number(raw) || min, max))
+      return h('div', { 'data-bd-row': '' },
+        h('div', { 'data-bd-grow': '' },
+          h('div', { 'data-bd-label': '' }, label),
+          note ? h('div', { 'data-bd-note': '' }, note) : null),
+        h('input', {
+          'data-bd-input': '', 'data-bd-num': '', type: 'number', min, max,
+          value,
+          onChange: (e) => onInput(e.target.value),
+          onBlur: () => { const n = clamp(value); onInput(String(n)); onDone(n) },
+        }))
+    }
+
+    /** 竖排一项（label 在上、控件在下、说明在最后） */
+    function Field({ label, note, children }) {
+      return h('div', { 'data-bd-field': '' },
+        label ? h('div', { 'data-bd-label': '' }, label) : null,
+        children,
+        note ? h('div', { 'data-bd-note': '' }, note) : null)
+    }
+
     function useStatus(intervalMs) {
       const [st, setSt] = React.useState(null)
       React.useEffect(() => {
@@ -130,8 +158,8 @@ window.__ModuleLoader__.load({
     function Panel() {
       const [st, setSt] = useStatus(5000)
       const [busy, setBusy] = React.useState('')
-      const [msg, setMsg] = React.useState('')
-      const [msgTone, setMsgTone] = React.useState('')
+      // ⭐ 全页**唯一**的反馈位 —— 原来 msg / runNote 各存一份、上下各渲染一遍，同一句话出现两遍 ✗
+      const [note, setNote] = React.useState(null)
       const [kws, setKws] = React.useState(null)
       const [ws, setWs] = React.useState(null)
       const [rl, setRl] = React.useState(null)
@@ -146,8 +174,7 @@ window.__ModuleLoader__.load({
       const [aiKw, setAiKw] = React.useState(null)          // 自定义 AI 识别词（本地草稿，一行一个）
       const [mention, setMention] = React.useState(null)
       const [login, setLogin] = React.useState(null)
-      const [runNote, setRunNote] = React.useState(null)
-      const [report, setReport] = React.useState(null)        // 非 null = 报告已展开   // 顶部那行状态（跑一轮/装依赖的反馈原来在最底下，看不见）
+      const [report, setReport] = React.useState(null)        // 非 null = 报告已展开
       const [loginState, setLoginState] = React.useState('')
       const [loginTone, setLoginTone] = React.useState('')
 
@@ -171,10 +198,8 @@ window.__ModuleLoader__.load({
 
       const win = { ...DEFAULT_WINDOWS, ...(st?.windows || {}) }
 
-      const say = (text, tone) => {
-        setMsg(text); setMsgTone(tone || '')
-        setRunNote(text ? { t: text, tone: tone || '' } : null)   // ⭐ 同时镜像到顶部，免得提示掉到页面最底下看不见
-      }
+      /** ⭐ 全页唯一的反馈出口：按钮 / 保存 / 复核的结果都走这里，只在状态条下面显示一处 */
+      const say = (text, tone) => setNote(text ? { t: text, tone: tone || '' } : null)
 
       const patch = async (p, what) => {
         setBusy(JSON.stringify(p))
@@ -196,9 +221,8 @@ window.__ModuleLoader__.load({
             if (!same) bad.push(k)
           }
           if (bad.length) {
-            say(`${what || '设置'}：⚠️ 未生效 → ${bad.join('、')}`, 'warn')
-            setRunNote(`⚠️ 这几个设置**没写进去**：${bad.join('、')}\n`
-              + '最常见的原因：插件加了新字段，但**服务端那半还没重载** —— 重启一次 dsh 就好。')
+            say(`⚠️ ${what || '设置'}没写进去：${bad.join('、')}`
+              + '（多半是插件加了新字段、但服务端那半还没重载 —— 重启一次 dsh 就好）', 'warn')
           } else {
             say(what ? `${what}：已保存` : '已保存', 'good')
           }
@@ -340,10 +364,39 @@ window.__ModuleLoader__.load({
         finally { setBusy('') }
       }
 
-      const onSaveText = async () => {
-        const list = String(kws || '').split('\n').map((s) => s.trim()).filter(Boolean)
-        await patch({ keywords: list, workspace: String(ws || '').trim() }, '关键词与工作区')
+      /* ⭐⭐ 文字框的保存（2026-10-17 重做）
+       * 原来只有「关键词 / 工作区」两个框要靠页面底部那个「保存」按钮，
+       * 而同一页另外 11 个控件全是**点一下就生效** —— 一页两种语义，
+       * 使用者根本分不清那个按钮到底管谁（其实只管这两个框）✗。
+       * 现在统一成**自动保存**：打字停 800ms 就存、离开输入框也立刻存一次，按钮直接删掉 ✓。
+       * 按字段分别计时（`timers` 用 key 分开），免得在 A 框打字又把 B 框的待存挤掉。 */
+      const timers = React.useRef({})
+      const autoSave = (key, fn) => {
+        timers.current[key] = fn
+        clearTimeout(timers.current['t:' + key])
+        timers.current['t:' + key] = setTimeout(() => {
+          delete timers.current['t:' + key]
+          fn()
+        }, 800)
       }
+      const flushSave = (key) => {
+        if (!timers.current['t:' + key]) return
+        clearTimeout(timers.current['t:' + key])
+        delete timers.current['t:' + key]
+        timers.current[key]?.()
+      }
+      React.useEffect(() => () => {
+        for (const k of Object.keys(timers.current)) clearTimeout(timers.current[k])
+      }, [])
+
+      /** 一行一个 → 去空行、去首尾空格、**顺手去重**（原来同一个词填两遍会原样存进去） */
+      const asList = (v) => String(v || '').split('\n').map((s) => s.trim()).filter(Boolean)
+        .filter((x, i, a) => a.indexOf(x) === i)
+
+      const saveText = (over) => patch({
+        keywords: asList(over?.kws ?? kws),
+        workspace: String((over?.ws ?? ws) || '').trim(),
+      }, '关键词与工作区')
 
       if (!cfg) {
         return h('div', { 'data-bd-page': '' }, h('div', { 'data-bd-note': '' }, '读设置中…'))
@@ -351,25 +404,41 @@ window.__ModuleLoader__.load({
 
       const sw = (k) => Boolean(cfg[k])
 
-      return h('div', { 'data-bd-page': '' },
+      // ⭐ 楼中楼只在「真的会发公开评论」时才有意义：没开自动评论、或投递方式选了「只私信」时
+      //    它整个不生效 —— 界面上要置灰 + 说清原因，而不是留个亮着却什么都不干的开关 ✗
+      const canComment = sw('autoComment') && (dmMode || 'off') !== 'only'
 
-        /* ── 今天 ── */
+return h('div', { 'data-bd-page': '' },
+
+        /* ── 顶部状态条 ── */
         h('div', { 'data-bd-row': '' },
-          h('span', { 'data-bd-badge': '' }, `今天已挑 ${st.ranToday} / ${cfg.perDay} 条`),
-          h('span', { 'data-bd-badge': '' }, '环境' + (st.venvReady ? '已就绪' : (st.installing ? '正在装' : '未装'))),
-          h('span', { 'data-bd-badge': '' }, st.loggedIn ? 'B站已登录' : 'B站未登录'),
-            h('span', { 'data-bd-badge': '' }, 'v' + (st.version || '?')),
+          h('span', {
+            'data-bd-badge': '',
+            'data-tone': Number(cfg.perDay) > 0 && st.ranToday >= Number(cfg.perDay) ? 'off' : undefined,
+          }, `今天已挑 ${st.ranToday} / ${cfg.perDay} 条`),
+          h('span', { 'data-bd-badge': '', 'data-tone': st.venvReady ? 'ok' : 'off' },
+            st.venvReady ? '环境已就绪' : (st.installing ? '正在装环境' : '环境未装')),
+          h('span', { 'data-bd-badge': '', 'data-tone': st.loggedIn ? 'ok' : 'off' },
+            st.loggedIn ? 'B站已登录' : 'B站未登录'),
+          h('span', { 'data-bd-badge': '' }, 'v' + (st.version || '?')),
           h('div', { 'data-bd-grow': '' }),
-          h('button', { 'data-bd-btn': '', disabled: busy === 'run', onClick: onRun }, '现在跑一轮')),
-          runNote ? h('div', { 'data-bd-msg': '', 'data-good': runNote.tone === 'good' ? '' : undefined,
-            'data-warn': runNote.tone === 'warn' ? '' : undefined }, runNote.t) : null,
+          h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: busy === 'run', onClick: onRun }, '现在跑一轮')),
 
-        /* ── 定时 ── */
+        note ? h('div', {
+          'data-bd-msg': '',
+          'data-good': note.tone === 'good' ? '' : undefined,
+          'data-warn': note.tone === 'warn' ? '' : undefined,
+        }, note.t) : null,
+
+        h('div', { 'data-bd-note': '' },
+          '开关和下拉**点了就生效**；文字框**改完自动存**（离开输入框也会存）—— 没有保存按钮'),
+
+        /* ── ① 什么时候自己跑 ── */
         h('div', { 'data-bd-sec': '' },
           h('div', { 'data-bd-h': '' }, '什么时候自己跑'),
           h(ToggleRow, {
             label: '峰谷时段自动刷',
-            note: '只在谷时跑 —— 工作日 12:00–14:00 与 18:00 之后（整个周末也算谷时）；关了就只能手动跑',
+            note: '只在谷时跑：工作日 12–14 点、18 点以后，周末全天',
             on: sw('peakValley'),
             onChange: (v) => patch({ peakValley: v }, '峰谷时段自动刷'),
           }),
@@ -380,115 +449,152 @@ window.__ModuleLoader__.load({
               note: `${win[k].start} – ${win[k].end}`,
               on: sw(k),
               onChange: (v) => patch({ [k]: v }, win[k].label),
-            }))) : null),
-
-        /* ── 一轮挑几条 ── */
-        h('div', { 'data-bd-sec': '' },
-          h('div', { 'data-bd-h': '' }, '一轮挑几条'),
-          h('div', { 'data-bd-row': '' },
-            h('div', { 'data-bd-grow': '' },
-              h('div', { 'data-bd-label': '' }, '每天最多挑几条'),
-              h('div', { 'data-bd-note': '' }, '填 0 = 不自动刷（还是能手动跑）')),
-            h('input', {
-              'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 0, max: 50,
-              value: perDay ?? '',
-              onChange: (e) => setPerDay(e.target.value),
-              onBlur: () => { const n = Math.max(0, Math.min(Number(perDay) || 0, 50)); setPerDay(String(n)); patch({ perDay: n }, '每天挑几条') },
-            })),
+            }))) : null,
+          h(NumRow, {
+            label: '每天最多挑几条',
+            note: '0 = 不自动刷（手动跑不受限）',
+            value: perDay ?? '', min: 0, max: 50,
+            onInput: setPerDay,
+            onDone: (n) => patch({ perDay: n }, '每天挑几条'),
+          }),
           st.lastRunAt ? h('div', { 'data-bd-note': '' }, `上次跑：${new Date(st.lastRunAt).toLocaleString('zh-CN')}`) : null),
 
-        /* ── 发言与转写 ── */
+        /* ── ② 它替你说话吗 ── */
         h('div', { 'data-bd-sec': '' },
-          h('div', { 'data-bd-h': '' }, '它会不会替你说话'),
-          h(ToggleRow, {
-            label: '回复评论（只回楼中楼）',
-            note: '默认关；开了之后它只回「直接回复到你那条评论下面的人」，不参与讨论',
-            on: sw('replyToComments'),
-            onChange: (v) => patch({ replyToComments: v }, '回复评论'),
-          }),
-          sw('replyToComments') ? h('div', { 'data-bd-sub': '' },
-            h('div', { 'data-bd-row': '' },
-              h('div', { 'data-bd-grow': '' },
-                h('div', { 'data-bd-label': '' }, '每轮最多回几条'),
-                h('div', { 'data-bd-note': '' }, '只回直接回在你那条评论下面的人')),
-              h('input', {
-                'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 1, max: 10,
-                value: replyPer ?? '',
-                onChange: (e) => setReplyPer(e.target.value),
-                onBlur: () => { const n = Math.max(1, Math.min(Number(replyPer) || 1, 10)); setReplyPer(String(n)); patch({ replyPerRound: n }, '每轮几条回复') },
-              }))) : null,
+          h('div', { 'data-bd-h': '' }, '它替你说话吗'),
+
           h(ToggleRow, {
             label: '自动评论并 @ 你',
-            note: '默认关；开了之后它会在挑中的视频下面留评论，并 @ 你填的那个人',
+            note: '在挑中的视频下面留评论，把你 @ 出来',
             on: sw('autoComment'),
             onChange: (v) => patch({ autoComment: v }, '自动评论'),
           }),
           sw('autoComment') ? h('div', { 'data-bd-sub': '' },
-            h('div', { 'data-bd-row': '' },
-              h('div', { 'data-bd-grow': '' },
-                h('div', { 'data-bd-label': '' }, '每轮最多发几条评论'),
-                h('div', { 'data-bd-note': '' }, '每条评论里 @ 一次下面那个人')),
-              h('input', {
-                'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 1, max: 20,
-                value: perRound ?? '',
-                onChange: (e) => setPerRound(e.target.value),
-                onBlur: () => { const n = Math.max(1, Math.min(Number(perRound) || 1, 20)); setPerRound(String(n)); patch({ commentPerRound: n }, '每轮几条评论') },
-              })),
-            h('div', { 'data-bd-label': '' }, '要 @ 谁（B站 昵称，一行一个；按顺序全部 @ 上）'),
-            h('textarea', {
-              'data-bd-input': '', rows: 3,
-              placeholder: '一行一个昵称；留空 = 只写报告、不发评论',
-              value: mention ?? '',
-              onChange: (e) => setMention(e.target.value),
-              onBlur: () => {
-                const list = String(mention || '').split('\n').map((s) => s.trim()).filter(Boolean)
-                setMention(list.join('\n'))
-                // 存成列表；顺手把老的单名字段清掉（迁移），免得两边打架
-                patch({ mentionNames: list, mentionName: '' }, '要 @ 谁')
-              },
+            h(NumRow, {
+              label: '一轮最多发几条',
+              value: perRound ?? '', min: 1, max: 20,
+              onInput: setPerRound,
+              onDone: (n) => patch({ commentPerRound: n }, '每轮几条评论'),
             }),
-            h('div', { 'data-bd-note': '' }, '⭐ 按顺序 @ 全部名字、中间自动留空格（B站 靠空格才认得出 @）；留空 = 不发评论'),
-            h('div', { 'data-bd-note': '' }, '⚠️ 昵称要跟 B站 上**一模一样**（含大小写、空格、符号），写错了那个 @ 不亮')) : null,
-          h('div', { 'data-bd-label': '' }, '投递方式（评论 还是 私信）'),
-          h('select', {
-            'data-bd-input': '', value: dmMode ?? 'off',
-            onChange: (e) => { setDmMode(e.target.value); patch({ dmMode: e.target.value }, '投递方式') },
+            h(Field, {
+              label: '要 @ 谁（一行一个 B站 昵称）',
+              note: '⭐ 按顺序全部 @ 上、中间自动留空格（B站 靠空格才认得出 @）'
+                + ' · 留空 = 只写报告不发评论 · 昵称要跟 B站 上完全一致，错一个字那个 @ 就不亮',
+            },
+              h('textarea', {
+                'data-bd-input': '', rows: 3,
+                placeholder: '一行一个昵称',
+                value: mention ?? '',
+                onChange: (e) => {
+                  setMention(e.target.value)
+                  autoSave('mention', () => patch({ mentionNames: asList(e.target.value), mentionName: '' }, '要 @ 谁'))
+                },
+                onBlur: () => { setMention(asList(mention).join('\n')); flushSave('mention') },
+              }))) : null,
+
+          h(Field, {
+            label: '投递方式',
+            note: '选「只私信」的话一条公开评论都不发 —— 最不打扰别人',
           },
-            h('option', { value: 'off' }, '只发评论 —— 在视频下面 @ 你（默认）'),
-            h('option', { value: 'only' }, '只私信 —— 一条公开评论都不发，最不打扰别人'),
-            h('option', { value: 'both' }, '评论 + 私信 —— 两边都发')),
+            h('select', {
+              'data-bd-input': '', value: dmMode ?? 'off',
+              onChange: (e) => { setDmMode(e.target.value); patch({ dmMode: e.target.value }, '投递方式') },
+            },
+              h('option', { value: 'off' }, '只发评论 —— 在视频下面 @ 你'),
+              h('option', { value: 'only' }, '只私信 —— 不公开发言'),
+              h('option', { value: 'both' }, '评论 + 私信 —— 两边都发'))),
           (dmMode && dmMode !== 'off') ? h('div', { 'data-bd-sub': '' },
-            h('div', { 'data-bd-label': '' }, '私信发给谁（B站 UID，数字）'),
-            h('input', {
-              'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 0, value: dmUid ?? '',
-              placeholder: '对方的数字 UID；比如你自己的另一个号',
-              onChange: (e) => setDmUid(e.target.value),
-              onBlur: () => { const n = Math.max(0, Number(dmUid) || 0); setDmUid(n ? String(n) : ''); patch({ dmUid: n }, '私信收件人') },
-            }),
-            h('div', { 'data-bd-note': '' }, '私信内容 = 本轮每条的「标题 + 链接 + 一句话」，一轮合并成一条发（不受 150 字限制）'),
-            h('div', { 'data-bd-note': '' }, '⚠️ 建议先让这个号和收件人互关：B站 对「陌生人私信」会限流，还可能不弹提醒')) : null,
+            h(Field, {
+              label: '私信发给谁（B站 UID）',
+              note: '⚠️ 要跟对方**互关**，否则会被限流、还可能不弹提醒'
+                + ' · 内容 = 每条的「标题 + 链接 + 一句话」，一轮合成一条',
+            },
+              h('input', {
+                'data-bd-input': '', type: 'number', min: 0, value: dmUid ?? '',
+                placeholder: '对方的数字 UID',
+                onChange: (e) => setDmUid(e.target.value),
+                onBlur: () => { const n = Math.max(0, Number(dmUid) || 0); setDmUid(n ? String(n) : ''); patch({ dmUid: n }, '私信收件人') },
+              }))) : null,
+
           h(ToggleRow, {
-            label: '在 AI 号下面楼中楼回复',
-            note: '默认开；开了之后，评论区里如果已经有 AI / 机器人号把值得的点说过了，它就在那条下面回一句。关掉 = 永远只发自己的顶层评论，不去别人的评论下面留言',
-            on: sw('aiReply'),
-            onChange: (v) => patch({ aiReply: v }, '楼中楼回复'),
+            label: '回复别人在你评论下的留言',
+            note: '只回直接回复在你评论下面的人，不参与别的讨论',
+            on: sw('replyToComments'),
+            onChange: (v) => patch({ replyToComments: v }, '回复评论'),
           }),
-          sw('aiReply') ? h('div', { 'data-bd-sub': '' },
-            h('div', { 'data-bd-label': '' }, '额外用来识别 AI 的关键词（一行一个）'),
+          sw('replyToComments') ? h('div', { 'data-bd-sub': '' },
+            h(NumRow, {
+              label: '一轮最多回几条',
+              value: replyPer ?? '', min: 1, max: 10,
+              onInput: setReplyPer,
+              onDone: (n) => patch({ replyPerRound: n }, '每轮几条回复'),
+            })) : null,
+
+          /* ⭐ 楼中楼依附"会发公开评论"：没开自动评论、或投递方式选了「只私信」时，整个不生效 ——
+           *   那就**置灰 + 说清为什么不生效**，而不是留一个亮着却什么都不干的开关 ✗ */
+          h('div', canComment ? {} : { 'data-bd-dim': '' },
+            h(ToggleRow, {
+              label: '在 AI 号下面楼中楼回复',
+              note: canComment
+                ? '只在明确是 AI / 机器人的号下面回；真人一律不碰'
+                : '现在不会发公开评论（没开「自动评论」，或投递方式选了「只私信」）—— 这条暂时用不上',
+              on: sw('aiReply'),
+              disabled: !canComment,
+              onChange: (v) => patch({ aiReply: v }, '楼中楼回复'),
+            })),
+          (canComment && sw('aiReply')) ? h('div', { 'data-bd-sub': '' },
+            h(Field, {
+              label: '额外用来识别 AI 的词（一行一个）',
+              note: '补充、不是替换 —— 内置那批（AI / Bot / 机器人 / 助手 / Agent / 大肥鱼 / 鲸鱼娘 …）一直在用',
+            },
+              h('textarea', {
+                'data-bd-input': '', rows: 3,
+                placeholder: '填了会额外认这些词',
+                value: aiKw ?? '',
+                onChange: (e) => {
+                  setAiKw(e.target.value)
+                  autoSave('aiKw', () => patch({ aiKeywords: asList(e.target.value) }, '自定义 AI 识别词'))
+                },
+                onBlur: () => { setAiKw(asList(aiKw).join('\n')); flushSave('aiKw') },
+              }))) : null),
+
+        /* ── ③ 刷什么 ── */
+        h('div', { 'data-bd-sec': '' },
+          h('div', { 'data-bd-h': '' }, '刷什么'),
+          h(Field, {
+            label: '关键词（一行一个）',
+            note: '留空 = 用内置那几组（日语翻唱 / 音乐 / LIVE / 现场 …）',
+          },
             h('textarea', {
-              'data-bd-input': '', rows: 4,
-              placeholder: '留空 = 只用内置那批（AI / Bot / 机器人 / 助手 / Agent / 测试 / 大肥鱼 / 鲸鱼娘 …）',
-              value: aiKw ?? '', onChange: (e) => setAiKw(e.target.value),
-              onBlur: () => {
-                const list = String(aiKw || '').split('\n').map((s) => s.trim()).filter(Boolean)
-                setAiKw(list.join('\n'))
-                patch({ aiKeywords: list }, '自定义 AI 识别词')
-              },
-            }),
-            h('div', { 'data-bd-note': '' }, '这些是「补充」不是「替换」—— 内置那批一直在用，这里留空就只按内置的认')) : null,
+              'data-bd-input': '', rows: 5, placeholder: '一行一个关键词',
+              value: kws ?? '',
+              onChange: (e) => { setKws(e.target.value); autoSave('kws', () => saveText({ kws: e.target.value })) },
+              onBlur: () => flushSave('kws'),
+            })),
+          h(Field, {
+            label: '工作区',
+            note: '它按这个目录里的 AGENTS.md 认设定 · 留空 = dsh 自己的工作目录',
+          },
+            h('input', {
+              'data-bd-input': '', value: ws ?? '', placeholder: '/path/to/your/notes',
+              onChange: (e) => { setWs(e.target.value); autoSave('ws', () => saveText({ ws: e.target.value })) },
+              onBlur: () => flushSave('ws'),
+            })),
+          h(Field, { label: '日报写多细' },
+            h('select', {
+              'data-bd-input': '', value: rl ?? 'full',
+              onChange: (e) => { setRl(e.target.value); patch({ reportLevel: e.target.value }, '日报形态') },
+            },
+              h('option', { value: 'full' }, '完整 —— 每条：标题 / UP / 为什么值得'),
+              h('option', { value: 'brief' }, '薄 —— 每条一两行'),
+              h('option', { value: 'off' }, '不写 —— 只发评论')))),
+
+        /* ── ④ 没字幕的视频 ── */
+        h('div', { 'data-bd-sec': '' },
+          h('div', { 'data-bd-h': '' }, '没字幕的视频'),
           h(ToggleRow, {
-            label: '本地转写没字幕的视频',
-            note: '默认关；开了以后，没字幕的视频会在本机转写一遍（不花 API 钱）',
+            label: '在本机转写一遍',
+            note: '默认关 · 不花 API 钱，但慢；没装依赖时会直接跳过这些视频',
             on: sw('transcribe'),
             onChange: (v) => patch({ transcribe: v }, '本地转写'),
           }),
@@ -496,79 +602,54 @@ window.__ModuleLoader__.load({
             h('div', { 'data-bd-row': '' },
               h('button', { 'data-bd-btn': '', disabled: busy === 'asr', onClick: onInstallAsr },
                 st.asrReady ? '重装转写依赖' : '装转写依赖'),
-              h('div', { 'data-bd-note': '' },
-                !st.asrReady ? '还没装 —— 现在开着也没用：没字幕的视频会被跳过（报告里会写"因无字幕跳过 N 条"）'
-                  : (st.asrModelReady ? '环境和模型都好了' : '环境好了；模型会在第一次转写时自动下（几百 MB）'))),
+              h('div', { 'data-bd-grow': '' },
+                h('div', { 'data-bd-note': '' },
+                  !st.asrReady ? '还没装 —— 现在开着也没用，没字幕的视频会被跳过'
+                    : (st.asrModelReady ? '环境和模型都好了' : '环境好了；模型第一次转写时自动下（几百 MB）')))),
             h('div', { 'data-bd-note': '' },
-              '点一下就好：建一个独立环境、装 faster-whisper + yt-dlp，并把 Whisper 模型也下好',
-              h('br'),
-              '（模型默认 small，几百 MB，走国内镜像；装一次就够了）'),
+              '装一次就够：独立环境 + faster-whisper + yt-dlp + Whisper small 模型（走国内镜像）'),
             st.asrTail ? h('div', null,
-              h('div', { 'data-bd-note': '' }, st.asrInstalling ? '正在装转写依赖（进度）：' : '转写依赖的日志（末尾）—— 只有「没字幕的视频」用得到它：'),
+              h('div', { 'data-bd-note': '' }, st.asrInstalling ? '正在装（进度）：' : '日志（末尾）：'),
               h('pre', { 'data-bd-pre': '' }, st.asrTail)) : null) : null),
 
-        /* ── 关注什么 / 在哪儿刷 ── */
-        h('div', { 'data-bd-sec': '' },
-          h('div', { 'data-bd-h': '' }, '关注什么'),
-          h('textarea', {
-            'data-bd-input': '', rows: 5, placeholder: '一行一个关键词；留空用内置那几组',
-            value: kws ?? '', onChange: (e) => setKws(e.target.value),
-          }),
-          h('div', { 'data-bd-label': '' }, '工作区（它按这里的 AGENTS.md 认设定）'),
-          h('input', {
-            'data-bd-input': '', value: ws ?? '', placeholder: '留空 = dsh 自己的工作目录',
-            onChange: (e) => setWs(e.target.value),
-          }),
-          h('div', { 'data-bd-label': '' }, '日报写多细'),
-          h('select', {
-            'data-bd-input': '', value: rl ?? 'full',
-            onChange: (e) => { setRl(e.target.value); patch({ reportLevel: e.target.value }, '日报形态') },
-          },
-            h('option', { value: 'full' }, '完整 —— 每条：标题 / UP / 为什么值得（默认）'),
-            h('option', { value: 'brief' }, '薄 —— 每条一两行，只留值不值得 + 链接'),
-            h('option', { value: 'off' }, '不写 —— 只发评论，不生成日报文件')),
-          h('div', { 'data-bd-row': '' },
-            h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: Boolean(busy), onClick: onSaveText }, '保存'),
-            msg ? h('div', { 'data-bd-msg': '', 'data-good': msgTone === 'good' ? '' : undefined, 'data-warn': msgTone === 'warn' ? '' : undefined }, msg) : null)),
-
-        /* ── 环境与账号 ── */
+        /* ── ⑤ 环境与账号 ── */
         h('div', { 'data-bd-sec': '' },
           h('div', { 'data-bd-h': '' }, '环境与账号'),
           h('div', { 'data-bd-row': '' },
             h('button', { 'data-bd-btn': '', disabled: busy === 'install', onClick: onInstall },
-              st.venvReady ? '重装主依赖' : '装主依赖（建 venv）'),
+              st.venvReady ? '重装主依赖' : '装主依赖'),
             h('button', { 'data-bd-btn': '', disabled: busy === 'check', onClick: onCheck }, '测一下'),
             h('button', { 'data-bd-btn': '', disabled: busy === 'update', onClick: onCheckUpdate }, '检查更新'),
-            newVer ? h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: busy === 'upgrade', onClick: onUpgrade }, '一键升级到 v' + newVer) : null,
-            h('button', { 'data-bd-btn': '', disabled: busy === 'login', onClick: onLoginStart }, '扫码登录'),
-            h('div', { 'data-bd-note': '' },
-              !st.venvReady ? (st.installFailed ? '上次没装成 → 看下面日志' : '还没装 → 先点「装主依赖」')
-                : (st.loggedIn ? '装好了 → 下一步「扫码登录」' : '环境好了 → 点「扫码登录」'))),
-          loginState ? h('div', { 'data-bd-msg': '', 'data-good': loginTone === 'good' ? '' : undefined, 'data-warn': loginTone === 'warn' ? '' : undefined }, loginState) : null,
-          st.installTail ? h('div', null,
-            h('div', { 'data-bd-note': '' }, st.installing ? '正在装主依赖（进度）：' : '主依赖的日志（B站 搜索 / 字幕 / 评论 用得到，末尾）：'),
-            h('pre', { 'data-bd-pre': '' }, st.installTail)) : null,
+            newVer ? h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: busy === 'upgrade', onClick: onUpgrade },
+              '升级到 v' + newVer) : null,
+            h('button', { 'data-bd-btn': '', disabled: busy === 'login', onClick: onLoginStart }, '扫码登录')),
+          h('div', { 'data-bd-note': '' },
+            !st.venvReady ? (st.installFailed ? '上次没装成 → 看下面日志' : '先点「装主依赖」')
+              : (st.loggedIn ? '都好了' : '环境好了 → 点「扫码登录」')),
+          loginState ? h('div', {
+            'data-bd-msg': '',
+            'data-good': loginTone === 'good' ? '' : undefined,
+            'data-warn': loginTone === 'warn' ? '' : undefined,
+          }, loginState) : null,
           login?.qr ? h('div', { 'data-bd-qr': '' },
             h('img', { src: login.qr, alt: 'B站登录二维码' }),
             h('div', { 'data-bd-note': '' },
-              '手机 B站 → 我的 → 扫一扫。',
-              h('br'),
-              '确认时选「记住我 / 长期」那张 —— 选 24 小时的话，明天就得重扫。')) : null),
+              '手机 B站 → 我的 → 扫一扫。', h('br'),
+              '确认时选「记住我 / 长期」那张 —— 选 24 小时的话明天就得重扫。')) : null,
+          st.installTail ? h('div', null,
+            h('div', { 'data-bd-note': '' }, st.installing ? '正在装（进度）：' : '日志（末尾）：'),
+            h('pre', { 'data-bd-pre': '' }, st.installTail)) : null),
 
-        /* ── 它是怎么干活的（给他看的） ── */
+        /* ── ⑥ 文件在哪儿 ── */
         h('div', { 'data-bd-sec': '' },
-          h('div', { 'data-bd-h': '' }, '它的地盘'),
-          h('div', { 'data-bd-kv': '' },
-            `家目录：${st.home}`,
-            h('br'),
-            `今天的报告：${st.report}`),
+          h('div', { 'data-bd-h': '' }, '文件在哪儿'),
+          h('div', { 'data-bd-kv': '' }, `家目录：${st.home}`, h('br'), `今天的报告：${st.report}`),
           h('div', { 'data-bd-row': '' },
             h('button', { 'data-bd-btn': '', disabled: busy === 'report', onClick: onShowReport },
               report !== null ? '收起报告' : '看今天的报告'),
+            h('button', { 'data-bd-btn': '', disabled: busy === 'verify', onClick: onVerify }, '复核评论'),
             h('button', { 'data-bd-btn': '', onClick: () => onOpenFolder('out') }, '打开报告文件夹'),
             h('button', { 'data-bd-btn': '', onClick: () => onOpenFolder('home') }, '打开家目录'),
-            h('button', { 'data-bd-btn': '', disabled: busy === 'verify', onClick: onVerify },
-              '复核评论'),
             h('button', { 'data-bd-btn': '', onClick: () => copyText(st.report) }, '复制报告路径')),
           report !== null ? h('pre', { 'data-bd-pre': '' }, report) : null),
       )
