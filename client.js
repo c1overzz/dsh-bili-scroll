@@ -507,6 +507,16 @@ window.__ModuleLoader__.load({
                 h('option', { value: '4' }, '4 帧'),
                 h('option', { value: '9' }, '9 帧'),
                 h('option', { value: '16' }, '16 帧'))),
+            h('div', { 'data-bd-row': '' },
+              h('div', { 'data-bd-grow': '' },
+                h('div', { 'data-bd-label': '' }, '每格配哪来的台词'),
+                h('div', { 'data-bd-note': '' }, '画面里烧的字幕可能是防和谐的字母/拼音；「总是本地转写」直接听音频——不会被改，但慢（4 分钟视频约 +40 秒）')),
+              h('select', {
+                'data-bd-input': '', 'data-bd-sel': '', value: String(cfg.frameAudio ?? 'auto'),
+                onChange: (e) => patch({ frameAudio: e.target.value }, '台词来源'),
+              },
+                h('option', { value: 'auto' }, '优先字幕轨'),
+                h('option', { value: 'always' }, '总是本地转写'))),
             h(ToggleRow, {
               label: '下载时用账号 Cookie',
               note: '默认关：匿名就能下 480p，完全不碰你的号。开了才稳拿 720p/1080p，但下载请求会挂在账号上',

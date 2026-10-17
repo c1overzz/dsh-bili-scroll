@@ -65,6 +65,8 @@ export const Config = !z ? undefined : z.object({
   frameCount: z.natural().default(9).extra('volatile', true),
   /** 订阅：UP 空间链接 / 合集链接 / 视频链接，一行一个（插件自己解析成 mid / sid） */
   subs: z.array(z.string()).default([]).extra('volatile', true),
+  /** 台词来源：auto=有字幕轨就用；always=总是本地转写音频（慢，但不受 UP 改字幕影响） */
+  frameAudio: z.string().default('auto').extra('volatile', true),
   /** 下载视频时带账号 Cookie（默认关：匿名够用；开了才稳拿 720p/1080p） */
   useCookie: z.boolean().default(false).extra('volatile', true),
   /** ⭐ 每轮最多发几条评论（每条里 @ 一次下面那个人） */
@@ -161,7 +163,7 @@ export function apply(ctx, config) {
    */
   const DEFAULTS = {
     perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small', seeVideo: true, frameHeight: 480, frameCount: 9, useCookie: false,
-    subs: [],
+    subs: [], frameAudio: 'auto',
     keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1,
   }
   const normalize = (src, base) => {
@@ -1042,7 +1044,7 @@ export function apply(ctx, config) {
       const body = await readBody(req)
       const patch = {}
       for (const k of ['perDay', 'peakValley', 'noon', 'night', 'autoComment', 'transcribe', 'asrModel',
-        'seeVideo', 'frameHeight', 'frameCount', 'useCookie',
+        'seeVideo', 'frameHeight', 'frameCount', 'useCookie', 'frameAudio',
         'commentPerRound', 'mentionName',
         'keywords', 'subs', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound']) {
         if (k in body) patch[k] = body[k]
@@ -1050,6 +1052,7 @@ export function apply(ctx, config) {
       if ('perDay' in patch) patch.perDay = Math.max(0, Math.min(Number(patch.perDay) || 0, 50))
       if ('frameHeight' in patch) patch.frameHeight = [480, 720, 1080].includes(Number(patch.frameHeight)) ? Number(patch.frameHeight) : 480
       if ('frameCount' in patch) patch.frameCount = Math.max(4, Math.min(Number(patch.frameCount) || 9, 16))
+      if ('frameAudio' in patch) patch.frameAudio = ['auto', 'always'].includes(String(patch.frameAudio)) ? String(patch.frameAudio) : 'auto'
       if ('subs' in patch) patch.subs = (Array.isArray(patch.subs) ? patch.subs : [])
         .map((x) => String(x ?? '').trim()).filter(Boolean).slice(0, 30)
       if ('reportLevel' in patch) patch.reportLevel = ['full', 'brief', 'off'].includes(String(patch.reportLevel)) ? String(patch.reportLevel) : 'full'

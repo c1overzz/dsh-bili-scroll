@@ -1500,6 +1500,8 @@ def frame_settings() -> dict:
         "height": h,
         "count": max(4, min(cnt, 16)),
         "cookie": bool(c.get("useCookie", False)),
+        "audio": "always" if str(c.get("frameAudio") or "auto") == "always" else "auto",
+        "asrModel": str(c.get("asrModel") or "small"),
     }
 
 
@@ -1543,6 +1545,8 @@ async def bili_frames(bvid: str, n: int = 0, height: int = 0) -> str:
     args = [sys.executable, str(FRAMES_SCRIPT), bvid, "--n", str(n), "--height", str(h)]
     if cfg["cookie"]:
         args.append("--cookie")
+    if cfg.get("audio") == "always":
+        args += ["--audio", "--asr-model", cfg.get("asrModel") or "small"]
 
     def run():
         return subprocess.run(args, capture_output=True, text=True, timeout=300)
@@ -1577,6 +1581,14 @@ async def bili_frames(bvid: str, n: int = 0, height: int = 0) -> str:
         out["lines"] = []
         out["line_source"] = "error"
         out["lines_err"] = str(e)
+
+    # ⭐ 音频来源的台词（没改过的）：既不受画面硬字幕影响，也不受 UP 改字幕轨影响
+    if out.get("audio_lines"):
+        out["lines_from_subtitle"] = out.get("lines") or []
+        out["lines"] = out["audio_lines"]
+        out["line_source"] = out.get("audio_source") or "local-asr"
+        out["align_note"] = ("lines = **本地从音频转的**（受 UP 改字幕影响最小）；lines_from_subtitle = B站字幕轨。"
+                             "两栏不一致时优先信 lines，但专有名词两栏都可能错，交叉看。")
     return json.dumps(out, ensure_ascii=False)
 
 

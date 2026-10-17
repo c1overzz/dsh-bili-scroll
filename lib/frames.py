@@ -41,6 +41,8 @@ LONG_SECONDS = 1200      # 超过 20 分钟走"片段下载"
 SECTION_LEN = 8          # 每段多长（秒）
 KEEP_SHEETS_DAYS = 4     # 旧的拼图留几天
 COOKIE_ARGS = []         # --cookie 时由 main() 填
+AUDIO_FULL_LIMIT = 600   # 10 分钟以内整条音频转写；更长只转每帧前后各 6 秒
+CLIP_HALF = 6            # 每帧前后各留几秒音频
 
 
 def fail(msg):
@@ -174,6 +176,77 @@ def download_sections(yt, bvid, height, stamps, workdir):
     return out
 
 
+def download_audio_full(yt, bvid, workdir):
+    """整条音轨（短视频用）。"""
+    cmd = [yt, "--no-warnings", "--no-part", "--no-playlist", *COOKIE_ARGS,
+           "-f", "ba/b", "--print", "after_move:filepath",
+           "-o", os.path.join(workdir, "a.%(ext)s"),
+           f"https://www.bilibili.com/video/{bvid}"]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or "").strip().splitlines()[-1:] or "音频下载失败")
+    for pth in reversed([ln.strip() for ln in r.stdout.splitlines() if ln.strip()]):
+        if os.path.exists(pth):
+            return pth
+    for f in os.listdir(workdir):
+        if f.startswith("a."):
+            return os.path.join(workdir, f)
+    raise RuntimeError("音频下载完成但找不到文件")
+
+
+def download_audio_clips(yt, bvid, workdir, stamps):
+    """只下每个时间点前后 CLIP_HALF 秒的音频（长视频用）。返回 [(t, path)]"""
+    cmd = [yt, "--no-warnings", "--no-part", "--no-playlist", "--no-cache-dir", *COOKIE_ARGS,
+           "-f", "ba/b", "-o", os.path.join(workdir, "a_%(section_start)s.%(ext)s"),
+           f"https://www.bilibili.com/video/{bvid}"]
+    for t in stamps:
+        lo = max(0, int(t) - CLIP_HALF)
+        cmd.insert(-1, "--download-sections")
+        cmd.insert(-1, f"*{lo}-{lo + CLIP_HALF * 2}")
+    subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    got = {}
+    for f in glob.glob(os.path.join(workdir, "a_*")):
+        try:
+            key = int(os.path.basename(f).split("_")[1].split(".")[0])
+        except Exception:
+            continue
+        got[key] = f
+    out = []
+    for t in stamps:
+        lo = max(0, int(t) - CLIP_HALF)
+        if lo in got:
+            out.append((t, got[lo]))
+    return out
+
+
+def run_asr(files, model):
+    """调家目录的 asr.py（独立环境）一次性转多个文件 → [[{start,end,text}], …]"""
+    py = None
+    for cand in (os.path.join(HERE, ".venv-asr", "bin", "python"),
+                 os.path.join(HERE, ".venv-asr", "Scripts", "python.exe"),
+                 os.path.join(HERE, ".venv-asr", "Scripts", "python")):
+        if os.path.exists(cand):
+            py = cand
+            break
+    script = os.path.join(HERE, "asr.py")
+    if not py or not os.path.exists(script):
+        raise RuntimeError("没装本地转写环境（.venv-asr）")
+    cmd = [py, script, *files, "--json", "--model", model or "small"]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or "").strip()[-200:] or "转写失败")
+    lines = [x for x in (r.stdout or "").strip().splitlines() if x.strip()]
+    if not lines:
+        raise RuntimeError("转写没有输出")
+    data = json.loads(lines[-1])
+    return [f.get("segments") or [] for f in data.get("files", [])]
+
+
+def window_text(segs, lo, hi):
+    return "".join((sg.get("text") or "") for sg in segs
+                   if float(sg.get("end", 0) or 0) >= lo and float(sg.get("start", 0) or 0) <= hi)
+
+
 def grab(ff, src, t, out_path):
     r = subprocess.run(
         [ff, "-y", "-loglevel", "error", "-ss", f"{t:.2f}", "-i", src,
@@ -228,6 +301,9 @@ def main():
     ap.add_argument("--n", type=int, default=9)
     ap.add_argument("--cols", type=int, default=0)   # 0 = 按帧数自动排（4→2×2，9→3×3，16→4×4）
     ap.add_argument("--height", type=int, default=480)
+    ap.add_argument("--audio", action="store_true",
+                    help="顺便下音轨用本地 Whisper 转出「每帧前后说了什么」（不受 UP 改字幕影响，但慢）")
+    ap.add_argument("--asr-model", default="small", help="本地转写用的模型（默认 small）")
     ap.add_argument("--cookie", action="store_true",
                     help="下载时带账号 Cookie（设置页那个开关）：能拿更高清，但请求挂在账号上")
     ap.add_argument("--keep", action="store_true", help="保留下载的视频（调试用）")
@@ -296,6 +372,28 @@ def main():
         grid = {4: 2, 9: 3, 16: 4}.get(len(ims)) or max(1, int(len(ims) ** 0.5 + 0.5))
         compose(ims, max(1, min(a.cols or grid, 4)), sheet)
 
+        # ⭐ 音频来源的「每帧说了什么」：不受 UP 改字幕影响（画面上的硬字幕可能是规避写法）
+        audio_lines = []
+        audio_src = "off"
+        if a.audio:
+            try:
+                if dur <= AUDIO_FULL_LIMIT:
+                    af = download_audio_full(yt, bvid, workdir)
+                    segs = run_asr([af], a.asr_model)[0]
+                    audio_lines = [{"i": i + 1, "t": round(t, 1),
+                                    "text": window_text(segs, t - 2.0, t + 4.0)[:140]}
+                                   for i, t in enumerate(times)]
+                    audio_src = "local-asr-full"
+                else:
+                    clips = download_audio_clips(yt, bvid, workdir, times)
+                    segs_list = run_asr([pp for _, pp in clips], a.asr_model) if clips else []
+                    audio_lines = [{"i": i + 1, "t": round(tt, 1),
+                                    "text": "".join(sg.get("text") or "" for sg in sgs)[:140]}
+                                   for i, ((tt, _), sgs) in enumerate(zip(clips, segs_list))]
+                    audio_src = "local-asr-clips"
+            except Exception as e:
+                audio_src = "error:" + str(e)[:120]
+
         pub = meta.get("pubdate")
         print(json.dumps({
             "ok": True,
@@ -309,6 +407,8 @@ def main():
             "cells": len(ims),
             "times": [round(t, 1) for t, _ in ims],
             "note": "用 read_image 看这张拼图；格子从左到右、从上到下排，每格左下角是时间码。",
+            "audio_lines": audio_lines,
+            "audio_source": audio_src,
         }, ensure_ascii=False))
     except Exception as e:
         fail(e)
