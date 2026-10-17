@@ -43,6 +43,11 @@
 - `client.js` —— 浏览器半端：设置页（注册在 `settings.section`）
 - `lib/` —— 数据目录（`stateDir`，配置 / 报告 / 凭证都在这儿）/ 极小的 MCP stdio 客户端 / 扫码登录 / **`hostdeps.mjs`（从宿主树取 `@deepseek-ai/*`，拿不到就退到自己依赖 / 本地等价实现）** / **`verify.mjs`（评论发出后复核）**
 - `prompts/duty.md` —— 一轮要做的事（判定口径 + 红线，**用户可以改**）
+  · 🔴 **别把使用者个人的口味写进这一份** ✗。他自己那份是 `$DSH_HOME/bili-duty/duty.md`
+    （`ensureHomeFiles` 用 `overwrite: false` 保住的）—— 个人化的语气 / 人格约定
+    **只该留在他那份里**；往仓库这份搬，等于**强加给每一个装插件的人**。
+    （2026-10-18 踩过：把「可爱 + 颜文字」那节当成"漏发"补进了仓库，实际那是使用者
+    **只要自己用**的口味 ✗。）要改仓库这份，只改**谁都适用**的规则 ✓
 - `vendor/bilibili-mcp/` —— 内置的 Python MCP（MIT，AGI_Ananas）
 - `selfcheck.mjs` + `tools/` —— 本地预检：`node selfcheck.mjs`（**现在不用解析钩子了**；`tools/register.mjs` 那条还留着当备份）
 - `window-smoke.mjs` / `route-smoke.mjs` —— 时段工具的单测、以及把宿主端那几条 HTTP 路由**真调一遍**
