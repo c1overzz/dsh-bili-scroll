@@ -145,3 +145,17 @@ dsh plugin --profile web add github:c1overzz/dsh-bili-scroll   # 备选：直接
 ## 许可证
 
 MIT（内置的 `vendor/bilibili-mcp/` 另见该目录下的 LICENSE）
+
+## 开发验证
+
+```sh
+npm test
+npm run selfcheck
+node tools/_check-1016.mjs
+```
+
+设置保存回归覆盖原生设置优先级、volatile 配置引用、连续编辑、缓存刷新、重载以及无原生设置服务的兼容路径。
+
+安装了 DSH 的开发机还可以运行 `npm run test:native`。它创建隔离的临时 DSH_HOME，使用真实 Loader / settings 服务保存设置，等待缓存刷新，再启动第二个进程检查重载及原生设置页修改；不会调用模型、登录 B 站或发评论。
+
+桌面版需要指定 `DSH_NATIVE_EXECUTABLE`（安装包的 Electron 可执行文件）、`DSH_NATIVE_CLI`（安装包中的 dsh CLI 入口）及 `DSH_HOST_MODULES`（宿主的 `node_modules/@deepseek-ai` 目录）。可用 `DSH_TEST_TMP` 指定较短的临时目录，以兼容 Windows 的路径长度限制。

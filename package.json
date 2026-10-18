@@ -65,6 +65,11 @@
       ]
     }
   },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "test:native": "node tools/check-settings-native.mjs",
+    "selfcheck": "node selfcheck.mjs"
+  },
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"

@@ -200,7 +200,6 @@ export function apply(ctx, config) {
     return p
   }
 
-  const hostCfg = () => normalize(config, { ...DEFAULTS })       // 宿主那份（schema 校验过、默认值已填）
   const savedCfg = () => normalize(readJson(cfgFile, {}), { ...DEFAULTS })
   const CFG_SIG = ['perDay', 'mentionName', 'replyToComments', 'overlayMcp']   // 靠这几个键认出"哪一行是我们"
   let settingsRow = { at: 0, row: null }
@@ -211,14 +210,13 @@ export function apply(ctx, config) {
    *    describe() 自己扫 profile 里**带 volatile 字段**的条目列出来（lib/index.js:413-452），
    *    命名空间 ns **等于 loader 条目的 id**（我们 cordis.patch.yml 里是 `bili-scroll`，不是老注释写的 bili-duty）。
    * 另外两条同样要紧（都是读宿主源码得来的，别再想当然）：
-   *    ① `apply(ctx, config)` 收到的 config 就是 fiber.config 本体，volatile 字段一改宿主**就地**改它
-   *       （cordis-plugin-loader/src/config/entry.ts：`this.fiber._config = …` + `_commitVolatile()`）⇒
-   *       启动时快照的 cfg 永远看不到设置页的改动，用之前得 refreshCfg()。
+   *    ① apply() 的 volatile 字段是带 get() 的引用，写设置后 loader 还可能替换配置对象。
+   *       每次用 describe().value 取得当前普通值，不能把启动时拿到的引用当成标量。
    *    ② describe() 每行给三层：value（生效值）/ base（继承层）/ user（用户在设置页显式设过的那层）。
    */
   const settingsDesc = (fresh = false) => {
     const t = Date.now()
-    if (!fresh && t - settingsRow.at < 3000) return settingsRow.row   // 挡 UI 轮询：describe() 要扫所有条目
+    if (!fresh && settingsRow.row && t - settingsRow.at < 3000) return settingsRow.row   // 挡 UI 轮询：describe() 要扫所有条目
     let row = null
     try {
       const rows = ctx.settings?.describe?.() || []
@@ -233,7 +231,9 @@ export function apply(ctx, config) {
     // ⭐ 读回来统一过一遍范围：原生设置页那边我们是钳不到写的（见 clampPatch 的注释）
     if (!row) return clampPatch(saved)
     const user = row.user || {}
-    const out = { ...hostCfg() }
+    // describe().value is the host's current plain config. apply() receives
+    // volatile references and may retain an older config object after an edit.
+    const out = normalize(row.value, { ...DEFAULTS })
     // ⚠️ 2026-10-18（用户实证 + 他的 dsh 定位）：`pythonPath` 是**装依赖时自动写的**，
     //    但它一旦在 DSH 原生设置里有过值（默认 "python"），就会被宿主覆盖回来 ⇒
     //    「重装依赖」日志写着"已把 pythonPath 设为 venv"，实际生效的还是系统那个空壳 python
@@ -261,6 +261,8 @@ export function apply(ctx, config) {
         throw Object.assign(new Error('DSH 这边没有可写的设置表单（值只落在插件自己的 config.json 里）'), { noForm: true })
       }
       await ctx.settings.update(row.ns, patch, row.revision)
+      // A subsequent request must not merge against the pre-save form snapshot.
+      settingsRow = { at: 0, row: null }
       return row.ns
     }
     try { return { ok: true, ns: await attempt(false) } }
