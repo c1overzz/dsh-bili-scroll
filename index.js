@@ -172,12 +172,15 @@ export function apply(ctx, config) {
     }
     return out
   }
-  /* ── 配置从哪来：DSH 自带的「插件设置」页 > 插件自己的 config.json > 默认值 ──
-   * 老代码是 `normalize(readJson(cfgFile, {}), normalize(config, DEFAULTS))` —— config.json 一刀切盖住宿主，
-   * 后果：用户在 DSH 自带的插件设置页里改了值，插件照旧读 config.json 的旧值 ⇒ **静默不生效** ✗。
-   * 判据用 describe() 给的 `user` 层（= 用户在原生设置页**显式设过**的键）：
-   *   设过的键 ⇒ 听宿主的；没设过 ⇒ 还是 config.json 说了算（老用户零回归 ✓）。
-   * 拿不到设置服务就完全退回老行为。
+  /* ── 配置从哪来：patch 的 user 层 > 插件自己的 config.json > 启动快照 ──
+   * ⚠️ 2026-10-18 实锤（dsh 0.2.0-rc.2 / 0.2.1-rc.2）：`settings.update()` 只把新值写进
+   *    cordis.patch.yml 和 config.json，**不会**重新 apply 已激活的插件实例（duty.log 无新「已挂载」）。
+   *    所以 `apply(ctx, config)` 收到的 `config` 是**启动时快照**，里面的键永远是旧值：
+   *      · pythonPath 卡在裸 `python` ⇒ 二维码画不出、MCP 起不来；
+   *      · autoComment / transcribe 点开 5 秒后又被 `/status` 轮询打回去 ⇒ @ 输入框跟着消失。
+   *    describe() 的 `user` 层是每次重读 patch 文件算出来的，config.json 是插件页每次保存都写的，
+   *    这两份才是最新的 ⇒ 优先级：user > config.json > 快照（只垫默认值）。
+   * 拿不到设置服务时退回"快照里和默认值不同的键 + config.json"。
    */
   /* ⭐ 「设置里能写什么范围」收在一处 —— HTTP 接口、bili_config 工具、**读配置**三处都走它，
    *    所以 perDay 0–50 / commentPerRound 0–20 这些数字**只有这一份**（schema 里不再写一遍）。
@@ -195,7 +198,7 @@ export function apply(ctx, config) {
     return p
   }
 
-  const hostCfg = () => normalize(config, { ...DEFAULTS })       // 宿主那份（schema 校验过、默认值已填）
+  const hostCfg = () => normalize(config, { ...DEFAULTS })       // 启动快照：只兜底，别当活配置用
   const savedCfg = () => normalize(readJson(cfgFile, {}), { ...DEFAULTS })
   const CFG_SIG = ['perDay', 'mentionName', 'replyToComments', 'overlayMcp']   // 靠这几个键认出"哪一行是我们"
   let settingsRow = { at: 0, row: null }
@@ -206,10 +209,11 @@ export function apply(ctx, config) {
    *    describe() 自己扫 profile 里**带 volatile 字段**的条目列出来（lib/index.js:413-452），
    *    命名空间 ns **等于 loader 条目的 id**（我们 cordis.patch.yml 里是 `bili-scroll`，不是老注释写的 bili-duty）。
    * 另外两条同样要紧（都是读宿主源码得来的，别再想当然）：
-   *    ① `apply(ctx, config)` 收到的 config 就是 fiber.config 本体，volatile 字段一改宿主**就地**改它
-   *       （cordis-plugin-loader/src/config/entry.ts：`this.fiber._config = …` + `_commitVolatile()`）⇒
-   *       启动时快照的 cfg 永远看不到设置页的改动，用之前得 refreshCfg()。
+   *    ① `apply(ctx, config)` 收到的 config 是**启动时的快照**。本机 dsh 0.2.0-rc.2 实测：
+   *       `settings.update()` 只把新值写进 cordis.patch.yml / config.json，**不会**重新 apply
+   *       已激活的实例（duty.log 无新「已挂载」）⇒ 快照里的键永远是旧值，不能拿它当活配置。
    *    ② describe() 每行给三层：value（生效值）/ base（继承层）/ user（用户在设置页显式设过的那层）。
+   *       user 层是每次 describe() 重读 patch 文件算出来的 ⇒ 它和 config.json 才是最新的两份。
    */
   const settingsDesc = (fresh = false) => {
     const t = Date.now()
@@ -226,10 +230,19 @@ export function apply(ctx, config) {
     const saved = savedCfg()
     const row = settingsDesc()
     // ⭐ 读回来统一过一遍范围：原生设置页那边我们是钳不到写的（见 clampPatch 的注释）
-    if (!row) return clampPatch(saved)
+    if (!row) {
+      // 没有设置表单（老宿主/服务拿不到）⇒ 只能靠启动快照。但快照里全是默认值 + 少数 patch 值，
+      // 直接整份盖会压掉 config.json 里更新过的键 ⇒ 只采纳"和默认值不同"的键。
+      const host = hostCfg()
+      const out = { ...saved }
+      for (const k of Object.keys(DEFAULTS)) if (host[k] !== DEFAULTS[k]) out[k] = host[k]
+      return clampPatch(out)
+    }
     const user = row.user || {}
-    const out = { ...hostCfg() }
-    for (const k of Object.keys(DEFAULTS)) if (user[k] === undefined) out[k] = saved[k]
+    // ⭐ 顺序很关键：user 层是 patch 里"用户显式设过"的最新值（describe() 会重读文件），
+    //    saved 是插件页每次保存都同步写的最新值 —— 两处都比启动快照新，所以快照不参与。
+    const out = { ...saved }
+    for (const k of Object.keys(DEFAULTS)) if (user[k] !== undefined) out[k] = user[k]
     return clampPatch(out)
   }
   const cfg = loadCfg()
@@ -275,20 +288,61 @@ export function apply(ctx, config) {
   // ⭐ 值班章程单独记账（跟 mcp_server.py 不一样：用户改过就得留着 —— 见 state.mjs 的 ensureCharter）
   ensureCharter(pluginDir, stateDir, log)
 
+  /* ─────────────── 解释器自检：pythonPath 不可用就退回 venv ─────────────── */
+
+  // ⭐ 为什么要有这段（2026-10-18 本机复现）：设置页/安装把 pythonPath 写成裸 `python` 时，
+  //    系统 Python 里通常没有 qrcode / mcp ⇒ 二维码出不来、内置 MCP 起不来，
+  //    而旧提示只说"大概还没装"，让人一直去点「建 venv 装依赖」。
+  //    这里在 spawn 前先 `import` 验一下；不行就退回插件自己的 venv。
+  const pyProbe = new Map()
+  const pyHas = (cmd, mod) => new Promise((resolve) => {
+    const key = `${cmd}|${mod}`
+    if (pyProbe.has(key)) return resolve(pyProbe.get(key))
+    let settled = false
+    let timer = null
+    const finish = (ok) => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      pyProbe.set(key, ok)
+      resolve(ok)
+    }
+    try {
+      const child = spawn(cmd, ['-c', `import ${mod}`], { cwd: stateDir, windowsHide: true, stdio: 'ignore', env: pyEnv() })
+      child.on('error', () => finish(false))
+      child.on('exit', (code) => finish(Number(code) === 0))
+      timer = setTimeout(() => { try { child.kill() } catch { /* 已经退了 */ } finish(false) }, 8000)
+    } catch { finish(false) }
+  })
+  const pyWarned = new Set()
+  const warnPy = (key, text) => { if (!pyWarned.has(key)) { pyWarned.add(key); log(text) } }
+  const pyFor = async (mod) => {
+    const wanted = String(cfg.pythonPath || 'python')
+    if (await pyHas(wanted, mod)) return wanted
+    const venv = venvPython()
+    if (existsSync(venv) && venv !== wanted && await pyHas(venv, mod)) {
+      warnPy(`${wanted}|${mod}`, `⚠️ ${wanted} 不能 import ${mod}，改用 venv：${venv}`)
+      return venv
+    }
+    warnPy(`${wanted}|${mod}|none`, `⚠️ ${wanted} 和 venv 都不能 import ${mod} —— 去设置页点「建 venv 装依赖」`)
+    return wanted
+  }
+
   /* ─────────────── MCP（内部起那个 Python MCP） ─────────────── */
 
   let mcp = null
   let mcpKey = ''
-  const mcpKeyNow = () => `${cfg.pythonPath}|${join(stateDir, 'mcp_server.py')}`
 
   const ensureMcp = async () => {
-    if (mcp?.running && mcpKey === mcpKeyNow()) return mcp
-    if (mcp) { mcp.stop(); mcp = null }
     const script = join(stateDir, 'mcp_server.py')
     if (!existsSync(script)) throw new Error(`家里没有 mcp_server.py（应有 ${script}）—— 装上插件后重启一次 dsh 会自动铺好`)
-    mcpKey = mcpKeyNow()
+    const py = await pyFor('mcp')
+    const key = `${py}|${script}`
+    if (mcp?.running && mcpKey === key) return mcp
+    if (mcp) { mcp.stop(); mcp = null }
+    mcpKey = key
     mcp = new McpClient({
-      command: cfg.pythonPath || 'python',
+      command: py,
       args: [script],
       cwd: stateDir,                     // 凭证落在家里 ✓
       // ⭐ 这个内置的 Python MCP 会往 stdout 打中文（ensure_ascii=False）；
@@ -460,10 +514,13 @@ export function apply(ctx, config) {
     parameters: {},
     async execute() {
       const { key, url } = await loginStart()
-      const png = await renderQrPng(cfg.pythonPath, stateDir, url)
+      const py = await pyFor('qrcode')
+      const png = await renderQrPng(py, stateDir, url)
       return {
         ok: true, key, url, png,
-        hint: png ? '用 present 把这张 PNG 推给本人扫；扫完调 bili_login_poll' : '没画出 PNG：先去设置里点「建 venv 装依赖」（venv 里要有 qrcode）',
+        hint: png
+          ? '用 present 把这张 PNG 推给本人扫；扫完调 bili_login_poll'
+          : `没画出 PNG：试过 ${py} 也画不出来，去设置页点「建 venv 装依赖」；还不行就把 pythonPath 指到 ${venvPython()}`,
       }
     },
   })
@@ -1131,6 +1188,7 @@ export function apply(ctx, config) {
         }
         if (code === 0 && existsSync(venvPy)) {
           await persistCfg({ pythonPath: venvPy })   // ⭐ 不然设置页里显式设过 pythonPath 的话，这里就白写了
+          pyProbe.clear()                            // ⭐ venv 刚重装过，之前"不能 import"的结论过期了
           appendInstall(`已把 pythonPath 设为 ${venvPy}\n`)
         }
         appendInstall(`=== 结束（exit ${code}，venvReady=${venvReadyNow()}）===\n`)
@@ -1321,10 +1379,11 @@ export function apply(ctx, config) {
     // ── 扫码登录（设置页用）──
     if (req.method === 'POST' && path === '/api/bili-duty/login/start') {
       const { key, url } = await loginStart()
-      const png = await renderQrPng(cfg.pythonPath, stateDir, url)
+      const py = await pyFor('qrcode')
+      const png = await renderQrPng(py, stateDir, url)
       let qr = null
       if (png) { try { qr = 'data:image/png;base64,' + readFileSync(png).toString('base64') } catch { qr = null } }
-      log(`出码：${url}${qr ? '（已画成 PNG）' : '（没画出 PNG —— venv 里大概还没有 qrcode）'}`)
+      log(`出码：${url}${qr ? '（已画成 PNG）' : `（没画出 PNG —— 试过 ${py}）`}`)
       return sendJson(res, 200, { ok: true, key, url, qr })
     }
 

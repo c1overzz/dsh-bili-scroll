@@ -123,11 +123,14 @@ ok(idx.includes('### BV号'), '提示词里没把配额数的格式告诉它')
 
 // ⑬ 设置对账的形状（行为在一次性探针里验过，这里守住「代码还在」）
 ok(idx.includes('ctx.settings?.describe?.()'), 'index.js 没读 describe()（原生设置页改了就不生效）')
-ok(idx.includes('user[k] === undefined'), 'loadCfg 不再看 user 层（原生设置页显式设过的键会被 config.json 盖回去）')
+ok(idx.includes('if (user[k] !== undefined) out[k] = user[k]'), 'loadCfg 没让 patch 的 user 层覆盖 config.json（原生设置页改了会不生效）')
+ok(!idx.includes('const out = { ...hostCfg() }'), 'loadCfg 又把启动快照当活配置了（设置页保存不会热应用，值会卡在启动时）')
 ok(idx.includes('ctx.settings.update(row.ns, patch, row.revision)'), 'saveCfgHost 没带 revision 写回原生设置')
 ok(idx.includes('const persistCfg = async (patch) =>'), '没有 persistCfg（config.json 与原生设置会写漏一处）')
 ok((idx.match(/persistCfg\(/g) || []).length >= 3, 'persistCfg 的调用点少于 3 处')
-ok(idx.includes('return clampPatch(out)') && idx.includes('return clampPatch(saved)'), 'loadCfg 读回来的配置没钳范围')
+ok((idx.match(/return clampPatch\(/g) || []).length >= 2, 'loadCfg 读回来的配置没钳范围（两个分支都要过 clampPatch）')
+ok(idx.includes('const pyFor = async (mod) =>'), '没有 pyFor（pythonPath 不可用时不会回退 venv）')
+ok(idx.includes("pyFor('qrcode')") && idx.includes("pyFor('mcp')"), '二维码 / 内置 MCP 没走 pyFor 解释器自检')
 ok(!idx.includes('commentPerRound: z.natural().max'), 'schema 给 commentPerRound 加了硬上界（手改超界值会让整条插件不激活）')
 
 // ⑭ 章程升级：**真跑** ensureCharter 的几个分支（不是看字符串）

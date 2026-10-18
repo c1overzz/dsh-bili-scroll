@@ -1,3 +1,20 @@
+## 未发布
+
+**修（设置页保存后不生效 / pythonPath 卡在裸 `python`）**
+
+- ⭐⭐ **设置页保存后「过一会自己弹回」修好了**（issue #15）：`settings.update()` 只把新值写进
+  `cordis.patch.yml` 和 `config.json`，**不会**重新 apply 已激活的插件实例（`duty.log` 没有新的「已挂载」）。
+  旧代码对 patch 里出现过的键优先用 `apply(ctx, config)` 的**启动快照** ⇒ 值永远停在启动时：
+  二维码画不出、`自动评论并 @ 你` 点开 5 秒后又被 `/status` 轮询刷回去（@ 输入框跟着消失）、
+  `转写` / `回复评论` 反复点不生效。现在按 **patch 的 user 层 → `config.json` → 快照兜底** 读取。
+- ⭐ **二维码 / 内置 MCP 不再被写错的 `pythonPath` 拖死**：spawn 前先跑一次
+  `python -c "import qrcode"`（MCP 是 `import mcp`）；不通过且 venv 存在，就自动退回
+  `~/.dsh/bili-duty/.venv/bin/python`，原因写进 `duty.log`。失败提示也会带上**实际试过的解释器**，
+  不再只说"venv 里大概还没有 qrcode"。
+- 装完依赖会清掉解释器探测缓存（venv 刚重装过，之前"不能 import"的结论过期了）。
+
+---
+
 ## 0.1.8 — 2026-10-18
 
 **修（DSH 0.2.1 上跑不通的那颗）**
