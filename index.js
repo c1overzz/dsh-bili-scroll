@@ -23,8 +23,9 @@ const hostDeps = await loadHostDeps()
 const z = hostDeps.z
 const defineTool = hostDeps.defineTool
 import { spawn } from 'node:child_process'
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { join, dirname } from 'node:path'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join, dirname, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { McpClient } from './lib/mcp.mjs'
 import { verifyRecent, appendVerifyToReport } from './lib/verify.mjs'
@@ -33,7 +34,7 @@ import { loginStart, loginPoll, saveCredential, renderQrPng } from './lib/login.
 import { ensureUv } from './lib/uvfetch.mjs'
 
 export const name = 'bili-scroll'
-export const inject = ['webServer', 'tools', 'settings']
+export const inject = ['webServer', 'tools', 'settings', 'commands']
 
 /**
  * 🔴 每个字段都要 `.extra('volatile', true)`：DSH 的 settings.update() 只认 volatile 字段
@@ -85,6 +86,8 @@ export const Config = !z ? undefined : z.object({
   replyToComments: z.boolean().default(false).extra('volatile', true),
   /** 每轮最多回几条 */
   replyPerRound: z.number().default(1).extra('volatile', true),
+  /** ⭐ 对模型开放接口：允许模型调用 `bilibili_skills` 按任意主题刷一轮（只检索、不发评论）。默认开 */
+  aiTool: z.boolean().default(true).extra('volatile', true),
 })
 
 /**
@@ -158,7 +161,7 @@ export function apply(ctx, config) {
   const DEFAULTS = {
     perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
     dmMode: 'off', dmUid: 0,
-    keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1,
+    keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, aiTool: true,
   }
   const normalize = (src, base) => {
     const out = { ...base }
@@ -575,14 +578,33 @@ export function apply(ctx, config) {
     return { ok: true, started: true, log: installLogFile, hint: '正在升级 —— 完成后重启一次 dsh 才生效' }
   }
 
+  /**
+   * 一个 dsh 入口文件 ⇒ `{ command, args, shell }`。
+   * ⭐ Windows 的 npm 全局 shim 是 `dsh.cmd`（不能直接 exec）⇒ 顺着它找真正的 `lib/bin.js`，
+   *    找到就用 `node bin.js`（**shell: false**）。真找不到才退回 `cmd.exe /c`。
+   */
+  const dshFromFile = (p) => {
+    let file = p
+    try { file = realpathSync(p) } catch { /* 不是符号链接就用原路径 */ }
+    if (/\.(js|mjs|cjs)$/i.test(file)) return { command: process.execPath, args: [file], shell: false }
+    for (const g of [
+      join(dirname(file), 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
+      join(dirname(dirname(file)), 'lib', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
+    ]) if (existsSync(g)) return { command: process.execPath, args: [g], shell: false }
+    return { command: file, args: [], shell: false }
+  }
+
   const resolveDsh = () => {
     const explicit = String(cfg.dshBin || '').trim()
-    if (explicit && existsSync(explicit)) return { command: process.execPath, args: [explicit], shell: false }
-    // 常见的全局安装位置（Windows 的 npm 前缀 / POSIX 的 lib）
+    if (explicit && existsSync(explicit)) return dshFromFile(explicit)
+    // 常见的全局安装位置（Windows 的 npm 前缀 / POSIX 的 lib / 本机 npm 全局前缀）
     const guesses = [
       join(process.env.APPDATA || '', 'npm', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
       '/usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js',
       '/usr/lib/node_modules/@deepseek-ai/dsh/lib/bin.js',
+      join(homedir(), '.npm-global', 'lib', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
+      join(homedir(), '.npm-global', 'bin', 'dsh'),
+      join(homedir(), '.local', 'lib', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
     ].filter(Boolean)
     // ⭐ 2026-10-16（issue #5 / #6 / #7）：**桌面版是 Electron 安装包，不是 npm -g 装的** ⇒ 上面几条全找不到
     //    ⇒ 老逻辑退到 `dsh`（PATH 里没有这个命令）⇒ 那一轮必败、而且只留下一句 exit 1 ✗
@@ -597,38 +619,100 @@ export function apply(ctx, config) {
         if (existsSync(p)) return { command: process.execPath, args: [p], shell: false }
       }
     }
-    for (const g of guesses) if (existsSync(g)) return { command: process.execPath, args: [g], shell: false }
+    // ⭐ 2026-10-18：**最可靠的一条** —— 我们现在就活在 dsh 里：宿主进程的 `argv[1]` 就是 dsh 的入口
+    //    （`node /path/to/dsh --profile web`）。以前不认这条，npm 全局装的也报「找不到 dsh」，
+    //    再退到 `shell: true` ⇒ 多行提示词被 /bin/sh 当脚本执行（见 spawnHeadless 的事故注释）✗
+    //    ⚠️ npm 全局的那个 shim 叫 `~/.npm-global/bin/dsh`、**没有扩展名**，所以别按 `.js` 判；
+    //    认两种形状：名字就叫 dsh（dsh / dsh.cmd / dsh.js…），或者解析后是 `…/dsh/lib/bin.js`。
+    //    Electron 例外：那里的 argv[1] 是应用自己的主脚本，先用上面的 resourcesPath 几条。
+    if (!process.versions.electron) {
+      const self = process.argv?.[1]
+      if (self && existsSync(self)) {
+        let real = self
+        try { real = realpathSync(self) } catch { /* 不是链接就用原路径 */ }
+        const base = basename(real).toLowerCase()
+        if (/^dsh(?:\.(?:cmd|exe|js|mjs|cjs))?$/i.test(base) || (base === 'bin.js' && /[\\/]dsh[\\/]/i.test(real))) {
+          return dshFromFile(real)
+        }
+      }
+    }
+    for (const g of guesses) if (existsSync(g)) return dshFromFile(g)
     // ⚠️ 走到这儿就是真找不到 —— 一定要出声（静默失败比报错更坏）
     log('⚠️ 找不到 dsh：桌面版多半不是 npm 全局安装的 ⇒ 请在设置里把「dsh 路径」指到 <应用目录>/…/@deepseek-ai/dsh/lib/bin.js，或改用 npm 装的 dsh')
-    return { command: 'dsh', args: [], shell: true }
+    // 最后兜底：让 PATH 去找（Windows 上 dsh.cmd 得借 shell）。**提示词不走 argv**，所以这里开 shell 也不怕
+    return { command: process.platform === 'win32' ? 'dsh.cmd' : 'dsh', args: [], shell: process.platform === 'win32' }
   }
 
-  const promptFor = () => {
+  /**
+   * ⭐ 起一轮 headless（每天那轮 / 专题检索共用）。**提示词永远走 stdin，永远不经过 shell。**
+   *
+   * 🔴 2026-10-18 事故（真机上抓到了）：以前把**多行提示词**当 argv 传给
+   *    `spawn(..., { shell: dsh.shell })`。而这台机器上 resolveDsh 猜不到 dsh ⇒ 退化成
+   *    `{ command: 'dsh', shell: true }` ⇒ 整段提示词被 `/bin/sh` 当**脚本**执行：
+   *      · 子模型只收到第一行（`sh` 把后面的行当命令了）⇒ 它的对话从第一句起就是残的，
+   *        得自己去翻日志猜任务（实测它真的去读了自己的日志 ✗）；
+   *      · 提示词里内联着 AGENTS.md 和调用方给的主题 ⇒ 那里的 `$( )` / `>` / `rm` 之类会被真执行 ✗；
+   *      · 提示词里一个不配对的 `(` 就让 `/bin/sh` 报 `Syntax error`、整轮 code=2。
+   *    ⇒ 现在：任务正文从 **stdin** 喂进去（官方支持 `dsh --profile headless … -` 读 stdin），
+   *      argv 里只剩路径，且命令本身也尽量不用 shell。
+   */
+  const spawnHeadless = ({ prompt, overlay = null, cwd, onOutput, extraEnv = {} }) => {
+    const dsh = resolveDsh()
+    const args = [...dsh.args, '--profile', cfg.headlessProfile || 'headless']
+    if (overlay) args.push('--patch', overlay)
+    args.push('-')   // `-` = 任务正文从 stdin 读
+    const child = spawn(dsh.command, args, {
+      cwd,
+      shell: dsh.shell,
+      windowsHide: true,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      // ⭐ PYTHONUTF8 / PYTHONIOENCODING：Windows 上 Python 默认按 GBK 编解码，
+      //    中文 / emoji 打进管道会炸（用户反馈过 UnicodeDecodeError），一律按 UTF-8 来
+      // ⭐ ELECTRON_RUN_AS_NODE：**桌面版（Electron）里 spawn 出去的 node 必须带这个**，
+      //    否则它当成"再开一个 Electron 应用"、什么都不干就以 0 退出（issue #5）
+      env: pyEnv({ BILI_DUTY_HOME: stateDir, ...extraEnv, ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}) }),
+    })
+    // 把提示词喂进去、随即关掉 stdin（stdin 一直开着 dsh 会等"读完"）
+    try {
+      child.stdin?.on('error', () => { /* 子进程可能先退 ⇒ EPIPE，别让它变成未捕获异常 */ })
+      child.stdin?.end(String(prompt), 'utf8')
+    } catch (e) {
+      onOutput?.(`[写 stdin 失败] ${e?.message ?? e}\n`)
+    }
+    return { child, dsh, args }
+  }
+
+  /** 这一轮要读的章程路径（绝对路径；`<家目录>` 占位符在这里换成真路径）。 */
+  const charterForPrompt = () => {
     // ⭐ 章程取哪一份：家里那份优先（ensureCharter 保证铺好；他改过的话就是他那份，升级的事由 ensureCharter 记账处理）
     let duty = charterPath(pluginDir, stateDir)
     // ⭐ 2026-10-17（issue #8④）：章程里的 `<家目录>` 这种占位符会被模型读成 `~`，实测**整轮转写白跑** ✗
     //    ⇒ 在拼提示词这一步把**绝对路径**填进去，别让它猜（我们的老规矩：提示词一律给绝对路径）
     try { duty = String(duty).split('<家目录>').join(stateDir) } catch { /* 替换失败就按原文用 */ }
-    const kws = Array.isArray(cfg.keywords) ? cfg.keywords.filter(Boolean) : []
-    // ⭐ 开场先让它读**工作区**的 AGENTS.md —— 这一轮的工作目录就是使用者的工作区，
-    //    AGENTS.md 本来就会自动注入；这里再点一句，保证它真按使用者的设定来（别人的设定同理）。
-    // ⭐ 那一轮的工作目录是**插件家**（沙箱只让它写自己工作目录里的东西 ✗），
-    //    所以"使用者的设定"由**我们自己读进来**喂给它 —— 它在宿主进程里跑，没有沙箱限制 ✓
-    let ownerDoc = ''
+    return duty
+  }
+  /**
+   * 使用者的 AGENTS.md（从设置里的「工作区」读，内联进提示词）。
+   * ⚠️ 留空 = 不读设定（宁可按中性说话，也别猜错别人的工作区）。
+   */
+  const ownerDocForPrompt = () => {
     try {
-      // ⚠️ 2026-10-16 用户反馈（"只要给人设就会走偏"）：留空时我们以前退到 `process.cwd()`，
-      //    也就是 **dsh 进程自己的工作目录** —— 那对多数人根本不是他的工作区 ✗
-      //    ⇒ 读错人设、甚至把别的目录的设定读进来 ✓
-      //    ⭐ 现在的规矩：**留空 = 不读设定**（宁可按中性说话，也别猜错 ✓）；要按人设就自己填工作区 ✓。
       const wsDir = String(cfg.workspace || '').trim()
       const agents = wsDir ? join(wsDir, 'AGENTS.md') : ''
       if (agents && existsSync(agents)) {
         const text = readFileSync(agents, 'utf8')
-        ownerDoc = '\n\n===== 使用者的 AGENTS.md（他写给自己 AI 的人设与准则，**按这个来**）=====\n'
+        return '\n\n===== 使用者的 AGENTS.md（他写给自己 AI 的人设与准则，**按这个来**）=====\n'
           + text.slice(0, 6000)
           + '\n===== 设定结束 =====\n'
       }
     } catch { /* 读不到就算了，别因此跑不成 */ }
+    return ''
+  }
+
+  const promptFor = () => {
+    const duty = charterForPrompt()
+    const kws = Array.isArray(cfg.keywords) ? cfg.keywords.filter(Boolean) : []
+    const ownerDoc = ownerDocForPrompt()
     // ⭐ 「每天最多挑 N 条」是**全天**的账：上一轮已经挑过的要扣掉，这一轮只给剩下的额度
     const quota = Math.max(0, Number(cfg.perDay) || 0)
     const already = countPickedToday()
@@ -696,6 +780,39 @@ export function apply(ctx, config) {
   }
 
   /**
+   * ⭐ 专题检索（`/bilibili-skills 查找关于XX的视频` / 模型调 `bilibili_skills`）用的提示词。
+   *    跟每天那轮的区别：
+   *      · 主题来自使用者/模型给的 query，**不再用设置里的关注关键词**；
+   *      · 只检索 + 写报告，**不发评论 / 私信 / 回复**（这一轮是"查资料"，不是"替你说话"）；
+   *      · 报告写到调用方指定的绝对路径（`<cwd>/bilibili/...`），不碰每天的 out/ 与配额；
+   *      · 使用者的 AGENTS.md 照样内联进来（人设不变）。
+   */
+  const promptForQuery = ({ query, limit, reportFile }) => {
+    const duty = charterForPrompt()
+    const ownerDoc = ownerDocForPrompt()
+    const q = String(query || '').trim()
+    return `你是这个账号的 B站 助手。**这一次是按专题检索**，不是每天那轮例行刷。`
+      + `下面是使用者的设定（如果有）—— **按它来**，别用你默认那套人格。`
+      + ownerDoc
+      + (ownerDoc
+        ? ''
+        : '⭐ 这一轮**没有**拿到使用者的设定 ⇒ **按中性说话**：别扮演任何人、也别自己编一套设定 ✓。')
+      + `然后读章程 ${duty}，**借鉴**里面的搜索、读字幕原文、判断值不值得的口径；但这一轮的任务按下面来：`
+      + `\n\n===== 本轮专题 =====\n`
+      + `专题：${q}\n`
+      + `搜索关键词：围绕专题自己定（可以拆成几组同义词 / 相关词），**不要**用设置里的关注关键词。\n`
+      + `最多挑 ${limit} 条（宁缺毋滥；没有值得的就直说没有，别硬凑）。\n`
+      + `⚠️ 这一轮**只做检索与判断**：不要发评论、不要发私信、不要回复任何人、不要改任何设置 / 台账。\n`
+      + `报告写到这个绝对路径：${reportFile}\n`
+      + `（目录已经建好；写不进去就在回答里说明，别写到别处。）\n`
+      + `报告格式：\n`
+      + `1. 第一行 \`# 专题：${q}\`，第二行写你实际用的检索关键词。\n`
+      + `2. 每条挑中的写成三行：\n   ### BV号\n   标题 · UP · 播放量 · 链接\n   为什么值得（一句）+ 字幕里的依据（一句）。\n`
+      + `3. 结尾写「看了 N 条，挑中 M 条」和一句总评。\n`
+      + `最后用一句话汇报你挑到了什么。现在几点了自己看一眼系统时间。`
+  }
+
+  /**
    * 给 headless 那一轮写一份 overlay —— 把 B站 MCP 挂上去。
    * 🔴 为什么需要它：**某个 profile 能拿到什么工具，取决于它自己那层的 patch**
    *    （headless 里那两条 B站 MCP 就是当初手写进去的）。分发给别人时不能要求人家改 profile，
@@ -716,8 +833,9 @@ export function apply(ctx, config) {
     return list
   }
 
-  const ensureOverlay = () => {
-    const file = join(stateDir, 'headless-overlay.yml')
+  const ensureOverlay = ({ readOnly = false } = {}) => {
+    // ⭐ 专题检索用单独一份 overlay：白名单里**没有 bili_reply**，也不覆盖每天那轮用的那份
+    const file = join(stateDir, readOnly ? 'headless-overlay-query.yml' : 'headless-overlay.yml')
     const script = join(stateDir, 'mcp_server.py')
     const posix = (p) => String(p).replace(/\\/g, '/')
     const yml = []
@@ -743,11 +861,271 @@ export function apply(ctx, config) {
         '        args:',
         `          - '${posix(script)}'`,
         '        env:',
-        `          BILI_MCP_TOOLS: '${mcpWhitelist().join(',')}'`,
+        `          BILI_MCP_TOOLS: '${(readOnly ? ['bili_search', 'bili_subtitle', 'bili_comments', 'bili_video_info'] : mcpWhitelist()).join(',')}'`,
         '',
       )
     }
     try { writeFileSync(file, yml.join('\n'), 'utf8'); return file } catch (e) { log(`写 overlay 失败：${e?.message ?? e}`); return null }
+  }
+
+  /* ─────────────── 专题检索：给 AI / 命令用的「召唤子模型」 ─────────────── */
+
+  /**
+   * ⭐ `bilibili_skills` 工具 + `/bilibili-skills` 命令共用这一条路：
+   *    把「专题」拼成提示词，起一个 headless 子模型（`dsh --profile headless`）去搜、读字幕、写报告。
+   *    跟每天那轮的区别：主题来自调用方（不是配置的关键词）、只读不发评论、日志落在
+   *    `<当前工作目录>/bilibili/`，不碰每天的 out/ 与额度。
+   *    子进程的 cwd = 那个 bilibili/ 目录（沙箱只允许它写自己工作目录里的东西 ⇒ 报告才写得进去）。
+   */
+  const queryChildren = new Set()
+  const stampLocal = () => {
+    const d = new Date()
+    const p = (n) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
+  }
+  const slugForQuery = (s) => String(s || '')
+    .replace(/[\\/:*?"<>|\s]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40)
+
+  /**
+   * ⭐ 专题检索的台账（设置页「历史」靠它 —— 不用再去工作目录里翻文件）。
+   *    <家>/queries.json：最近 100 条；一条 = 一次 /bilibili-skills 或 bilibili_skills 调用。
+   *    状态 running → ok / error（退出码不是 0 算 error，但报告照样能看）。
+   *    报告正文**不**塞进台账（要的时候按 id 去读文件），台账只存路径。
+   */
+  const queryLedgerFile = join(stateDir, 'queries.json')
+  const readLedger = () => {
+    const arr = readJson(queryLedgerFile, [])
+    return Array.isArray(arr) ? arr.filter((x) => x && typeof x.id === 'string' && x.id) : []
+  }
+  const ledgerUpsert = (entry) => {
+    try {
+      const arr = readLedger().filter((x) => x.id !== entry.id)
+      arr.unshift(entry)
+      writeJson(queryLedgerFile, arr.slice(0, 100))
+    } catch (e) { log(`写专题台账失败：${e?.message ?? e}`) }
+  }
+
+  /**
+   * ⭐ 历史 = 台账 + 工作区 `bilibili/` 里还没进台账的报告。
+   *    后者是为了 0.2.0 之前跑过的那几轮（台账是这一版才有的）—— 不然升级完一看历史是空的 ✗
+   *    从文件名反推 id / 时间，从第一行 `# 专题：…` 取专题名；状态未知就按 ok 显示（报告确实在）。
+   */
+  const queryFromFile = (dir, file) => {
+    const id = String(file).replace(/\.md$/i, '')
+    const report = join(dir, file)
+    let query = id.replace(/^\d{8}-\d{6}-/, '')
+    let picked = 0
+    let text = ''
+    try { text = readFileSync(report, 'utf8') } catch { /* 读不到就用文件名 */ }
+    try {
+      const first = text.split('\n')[0] || ''
+      if (first.startsWith('# 专题：')) query = first.slice(4).trim()
+    } catch { /* 同上 */ }
+    try { picked = (text.match(/^### /gm) || []).length } catch { /* 同上 */ }
+    let ts = ''
+    let size = 0
+    try { const st = statSync(report); ts = new Date(st.mtimeMs).toISOString(); size = st.size } catch { /* 同上 */ }
+    // 占位报告（宿主补的那份）不是真报告 ⇒ 历史里别显示成「完成」
+    const status = /这一轮没有写出报告/.test(text) ? 'error' : 'ok'
+    return { id, ts, query, limit: null, dir, report, log: join(dir, id + '.log'), source: 'file', status, exit: null, picked, size, reportExists: true, fromFile: true }
+  }
+  const allQueries = () => {
+    const ledger = readLedger().map((x) => {
+      let reportExists = false
+      try { reportExists = existsSync(x.report) } catch { /* 路径失效就当没有 */ }
+      return { ...x, reportExists }
+    })
+    const known = new Set(ledger.map((x) => x.id))
+    const extra = []
+    // 扫「设置里的工作区/bilibili」—— 专题检索的默认落点；别的 dir 的扫不到，只能靠台账
+    try {
+      const ws = String(cfg.workspace || '').trim()
+      const dir = ws ? join(ws, 'bilibili') : ''
+      if (dir && existsSync(dir)) {
+        for (const f of readdirSync(dir)) {
+          if (!/\.md$/i.test(f)) continue
+          if (known.has(f.replace(/\.md$/i, ''))) continue
+          extra.push(queryFromFile(dir, f))
+        }
+      }
+    } catch { /* 扫不动就算了，台账照样能用 */ }
+    const tsOf = (x) => { const t = Date.parse(x.ts || ''); return Number.isFinite(t) ? t : 0 }
+    return [...ledger, ...extra].sort((a, b) => tsOf(b) - tsOf(a))
+  }
+
+  const startQuery = ({ query, limit, dir, source = 'tool' }) => {
+    refreshCfg()
+    const q = String(query || '').trim()
+    if (!q) throw new Error('query 不能为空（例如：查找关于 DeepSeek Harness 的视频）')
+    const lim = Math.max(1, Math.min(Number(limit) || 5, 20))
+    const base = String(dir || '').trim() || String(cfg.workspace || '').trim() || process.cwd()
+    const outBase = join(base, 'bilibili')
+    mkdirSync(outBase, { recursive: true })
+    const ts = stampLocal()
+    const slug = slugForQuery(q) || 'query'
+    const report = join(outBase, `${ts}-${slug}.md`)
+    const logFile = join(outBase, `${ts}-${slug}.log`)
+    const id = `${ts}-${slug}`
+    const startedAt = new Date().toISOString()
+    const entry = { id, ts: startedAt, query: q, limit: lim, dir: outBase, report, log: logFile, source, status: 'running', exit: null, size: 0 }
+    ledgerUpsert(entry)
+    const prompt = promptForQuery({ query: q, limit: lim, reportFile: report })
+    try {
+      appendFileSync(logFile, [
+        `=== 专题检索 · ${new Date().toISOString()} · ${source} ===`,
+        `专题: ${q}`,
+        `最多: ${lim} 条`,
+        `目录: ${outBase}`,
+        `报告: ${report}`,
+        '',
+        '--- 提示词（走 stdin，不进 argv / 不过 shell） ---',
+        prompt,
+        '--- 子进程输出 ---',
+        '',
+      ].join('\n'), 'utf8')
+    } catch { /* 写不进去不影响跑 */ }
+    log(`专题检索开跑（${source}）：${q} → ${outBase}`)
+    const pick = (buf) => {
+      try { appendFileSync(logFile, String(buf), 'utf8') } catch { /* 写不进去就丢，绝不能抛 */ }
+    }
+    const { child } = spawnHeadless({
+      prompt,
+      overlay: ensureOverlay({ readOnly: true }),
+      cwd: outBase,
+      onOutput: pick,
+    })
+    const done = new Promise((resolve) => {
+      let settled = false
+      const finish = (code) => {
+        if (settled) return
+        settled = true
+        try { appendFileSync(logFile, `\n=== 结束 code=${code} ${new Date().toISOString()} ===\n`, 'utf8') } catch { /* 忽略 */ }
+        if (!existsSync(report)) {
+          try {
+            writeFileSync(report, [
+              `# 专题：${q}`,
+              '',
+              `> ⚠️ 这一轮没有写出报告（退出码 ${code}）。`,
+              `> 子进程日志：${logFile}`,
+              '',
+            ].join('\n'), 'utf8')
+          } catch { /* 占位报告写不进去就算了 */ }
+        }
+        log(`专题检索结束（${source}，code=${code}）：${report}`)
+        // ⭐ 台账收尾：状态 + 退出码 + 报告大小 + 挑中几条（设置页的「历史」直接列这些）
+        try {
+          let size = 0
+          let picked = 0
+          try {
+            size = statSync(report).size
+            picked = (readFileSync(report, 'utf8').match(/^### /gm) || []).length
+          } catch { /* 没写出来就没有 */ }
+          ledgerUpsert({ ...entry, status: code === 0 ? 'ok' : 'error', exit: code, size, picked, at: new Date().toISOString() })
+        } catch { /* 台账写不进去不能影响这一轮 */ }
+        queryChildren.delete(child)
+        resolve(code)
+      }
+      child.on('error', (e) => {
+        try { appendFileSync(logFile, `\n[spawn error] ${e?.message ?? e}\n`, 'utf8') } catch { /* 忽略 */ }
+        finish(-1)
+      })
+      child.on('exit', (code) => finish(Number(code)))
+    })
+    queryChildren.add(child)
+    return { ok: true, started: true, id, query: q, limit: lim, dir: outBase, report, log: logFile, pid: child.pid, done }
+  }
+
+  // 插件卸载 / 重载时别把子进程晾在那儿
+  ctx.effect(() => () => {
+    for (const child of queryChildren) { try { child.kill() } catch { /* 已经退了 */ } }
+    queryChildren.clear()
+  }, 'bili-duty: 专题检索子进程')
+
+  const aiToolOn = () => cfg.aiTool !== false
+  if (typeof ctx.tools.guard === 'function') {
+    ctx.effect(() => ctx.tools.guard((exec) => {
+      if (exec?.name === 'bilibili_skills' && !aiToolOn()) return 'bilibili_skills 已在「对模型开放接口」里关闭'
+    }), 'bili-duty: 模型接口开关')
+  }
+  if (aiToolOn()) {
+    tool({
+      name: 'bilibili_skills',
+      description: '⭐ 按任意主题召唤一个子模型去刷一轮 B站：搜视频、**读字幕原文**判断值不值得，'
+        + '把结果写成一份报告。适合「查找关于 XX 的视频」。\n'
+        + '这一轮只检索、不发评论 / 私信；日志和报告写到 `<dir>/bilibili/`（dir 默认 = 当前会话工作目录）。\n'
+        + '默认等它跑完并把报告正文带回来；`background: true` 则只起一轮、立刻返回路径。',
+      parameters: {
+        query: { type: 'string', description: '要查的主题，例如「DeepSeek Harness 入门」' },
+        limit: { type: 'number', description: '最多挑几条（默认 5，最大 20）' },
+        dir: { type: 'string', description: '把 bilibili/ 放到哪个目录（默认当前会话工作目录）' },
+        background: { type: 'boolean', description: 'true = 只起一轮、立刻返回报告/日志路径（默认 false，等它跑完）' },
+      },
+      async execute(args, exec) {
+        if (!aiToolOn()) return { ok: false, error: '已在设置里关闭「对模型开放接口」' }
+        const dir = String(args.dir || '').trim() || exec?.agent?.session?.header?.cwd || ''
+        let r
+        try { r = startQuery({ query: args.query, limit: args.limit, dir, source: 'tool' }) }
+        catch (e) { return { ok: false, error: String(e?.message ?? e) } }
+        if (args.background === true) {
+          return { ok: true, started: true, query: r.query, report: r.report, log: r.log, dir: r.dir, hint: '子模型在后台跑；稍后看报告/日志' }
+        }
+        const t0 = Date.now()
+        const code = await Promise.race([
+          r.done,
+          new Promise((resolve) => setTimeout(() => resolve('timeout'), 10 * 60 * 1000)),
+        ])
+        if (code === 'timeout') {
+          return { ok: true, started: true, stillRunning: true, query: r.query, report: r.report, log: r.log, dir: r.dir, hint: '10 分钟还没跑完；它还在后台继续，稍后看报告/日志' }
+        }
+        let reportText = ''
+        try { reportText = readFileSync(r.report, 'utf8').slice(0, 12000) } catch { /* 读不到就只给路径 */ }
+        // ⭐ 只回「结果本身」（几条、挑中几条、花了多久），**不把日志/提示词倒回对话**：
+        //    日志里是整段提示词（含着用户的 AGENTS.md），每次调用都重复一遍纯属噪声 ✗
+        //    失败时才给日志尾巴，而且只取「--- 子进程输出 ---」之后那段。
+        const picked = (reportText.match(/^### /gm) || []).length
+        const took = Math.max(0, Math.round((Date.now() - t0) / 1000))
+        const out = { ok: code === 0, exit: code, query: r.query, took, picked, dir: r.dir, report: r.report, log: r.log, reportText }
+        if (code !== 0 || !reportText) {
+          try {
+            const all = readFileSync(r.log, 'utf8')
+            const i = all.lastIndexOf('--- 子进程输出 ---')
+            out.logTail = (i >= 0 ? all.slice(i + '--- 子进程输出 ---'.length) : all).trim().slice(-800)
+          } catch { /* 读不到就算了，路径还在 */ }
+        }
+        return out
+      },
+    })
+  }
+
+  /* ─────────────── /bilibili-skills 命令（人用；等价于让模型调上面的工具） ─────────────── */
+
+  const commands = typeof ctx.get === 'function' ? ctx.get('commands') : undefined
+  if (commands?.register) {
+    ctx.effect(() => commands.register({
+      name: 'bilibili-skills',
+      description: '按任意主题召唤子模型去刷一轮 B站（只检索、不发评论），日志和报告写到 <当前工作目录>/bilibili/。',
+      input: { hint: '查找关于XX的视频' },
+      handler: async ({ agent, rawInput }) => {
+        const raw = String(rawInput || '').trim()
+        if (!raw) return { kind: 'error', text: '用法：/bilibili-skills 查找关于XX的视频' }
+        const query = raw
+          .replace(/^查(找|一下)?\s*/u, '')
+          .replace(/^关于\s*/u, '')
+          .replace(/\s*的?视频\s*$/u, '')
+          .trim() || raw
+        try {
+          const r = startQuery({ query, dir: agent?.session?.header?.cwd, source: 'command' })
+          return {
+            kind: 'success',
+            text: `已召唤子模型去刷「${query}」\n报告：${r.report}\n日志：${r.log}\n（后台跑；只检索，不会发评论/私信）`,
+          }
+        } catch (e) {
+          return { kind: 'error', text: String(e?.message ?? e) }
+        }
+      },
+    }), 'bili-duty: /bilibili-skills 命令')
   }
 
   /**
@@ -806,29 +1184,11 @@ export function apply(ctx, config) {
   const runDuty = (why = 'window') => {
    try {
     refreshCfg()          // ⭐ 设置页刚改过的值要立刻生效（config 是就地改的，快照会过期）
-    const dsh = resolveDsh()
-    const overlay = ensureOverlay()
-    const args = [...dsh.args, '--profile', cfg.headlessProfile || 'headless']
-    if (overlay) args.push('--patch', overlay)
-    args.push(promptFor())
-    // ⭐ 这一轮的工作目录 = 使用者（或别的用户）的**工作区** —— 只有这样它的 `AGENTS.md` 才会自动加载。
-    // ⭐ 工作目录 = **插件家**：那一轮**被沙箱关着**，只写得了自己工作目录里的东西 ✗
+    // ⭐ 这一轮的工作目录 = **插件家**：那一轮**被沙箱关着**，只写得了自己工作目录里的东西 ✗
     //    （2026-10-14 教训：为了让它读工作区里的 AGENTS.md 把 cwd 改成工作区 ⇒
     //      它写不了家目录里的 out/ 报告、整轮卡在"我是被沙箱关着的"上面打转 ✗；
     //      现在改成"设定由插件读进来、内联进提示词" ✓，cwd 回到插件家 ✓）
     const cwd = stateDir
-    log(`刷B站开跑（${why}）：${dsh.command} ${args.slice(0, 3).join(' ')} …  cwd=${cwd}`)
-    const child = spawn(dsh.command, args, {
-      cwd,
-      shell: dsh.shell,
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      // ⭐ PYTHONUTF8 / PYTHONIOENCODING：Windows 上 Python 默认按 GBK 编解码，
-      //    中文 / emoji 打进管道会炸（用户反馈过 UnicodeDecodeError），一律按 UTF-8 来
-      // ⭐ ELECTRON_RUN_AS_NODE：**桌面版（Electron）里 spawn 出去的 node 必须带这个**，
-      //    否则它当成"再开一个 Electron 应用"、什么都不干就以 0 退出（issue #5：0.17 秒、code 0、什么都没做）
-      env: pyEnv({ BILI_DUTY_HOME: stateDir, ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}) }),
-    })
     // ⚠️ 2026-10-16 issue #1（用户 `miaoxingyunduo` 贴了崩溃日志）：`duty.log` 被别的进程占着时
     //    (`EBUSY`) `appendFileSync` 会抛异常 —— 而这里是 **stream 的 data 回调**，没人接
     //    ⇒ **未捕获异常 ⇒ 整个 DSH 宿主被杀**（所有会话一起没）。跟 10-14 定时器那次是同一类 ✗
@@ -836,8 +1196,15 @@ export function apply(ctx, config) {
     const pick = (buf) => {
       try { appendFileSync(logFile, String(buf), 'utf8') } catch { /* 写不进去就丢，绝不能抛 */ }
     }
-    child.stdout?.on('data', pick)
-    child.stderr?.on('data', pick)
+    // 🔴 2026-10-18（真机事故）：提示词**改走 stdin**（理由见 spawnHeadless 的注释）——
+    //    以前把多行提示词塞进 argv，一旦 shell 退化成 true 就被 `/bin/sh` 当脚本执行 ✗
+    const { child, dsh, args } = spawnHeadless({
+      prompt: promptFor(),
+      overlay: ensureOverlay(),
+      cwd,
+      onOutput: pick,
+    })
+    log(`刷B站开跑（${why}）：${dsh.command} ${args.slice(0, 3).join(' ')} …  cwd=${cwd}`)
     child.on('exit', (code) => {
       log(`刷B站结束（${why}，code=${code}）`)
       stubReportIfMissing(code)   // ⭐ 没写报告就补一份占位 —— 别让使用者什么都看不到
@@ -1214,7 +1581,7 @@ export function apply(ctx, config) {
       const patch = {}
       for (const k of ['perDay', 'peakValley', 'noon', 'night', 'autoComment', 'transcribe', 'asrModel',
         'commentPerRound', 'mentionName', 'dmMode', 'dmUid',
-        'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound']) {
+        'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound', 'aiTool']) {
         if (k in body) patch[k] = body[k]
       }
       // ⭐ 范围钳制 + 两份都写（config.json / DSH 原生设置页），统一走 persistCfg —— 见文件上方
@@ -1238,6 +1605,22 @@ export function apply(ctx, config) {
     // 装"本地转写"那套（独立环境：faster-whisper + yt-dlp + Whisper 模型）
     if (req.method === 'POST' && path === '/api/bili-duty/install-asr') {
       return sendJson(res, 200, runAsrInstall())
+    }
+
+    // ⭐ 「专题检索历史」：设置页列出来跑过的专题 —— 点一条直接读报告正文，不用再去文件夹里翻
+    if (req.method === 'GET' && path === '/api/bili-duty/queries') {
+      return sendJson(res, 200, { ok: true, items: allQueries(), home: stateDir })
+    }
+
+    if (req.method === 'GET' && path === '/api/bili-duty/query') {
+      const id = String(url.searchParams.get('id') || '')
+      const item = allQueries().find((x) => x.id === id)
+      if (!item) return sendJson(res, 404, { ok: false, error: '没有这条记录（可能超过 100 条，被新的挤掉了）' })
+      let text = ''
+      let logTail = ''
+      try { text = readFileSync(item.report, 'utf8').slice(0, 200000) } catch { /* 报告被删了就只给路径 */ }
+      try { logTail = readFileSync(item.log, 'utf8').slice(-4000) } catch { /* 日志被删了同理 */ }
+      return sendJson(res, 200, { ok: true, item, text, logTail })
     }
 
     // ⭐ 「复核评论」：拿判重表里最近的记录，去 B站 核一遍到底公开可见没有

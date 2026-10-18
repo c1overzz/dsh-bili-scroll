@@ -154,6 +154,12 @@ window.__ModuleLoader__.load({
       const [login, setLogin] = React.useState(null)
       const [runNote, setRunNote] = React.useState(null)
       const [report, setReport] = React.useState(null)        // 非 null = 报告已展开   // 顶部那行状态（跑一轮/装依赖的反馈原来在最底下，看不见）
+      // ⭐ 专题检索历史（/bilibili-skills 跑过的那些）：null = 还没拉过；[] = 拉过、空的
+      const [hist, setHist] = React.useState(null)
+      const [histOpen, setHistOpen] = React.useState('')      // 当前展开的那条 id
+      const [histText, setHistText] = React.useState('')
+      const [histQ, setHistQ] = React.useState('')            // 关键词筛选（按专题）
+      const [histOnly, setHistOnly] = React.useState('all')   // 状态筛选：all / ok / error / running
       const [loginState, setLoginState] = React.useState('')
       const [loginTone, setLoginTone] = React.useState('')
       /* ⚠️ 扫码轮询的 timer 必须能停：切走设置页后还在跑的话会在已卸载的组件上 setState，
@@ -180,6 +186,13 @@ window.__ModuleLoader__.load({
 
       const win = { ...DEFAULT_WINDOWS, ...(st?.windows || {}) }
 
+      // ⭐ 历史要能筛：按专题关键词 + 状态（不然跑几十轮后就是一锅粥）
+      const histShown = (hist || []).filter((it) => {
+        if (histOnly !== 'all' && it.status !== histOnly) return false
+        const q = histQ.trim().toLowerCase()
+        return !q || String(it.query || '').toLowerCase().includes(q)
+      })
+
       const say = (text, tone) => {
         setMsg(text); setMsgTone(tone || '')
         setRunNote(text ? { t: text, tone: tone || '' } : null)   // ⭐ 同时镜像到顶部，免得提示掉到页面最底下看不见
@@ -204,6 +217,28 @@ window.__ModuleLoader__.load({
           const r = await jget('/report')
           setReport(r && r.exists ? (r.text || '（报告是空的）') : '今天还没有报告 —— 跑一轮之后就有了')
         } catch (e) { setReport('读不到报告：' + String(e?.message ?? e)) } finally { setBusy('') }
+      }
+
+      /* ⭐ 专题检索历史：列表按时间倒序，点一条直接读报告正文（浏览器开不了本地文件，只能让宿主读） */
+      const when = (t) => {
+        try { return new Date(t).toLocaleString('zh-CN', { hour12: false }) } catch { return '' }
+      }
+      const loadHist = async () => {
+        setBusy('hist')
+        try {
+          const r = await jget('/queries')
+          if (Array.isArray(r?.items)) setHist(r.items)
+          else { setHist([]); say('历史读不出来：' + ((r && r.error) || '宿主没回 items'), 'warn') }
+        } catch (e) { say('历史读不出来：' + String(e?.message ?? e), 'warn') } finally { setBusy('') }
+      }
+      React.useEffect(() => { loadHist() }, [])   // 打开设置页就顺手拉一次
+      const onOpenHist = async (it) => {
+        if (histOpen === it.id) { setHistOpen(''); setHistText(''); return }
+        setHistOpen(it.id); setHistText('读取中…')
+        try {
+          const r = await jget('/query?id=' + encodeURIComponent(it.id))
+          setHistText(r && r.ok ? (r.text || '（报告是空的）') : String((r && r.error) || '读不到'))
+        } catch (e) { setHistText('读不到：' + String(e?.message ?? e)) }
       }
 
       // ⭐ 复核评论：接口回"发送成功"≠ 公开可见（新号/风控会进审核，那时候连 @ 都不会推）
@@ -482,6 +517,60 @@ window.__ModuleLoader__.load({
             st.asrTail ? h('div', null,
               h('div', { 'data-bd-note': '' }, st.asrInstalling ? '正在装转写依赖（进度）：' : '转写依赖的日志（末尾）—— 只有「没字幕的视频」用得到它：'),
               h('pre', { 'data-bd-pre': '' }, st.asrTail)) : null) : null),
+
+        /* ── 给 AI 的接口 ── */
+        h('div', { 'data-bd-sec': '' },
+          h('div', { 'data-bd-h': '' }, '给 AI 的接口'),
+          h(ToggleRow, {
+            label: '对模型开放 bilibili_skills',
+            note: '开了之后模型可以按任意主题召唤子模型刷一轮（只检索、不发评论）；人也可以直接用 /bilibili-skills 查找关于XX的视频。'
+              + '关掉立即生效；重新打开要重启一次 dsh（工具目录在启动时组装）',
+            on: sw('aiTool'),
+            onChange: (v) => patch({ aiTool: v }, '对模型开放接口'),
+          }),
+          h('div', { 'data-bd-note': '' },
+            '日志和报告会写到「当前工作目录/bilibili/」；人设仍然按上面填的工作区里的 AGENTS.md。'),
+          h('div', { 'data-bd-label': '' }, '专题检索历史'),
+          h('div', { 'data-bd-note': '' },
+            '这条路上跑过的每一轮都记在这里：谁起的（命令 / 模型）、成功还是失败、报告在哪儿。'
+              + '点「▸ 专题名」直接把报告正文读出来看，不用再去文件夹里翻；要文件本身再点展开后的「复制报告路径」。'),
+          h('div', { 'data-bd-row': '' },
+            h('button', { 'data-bd-btn': '', disabled: busy === 'hist', onClick: loadHist },
+              hist === null ? '载入历史' : '刷新历史'),
+            h('input', {
+              'data-bd-input': '', placeholder: '筛选：专题关键词', style: { maxWidth: '220px' },
+              value: histQ, onChange: (e) => setHistQ(e.target.value),
+            }),
+            h('select', {
+              'data-bd-input': '', value: histOnly, style: { maxWidth: '120px' },
+              onChange: (e) => setHistOnly(e.target.value),
+            },
+              h('option', { value: 'all' }, '全部'),
+              h('option', { value: 'ok' }, '只看完成'),
+              h('option', { value: 'error' }, '只看失败'),
+              h('option', { value: 'running' }, '只看在跑')),
+            h('div', { 'data-bd-note': '' },
+              hist === null ? '还没拉过'
+                : `共 ${hist.length} 条，筛出 ${histShown.length} 条（只留最近 100 条）`)),
+          hist && hist.length && histShown.length === 0
+            ? h('div', { 'data-bd-note': '' }, '没有符合筛选条件的记录 —— 把关键词清空、状态切成「全部」再试试。')
+            : null,
+          hist && histShown.length ? h('div', null,
+            histShown.slice(0, 30).map((it) => h('div', { key: it.id },
+              h('div', { 'data-bd-row': '' },
+                h('button', { 'data-bd-btn': '', disabled: busy === 'hist', onClick: () => onOpenHist(it) },
+                  (histOpen === it.id ? '▾ ' : '▸ ') + it.query),
+                h('div', { 'data-bd-note': '' },
+                  `${when(it.ts)} · ${it.source === 'command' ? '命令' : it.source === 'file' ? '早先跑的（没台账）' : '模型'} · `
+                    + (it.status === 'ok' ? '完成' : it.status === 'running' ? '在跑' : `失败${it.exit === -1 ? '（起不来）' : '（code ' + it.exit + '）'}`)
+                    + (it.status === 'ok' ? ` · 挑中 ${it.picked ?? '?'} 条` : '')
+                    + (it.reportExists === false ? ' · ⚠️ 报告文件不在了' : ''))),
+              histOpen === it.id ? h('pre', { 'data-bd-pre': '' }, histText) : null,
+              histOpen === it.id ? h('div', { 'data-bd-row': '' },
+                h('button', { 'data-bd-btn': '', onClick: () => copyText(it.report) }, '复制报告路径'),
+                h('button', { 'data-bd-btn': '', onClick: () => copyText(it.log) }, '复制日志路径'),
+                h('button', { 'data-bd-btn': '', onClick: () => copyText(it.dir) }, '复制目录')) : null,
+            ))) : null),
 
         /* ── 关注什么 / 在哪儿刷 ── */
         h('div', { 'data-bd-sec': '' },
