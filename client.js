@@ -205,6 +205,16 @@ window.__ModuleLoader__.load({
         finally { setBusy('') }
       }
 
+      /* ⭐ 改谷时窗口的起止时间：两份窗口整份传（服务端只认整份 windows），填坏了还原 */
+      const onWinTime = (k, which, e) => {
+        const v = String(e.target.value || '').trim()
+        if (!/^\d{1,2}:\d{2}$/.test(v)) { e.target.value = win[k][which]; return }
+        const next = {}
+        for (const kk of ['noon', 'night']) next[kk] = { start: win[kk].start, end: win[kk].end }
+        next[k][which] = v
+        patch({ windows: next }, '时段')
+      }
+
       const onShowReport = async () => {
         if (report !== null) { setReport(null); return }       // 再点一次收起
         setBusy('report')
@@ -415,18 +425,32 @@ window.__ModuleLoader__.load({
           h('div', { 'data-bd-h': '' }, '什么时候自己跑'),
           h(ToggleRow, {
             label: '峰谷时段自动刷',
-            note: '只在谷时跑 —— 工作日 12:00–14:00 与 18:00 之后（整个周末也算谷时）；关了就只能手动跑',
+            note: '只在谷时跑 —— 默认工作日 12:00–14:00 与 18:00–09:00（整个周末也算谷时）；关了就只能手动跑',
             on: sw('peakValley'),
             onChange: (v) => patch({ peakValley: v }, '峰谷时段自动刷'),
           }),
           sw('peakValley') ? h('div', { 'data-bd-sub': '' },
-            ...['noon', 'night'].map((k) => h(ToggleRow, {
-              key: k,
-              label: win[k].label,
-              note: `${win[k].start} – ${win[k].end}`,
-              on: sw(k),
-              onChange: (v) => patch({ [k]: v }, win[k].label),
-            }))) : null),
+            ...['noon', 'night'].map((k) => h('div', { key: k },
+              h(ToggleRow, {
+                label: win[k].label,
+                note: `${win[k].start} – ${win[k].end}（可以改）`,
+                on: sw(k),
+                onChange: (v) => patch({ [k]: v }, win[k].label),
+              }),
+              // ⭐ 起止时间就地改：只认 HH:MM，填坏了还原
+              h('div', { 'data-bd-row': '', style: { paddingLeft: '12px' } },
+                h('span', { 'data-bd-note': '' }, '从'),
+                h('input', {
+                  'data-bd-input': '', style: { flex: '0 0 84px', textAlign: 'center' }, defaultValue: win[k].start,
+                  placeholder: 'HH:MM',
+                  onBlur: (e) => onWinTime(k, 'start', e),
+                }),
+                h('span', { 'data-bd-note': '' }, '到'),
+                h('input', {
+                  'data-bd-input': '', style: { flex: '0 0 84px', textAlign: 'center' }, defaultValue: win[k].end,
+                  placeholder: 'HH:MM',
+                  onBlur: (e) => onWinTime(k, 'end', e),
+                }))))) : null),
 
         /* ── 一轮挑几条 ── */
         h('div', { 'data-bd-sec': '' },
