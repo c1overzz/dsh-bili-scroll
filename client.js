@@ -151,6 +151,9 @@ window.__ModuleLoader__.load({
       const [dmUid, setDmUid] = React.useState(null)        // 私信收件人 UID（本地草稿）
       const [dmMode, setDmMode] = React.useState(null)      // 投递方式：off / only / both
       const [mention, setMention] = React.useState(null)
+      const [mprov, setMprov] = React.useState(null)      // 值班轮模型：provider（本地草稿）
+      const [mmodel, setMmodel] = React.useState(null)    // 值班轮模型：model（本地草稿）
+      const [models, setModels] = React.useState(null)    // GET /models 的结果（provider 清单 + 读取时间）
       const [login, setLogin] = React.useState(null)
       const [runNote, setRunNote] = React.useState(null)
       const [report, setReport] = React.useState(null)        // 非 null = 报告已展开   // 顶部那行状态（跑一轮/装依赖的反馈原来在最底下，看不见）
@@ -176,7 +179,18 @@ window.__ModuleLoader__.load({
         if (cfg && mention === null) setMention(cfg.mentionName || '')
         if (cfg && dmUid === null) setDmUid(cfg.dmUid ? String(cfg.dmUid) : '')
         if (cfg && dmMode === null) setDmMode(cfg.dmMode || 'off')
+        if (cfg && mprov === null) setMprov(cfg.modelProvider || '')
+        if (cfg && mmodel === null) setMmodel(cfg.model || '')
       }, [cfg])
+
+      // 值班轮模型清单：进页面拉一次（缓存优先）；「刷新」按钮强制重读 dump-config
+      const loadModels = async (force) => {
+        try {
+          const r = await jget('/models' + (force ? '?refresh=1' : ''))
+          if (r?.ok) setModels(r)
+        } catch { /* 网络抖动就下次再问 */ }
+      }
+      React.useEffect(() => { loadModels(false) }, [])
 
       const win = { ...DEFAULT_WINDOWS, ...(st?.windows || {}) }
 
@@ -406,6 +420,56 @@ window.__ModuleLoader__.load({
               onBlur: () => { const n = Math.max(0, Math.min(Number(perDay) || 0, 50)); setPerDay(String(n)); patch({ perDay: n }, '每天挑几条') },
             })),
           st.lastRunAt ? h('div', { 'data-bd-note': '' }, `上次跑：${new Date(st.lastRunAt).toLocaleString('zh-CN')}`) : null),
+
+        /* ── 值班轮用哪个模型 ── */
+        h('div', { 'data-bd-sec': '' },
+          h('div', { 'data-bd-h': '' }, '值班轮用哪个模型'),
+          h('div', { 'data-bd-label': '' }, '从哪个渠道拿（provider）'),
+          h('select', {
+            'data-bd-input': '',
+            value: mprov ?? '',
+            onChange: (e) => {
+              const v = e.target.value
+              setMprov(v)
+              if (!v) { setMmodel(''); patch({ modelProvider: '', model: '' }, '值班轮模型：恢复默认') }
+              else {
+                const defs = (models?.providers || []).find((p) => p.id === v)
+                const first = defs?.models?.[0]?.id || ''
+                setMmodel(first)
+                patch({ modelProvider: v, model: first }, '值班轮模型')
+              }
+            },
+          },
+            h('option', { value: '' }, '不覆盖 —— 用 headless profile 的默认'),
+            (models?.providers || []).map((p) => h('option', { key: p.id, value: p.id }, `${p.displayName || p.id} · ${p.id}`)),
+            (mprov && !(models?.providers || []).some((p) => p.id === mprov)) ? h('option', { key: '__cached', value: mprov }, `${mprov}（缓存里存的，列表里没有）`) : null),
+          mprov ? h('div', { 'data-bd-label': '' }, '用哪个模型') : null,
+          mprov ? ((models?.providers || []).some((p) => p.id === mprov)
+            ? h('select', {
+                'data-bd-input': '',
+                value: mmodel ?? '',
+                onChange: (e) => { setMmodel(e.target.value); patch({ model: e.target.value }, '值班轮模型') },
+              },
+                (models.providers.find((p) => p.id === mprov)?.models || []).map((m2) => h('option', { key: m2.id, value: m2.id }, m2.name === m2.id ? m2.id : `${m2.name} · ${m2.id}`)))
+            : h('input', {
+                'data-bd-input': '',
+                value: mmodel ?? '',
+                placeholder: '填模型 id（缓存里没有这个 provider 的模型清单，手动填）',
+                onChange: (e) => setMmodel(e.target.value),
+                onBlur: () => { const v = String(mmodel || '').trim(); setMmodel(v); patch({ model: v }, '值班轮模型') },
+              })) : null,
+          h('div', { 'data-bd-row': '' },
+            h('div', { 'data-bd-grow': '' },
+              h('div', { 'data-bd-note': '' },
+                '留空 = 值班轮用 headless profile 自己的默认（不改任何东西）；',
+                h('br'),
+                '选了之后，插件会把 provider 定义连同默认模型写进值班 overlay（headless 看不见 web 侧的模型配置，所以必须带上定义）。',
+                models?.at ? ` 列表读于 ${new Date(models.at).toLocaleTimeString('zh-CN')}。` : ' 还没读到模型清单 —— 点右边「刷新模型列表」。')),
+            h('button', {
+              'data-bd-btn': '',
+              disabled: busy === 'models',
+              onClick: async () => { setBusy('models'); await loadModels(true); setBusy('') },
+            }, '刷新模型列表'))),
 
         /* ── 发言与转写 ── */
         h('div', { 'data-bd-sec': '' },
