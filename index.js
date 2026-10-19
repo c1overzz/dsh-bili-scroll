@@ -98,6 +98,8 @@ export const Config = !z ? undefined : z.object({
   /** ⭐ 谷时窗口覆盖（可选）：只改 start/end，label 沿用 lib/state.mjs 默认；空 = 12:00–14:00 / 18:00–09:00
    *  ⚠️ 用 z.any()：schemastery 的对象没有 .optional()，形状由 clampPatch 兜（写/读两头都钳） */
   windows: z.any().default({}).extra('volatile', true),
+  /** ⭐ 当前用哪份人格卡（personas/<名字>.md）；空 = 不用人格，按中性说话 */
+  personaName: z.string().default('').extra('volatile', true),
 })
 
 /**
@@ -196,6 +198,52 @@ export const dmListOf = (cfg = {}) => {
   return [...new Set(list)].slice(0, 10)
 }
 
+/* ─── 功能⑤：人格卡（把 md 内容粘进来，存成文件；按名字选一份）──────────────── */
+
+/** 人格名字 → 安全的文件名：去掉路径分隔符 / 控制字符 / 开头的点；空名字返回 '' */
+export const personaFileName = (name) => String(name ?? '')
+  .trim()
+  .replace(/[\\/:*?"<>|\u0000-\u001b]/g, '')
+  .replace(/^\.+/, '')
+  .slice(0, 40)
+  .trim()
+
+/** 人格目录：<家目录>/personas/*.md（跟 config.json 分开放，用户可以直接翻/备份） */
+export const personaDirOf = (stateDir) => join(String(stateDir || ''), 'personas')
+
+/** 列出人格（纯函数，给 selfcheck 断言）：只认 *.md，按名字排 */
+export const listPersonas = (stateDir) => {
+  const dir = personaDirOf(stateDir)
+  try {
+    if (!existsSync(dir)) return []
+    return readdirSync(dir)
+      .filter((f) => /\.md$/i.test(f) && !/^\./.test(f))
+      .map((f) => {
+        let chars = 0
+        try { chars = readFileSync(join(dir, f), 'utf8').length } catch { /* 读不到就当 0 */ }
+        return { name: f.replace(/\.md$/i, ''), chars }
+      })
+      .sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'))
+  } catch { return [] }
+}
+
+/** 读一份人格；没有就返回 ''（纯函数，给 selfcheck 断言） */
+export const readPersona = (stateDir, name) => {
+  const f = personaFileName(name)
+  if (!f) return ''
+  try {
+    const p = join(personaDirOf(stateDir), f + '.md')
+    return existsSync(p) ? readFileSync(p, 'utf8') : ''
+  } catch { return '' }
+}
+
+/** 覆盖已有的人格时拦一下：新的比旧的短一大截（< 60%）⇒ 要用户再点一次确认 */
+export const personaShrink = (oldText, newText) => {
+  const o = String(oldText ?? '').length
+  const n = String(newText ?? '').length
+  return o >= 200 && n < Math.floor(o * 0.6)
+}
+
 export function apply(ctx, config) {
   const pluginDir = dirname(fileURLToPath(import.meta.url))
   // ⭐ 自己的版本号（从 package.json 读，设置页要显示它）
@@ -290,7 +338,7 @@ export function apply(ctx, config) {
   const DEFAULTS = {
     perDay: 5, everyDays: 1, peakValley: false, noon: true, night: true, autoComment: false, autoDm: false, transcribe: false, asrModel: 'small',
     dmMode: '', dmUid: 0, dmUids: [],
-    keywords: [], commentPerRound: 1, mentionName: '', mentionNames: [], pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, replyKeywords: [], windows: {},
+    keywords: [], commentPerRound: 1, mentionName: '', mentionNames: [], pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, replyKeywords: [], windows: {}, personaName: '',
   }
   const normalize = (src, base) => {
     const out = { ...base }
@@ -338,6 +386,8 @@ export function apply(ctx, config) {
       .map((s) => String(s ?? '').trim()).filter(Boolean))].slice(0, 20)
     // ⭐ 谷时窗口：只认 HH:MM；不合法的那一档直接丢（宁可回默认，也别让定时器按坏时间跑）
     if ('windows' in p) p.windows = normWindows(p.windows)
+    // ⭐ 人格名：只存清洗过的名字（空 = 不用人格）；文件本身由 /personas 接口写
+    if ('personaName' in p) p.personaName = personaFileName(p.personaName)
     return p
   }
 
@@ -967,12 +1017,22 @@ export function apply(ctx, config) {
     const commentsOn = Boolean(cfg.autoComment && mentions.length)
     const dmTargets = dmListOf(cfg)       // 私信发给谁：dmUids 优先，dmUid 兜底
     const dmOn = Boolean(cfg.autoDm && dmTargets.length)
+    // ⭐ 人格卡（2026-10-19 加）：用户把 md 内容粘进设置页，存成 <家目录>/personas/<名字>.md
+    //    这里把正文原样喂进去 —— 它比工作区的 AGENTS.md 更贴身（AGENTS.md 是"规矩"，人格卡是"说话方式"）
+    const personaName = String(cfg.personaName || '').trim()
+    const personaText = personaName ? readPersona(stateDir, personaName) : ''
+    const personaBlock = personaText
+      ? '\n\n===== 使用者的人格卡「' + personaName + '」（他的说话方式与口味 —— **按这个说**，优先于下面其余设定）=====\n'
+        + personaText.slice(0, 8000)
+        + '\n===== 人格卡结束 =====\n'
+      : ''
     return `你是这个账号的 B站 助手。`
       + `下面是使用者的设定（如果有）—— **按它来**，别用你默认那套人格。`
       + ownerDoc
       + (ownerDoc
         ? ''
         : '⭐ 这一轮**没有**拿到使用者的设定（他没填「工作区」，或那个目录里没有 `AGENTS.md`）⇒ **按中性说话**：别扮演任何人、也别自己编一套设定 ✓。')
+      + personaBlock
       + (charterText
           ? '下面是**值班章程**（里面的「<家目录>」已经替换成真实绝对路径了）—— 严格按它执行：\n\n'
             + charterText + '\n\n按上面的章程刷一轮 B站，'
@@ -1593,6 +1653,7 @@ export function apply(ctx, config) {
       home: stateDir,
       config: cfg,
       windows: effWindows(),
+      personas: listPersonas(stateDir),
       today,
       ranToday: st.day === today ? Number(st.count || 0) : 0,   // 今天跑了几轮
       pickedToday: countPickedToday(),                          // 今天挑到几条（从报告里数）
@@ -1632,13 +1693,61 @@ export function apply(ctx, config) {
       return sendJson(res, 200, { ok: true, config: cfg, windows: effWindows(), home: stateDir })
     }
 
+    /* ── 人格卡：列 / 读 / 存 / 删（粘贴保存，不走"填文件路径"那套）── */
+    if (req.method === 'GET' && path === '/api/bili-duty/personas') {
+      return sendJson(res, 200, {
+        ok: true,
+        dir: personaDirOf(stateDir),
+        current: String(cfg.personaName || ''),
+        list: listPersonas(stateDir),
+        text: readPersona(stateDir, cfg.personaName),
+      })
+    }
+
+    if (req.method === 'POST' && path === '/api/bili-duty/personas') {
+      const body = await readBody(req)
+      const name = personaFileName(body?.name)
+      const text = String(body?.text ?? '')
+      if (!name) return sendJson(res, 400, { ok: false, error: '先给这份人格起个名字（比如 本鱼），再点保存' })
+      if (!text.trim()) return sendJson(res, 400, { ok: false, error: '人格内容是空的' })
+      const old = readPersona(stateDir, name)
+      // ⭐ 覆盖时拦一道：新内容比旧的短一大截 ⇒ 先问一句再写（「手滑全选删掉」是真实事故）
+      // ⚠️ 用 200 回（不是 409）：设置页的 asJson 遇非 2xx 直接抛错，用户就看不到「再点一次确认」这句了
+      if (!body?.confirm && personaShrink(old, text)) {
+        return sendJson(res, 200, {
+          ok: false, needConfirm: true,
+          error: `这份比原来短太多（${old.length} → ${text.length} 字）。确认要覆盖就再点一次「保存」`,
+        })
+      }
+      const dir = personaDirOf(stateDir)
+      mkdirSync(dir, { recursive: true })
+      const file = join(dir, name + '.md')
+      // 旧版本留一份 .bak（跟 config.json 一个规矩：别让改坏就找不回来）
+      if (old) { try { writeFileSync(file + '.bak', old, 'utf8') } catch { /* 留不住就算了 */ } }
+      writeFileSync(file, text, 'utf8')
+      await persistCfg({ personaName: name })
+      log(`人格已保存：${name}（${text.length} 字）`)
+      return sendJson(res, 200, { ok: true, current: name, list: listPersonas(stateDir) })
+    }
+
+    if (req.method === 'DELETE' && path === '/api/bili-duty/personas') {
+      const body = await readBody(req)
+      const name = personaFileName(body?.name)
+      if (!name) return sendJson(res, 400, { ok: false, error: '要删哪一份？没给名字' })
+      const file = join(personaDirOf(stateDir), name + '.md')
+      try { if (existsSync(file)) rmSync(file) } catch (e) { return sendJson(res, 200, { ok: false, error: String(e?.message ?? e) }) }
+      if (String(cfg.personaName || '') === name) await persistCfg({ personaName: '' })
+      log(`人格已删除：${name}`)
+      return sendJson(res, 200, { ok: true, current: String(cfg.personaName === name ? '' : cfg.personaName || ''), list: listPersonas(stateDir) })
+    }
+
     if (req.method === 'POST' && path === '/api/bili-duty/config') {
       const body = await readBody(req)
       const patch = {}
       for (const k of ['perDay', 'everyDays', 'peakValley', 'noon', 'night', 'autoComment', 'transcribe', 'asrModel',
         'commentPerRound', 'mentionName', 'mentionNames', 'autoDm', 'dmMode', 'dmUid', 'dmUids',
         'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound',
-        'replyKeywords', 'windows']) {
+        'replyKeywords', 'windows', 'personaName']) {
         if (k in body) patch[k] = body[k]
       }
       // ⭐ 范围钳制 + 两份都写（config.json / DSH 原生设置页），统一走 persistCfg —— 见文件上方
