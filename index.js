@@ -111,6 +111,8 @@ export const Config = !z ? undefined : z.object({
   commentPerRound: z.natural().default(1).extra('volatile', true),
   /** ⭐ 要 @ 谁（B站 昵称）；**留空 = 不发评论** —— 评论存在的意义就是 @ 那一下 */
   mentionName: z.string().default('').extra('volatile', true),
+  /** ⭐ 要 @ 谁的名单（可以有多个）：非空就以它为准，`mentionName` 只当老配置的兜底 */
+  mentionNames: z.array(z.string()).default([]).extra('volatile', true),
   /** 关注关键词（空了用章程里默认那几组） */
   keywords: z.array(z.string()).default([]).extra('volatile', true),
   /** Python：指向 venv 里的那个最好 */
@@ -154,6 +156,21 @@ export const mcpToolList = ({ autoComment, replyToComments, dmMode, dmUid } = {}
   //    表现成"私信功能装了、开关也开了，但从来没发出去过"（issue #25 / #16 的实证）
   if (String(dmMode || 'off') !== 'off' && Number(dmUid) > 0) list.push('bili_send_message')
   return list
+}
+
+/* ─── 功能①：评论里可以 @ 多个人 ────────────────────────────────────────────── */
+
+/**
+ * 要 @ 谁的名单（纯函数，给 selfcheck 断言）：
+ *   新键 `mentionNames` 非空就以它为准；否则退回老键 `mentionName` —— 老配置零回归 ✓
+ *   去空、去重、最多 10 个（评论正文有 150 字上限，名单再长也 @ 不下）
+ */
+export const mentionListOf = (cfg = {}) => {
+  const many = Array.isArray(cfg.mentionNames) ? cfg.mentionNames : []
+  const list = (many.length ? many : [cfg.mentionName])
+    .map((s) => String(s ?? '').trim())
+    .filter(Boolean)
+  return [...new Set(list)].slice(0, 10)
 }
 
 export function apply(ctx, config) {
@@ -258,7 +275,7 @@ export function apply(ctx, config) {
   const DEFAULTS = {
     perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
     dmMode: 'off', dmUid: 0,
-    keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1,
+    keywords: [], commentPerRound: 1, mentionName: '', mentionNames: [], pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1,
   }
   const normalize = (src, base) => {
     const out = { ...base }
@@ -292,6 +309,9 @@ export function apply(ctx, config) {
     if ('replyToComments' in p) p.replyToComments = Boolean(p.replyToComments)
     if ('replyPerRound' in p) p.replyPerRound = Math.max(1, Math.min(Number(p.replyPerRound) || 1, 10))
     if ('commentPerRound' in p) p.commentPerRound = Math.max(0, Math.min(Number(p.commentPerRound) || 0, 20))
+    // ⭐ 名单类：去空、去重、截断（评论 @ 多个人时正文放不下；私信收件人 10 个也够了）
+    if ('mentionNames' in p) p.mentionNames = [...new Set((Array.isArray(p.mentionNames) ? p.mentionNames : [])
+      .map((s) => String(s ?? '').trim()).filter(Boolean))].slice(0, 10)
     return p
   }
 
@@ -578,14 +598,14 @@ export function apply(ctx, config) {
     },
     async execute(args) {
       // dmMode==='only' 时本轮根本不该发公开评论 —— 在工具层也一并挡掉（除非当场 force）
-      const commentOn = Boolean(cfg.autoComment && cfg.mentionName && cfg.dmMode !== 'only')
+      const commentOn = Boolean(cfg.autoComment && mentionListOf(cfg).length && cfg.dmMode !== 'only')
       if (!commentOn && !args.force) {
         return {
           ok: false,
           blocked: true,
           hint: cfg.dmMode === 'only'
             ? '现在是「只私信」模式（dmMode=only）—— 规定不发公开评论，改成用 bili_send_message 私信。确实要发时传 force: true。'
-            : '要发评论得同时满足两条：设置里开着「自动评论并 @ 你」、并且填了「要 @ 谁」。或者本人当场让你发时传 force: true。',
+            : '要发评论得同时满足两条：设置里开着「自动评论并 @ 你」、并且「要 @ 谁」名单里至少有一个名字。或者本人当场让你发时传 force: true。',
         }
       }
       return call('bili_reply', {
@@ -907,7 +927,8 @@ export function apply(ctx, config) {
     const left = Math.max(0, quota - already)
     // ⭐ 投递方式（2026-10-17 加）：dmMode = off（只评论）· only（只私信）· both（都发）
     //    commentOn 是"这一轮到底能不能发公开评论"的唯一判据（工具层的闸用的是同一套逻辑）
-    const commentOn = Boolean(cfg.autoComment && cfg.mentionName && cfg.dmMode !== 'only')
+    const mentions = mentionListOf(cfg)   // 要 @ 谁：mentionNames 优先，mentionName 兜底
+    const commentOn = Boolean(cfg.autoComment && mentions.length && cfg.dmMode !== 'only')
     const dmOn = Boolean(cfg.dmMode !== 'off' && Number(cfg.dmUid) > 0)
     return `你是这个账号的 B站 助手。`
       + `下面是使用者的设定（如果有）—— **按它来**，别用你默认那套人格。`
@@ -938,8 +959,8 @@ export function apply(ctx, config) {
       + `⭐ 另外把这一轮**看过的每一条视频（挑中的和跳过的都算）**追加进归档：${join(digestDir, `${dayKey().slice(0, 7)}.md`)}`
       + ` —— 一行一条：日期 · BV 号 · 标题 · UP · 一句话结论 · 链接（跳过的那条在后面注明理由）；`
       + `这是**给以后检索用**的（报告是给人看的，归档是给"回头翻"用的），别省略、也别只写挑中的。`
-      + `自动评论并 @ ${cfg.mentionName || '（还没填要 @ 谁）'} 是${commentOn
-        ? `开着的（每轮最多 ${cfg.commentPerRound} 条评论，每条在正文里纯文本 @ ${cfg.mentionName}，150 字内）`
+      + `自动评论并 @ ${mentions.length ? mentions.join('、') : '（还没填要 @ 谁）'} 是${commentOn
+        ? `开着的（每轮最多 ${cfg.commentPerRound} 条评论，每条在正文里纯文本只 @ 名单里的**一个人**，按 ${mentions.join(' → ')} 轮流，别一条里 @ 一串，150 字内）`
         : (cfg.dmMode === 'only'
           ? '关着的 —— 当前是「**只私信**」模式：**这一轮一条公开评论都不许发**，改走私信'
           : '关着的（只写报告，别发评论）')}。`
