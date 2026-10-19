@@ -8,7 +8,7 @@
  * 用法：`node --import ./tools/register.mjs selfcheck.mjs`（解析钩子见 tools/host-resolver.mjs）
  * 退出码：0 = 两个半端都正常；1 = 有问题（宿主里就会 "entry did not activate" / 设置页空白）
  */
-import { mkdirSync, readFileSync, rmSync } from 'node:fs'
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -52,6 +52,15 @@ try {
 }
 console.log(`✓ host 半端 OK：name=${mod.name}  inject=${JSON.stringify(mod.inject)}  工具 ${registered.length} 个`)
 for (const n of registered) console.log(`    - ${n}`)
+
+/* ── 修复①：建 venv 必须钉 Python 3.10–3.13（uv 默认拿最新 CPython，3.14+ 没有 wheel）── */
+const venvSpec = await mod.venvPythonSpec(SANDBOX_HOME)
+if (!venvSpec) fail('venvPythonSpec 返回空 —— 建环境时又会退回"最新 CPython"（issue #15）')
+const fakeVenv = join(SANDBOX_HOME, 'fake-venv')
+mkdirSync(fakeVenv, { recursive: true })
+writeFileSync(join(fakeVenv, 'pyvenv.cfg'), 'home = C:\\Python313\r\nversion = 3.13.7\r\n')
+if (mod.pyVerOfVenv(fakeVenv) !== 313) fail('pyVerOfVenv 读不出 pyvenv.cfg 的版本号（重建判据会失效）')
+console.log(`✓ 修复① venv Python spec = ${venvSpec}（pyvenv.cfg 版本识别 OK）`)
 
 /* ────────────── ② client 半端：假 window.__ModuleLoader__ 上真跑 factory() ────────────── */
 
