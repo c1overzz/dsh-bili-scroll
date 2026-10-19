@@ -62,6 +62,12 @@ writeFileSync(join(fakeVenv, 'pyvenv.cfg'), 'home = C:\\Python313\r\nversion = 3
 if (mod.pyVerOfVenv(fakeVenv) !== 313) fail('pyVerOfVenv 读不出 pyvenv.cfg 的版本号（重建判据会失效）')
 console.log(`✓ 修复① venv Python spec = ${venvSpec}（pyvenv.cfg 版本识别 OK）`)
 
+/* ── 修复②：私信模式必须把 bili_send_message 放进白名单（issue #25 / #16）── */
+const dmTools = mod.mcpToolList({ dmMode: 'only', dmUid: 12345 })
+if (!dmTools.includes('bili_send_message')) fail('私信开着却没给 bili_send_message —— 模型手里没有这只工具')
+const offTools = mod.mcpToolList({ dmMode: 'off', dmUid: 12345 })
+if (offTools.includes('bili_send_message')) fail('私信关着也给了 bili_send_message（白名单太松）')
+console.log('✓ 修复② MCP 白名单 OK：' + dmTools.join(' / '))
 /* ────────────── ② client 半端：假 window.__ModuleLoader__ 上真跑 factory() ────────────── */
 
 const pkg = JSON.parse(readFileSync('./package.json', 'utf8'))
