@@ -77,6 +77,13 @@ const arrKeep = mod.mergeCfg({ keywords: ['x'] }, null, { host: { keywords: [] }
 if (JSON.stringify(arrKeep.keywords) !== '["x"]') fail('loadCfg 把 config.json 里的关键词盖成了空数组')
 console.log('✓ 修复② loadCfg 合并规则 OK（config.json 打底 + 用户层覆盖 + pythonPath 特例）')
 
+/* ── 修复③：私信模式必须把 bili_send_message 放进白名单（issue #25 / #16）── */
+const dmTools = mod.mcpToolList({ dmMode: 'only', dmUid: 12345 })
+if (!dmTools.includes('bili_send_message')) fail('私信开着却没给 bili_send_message —— 模型手里没有这只工具')
+const offTools = mod.mcpToolList({ dmMode: 'off', dmUid: 12345 })
+if (offTools.includes('bili_send_message')) fail('私信关着也给了 bili_send_message（白名单太松）')
+console.log('✓ 修复③ MCP 白名单 OK：' + dmTools.join(' / '))
+
 /* ────────────── ② client 半端：假 window.__ModuleLoader__ 上真跑 factory() ────────────── */
 
 const pkg = JSON.parse(readFileSync('./package.json', 'utf8'))
