@@ -245,8 +245,10 @@ window.__ModuleLoader__.load({
         setBusy('report')
         try {
           const r = await jget('/report')
-          setReport(r && r.exists ? (r.text || '（报告是空的）') : '今天还没有报告 —— 跑一轮之后就有了')
-        } catch (e) { setReport('读不到报告：' + String(e?.message ?? e)) } finally { setBusy('') }
+          setReport(r && r.exists
+            ? { text: r.text || '（报告是空的）', summary: r.summary || '', parsed: r.parsed || null }
+            : { text: '今天还没有报告 —— 跑一轮之后就有了', summary: '', parsed: null })
+        } catch (e) { setReport({ text: '读不到报告：' + String(e?.message ?? e), summary: '', parsed: null }) } finally { setBusy('') }
       }
 
       // ⭐ 复核评论：接口回"发送成功"≠ 公开可见（新号/风控会进审核，那时候连 @ 都不会推）
@@ -492,11 +494,13 @@ window.__ModuleLoader__.load({
         /* ── 今天 ── */
         h('div', { 'data-bd-row': '' },
           h('span', { 'data-bd-badge': '' }, `今天已挑 ${st.pickedToday ?? st.ranToday ?? 0} / ${cfg.perDay} 条`),
+          st.running ? h('span', { 'data-bd-badge': '' }, `正在跑 ${Math.max(1, Math.round(Number(st.runningMs || 0) / 60000))} 分钟`) : null,
           h('span', { 'data-bd-badge': '' }, '环境' + (st.venvReady ? '已就绪' : (st.installing ? '正在装' : '未装'))),
           h('span', { 'data-bd-badge': '' }, st.loggedIn ? 'B站已登录' : 'B站未登录'),
             h('span', { 'data-bd-badge': '' }, 'v' + (st.version || '?')),
           h('div', { 'data-bd-grow': '' }),
-          h('button', { 'data-bd-btn': '', disabled: busy === 'run', onClick: onRun }, '现在跑一轮')),
+          h('button', { 'data-bd-btn': '', disabled: busy === 'run' || Boolean(st.running), onClick: onRun },
+            st.running ? '正在跑…' : '现在跑一轮')),
           runNote ? h('div', { 'data-bd-msg': '', 'data-good': runNote.tone === 'good' ? '' : undefined,
             'data-warn': runNote.tone === 'warn' ? '' : undefined }, runNote.t) : null,
 
@@ -564,7 +568,11 @@ window.__ModuleLoader__.load({
               onChange: (e) => setEveryDays(e.target.value),
               onBlur: () => { const n = Math.max(1, Math.min(Number(everyDays) || 1, 9)); setEveryDays(String(n)); patch({ everyDays: n }, '每几天跑一轮') },
             })),
-          st.lastRunAt ? h('div', { 'data-bd-note': '' }, `上次跑：${new Date(st.lastRunAt).toLocaleString('zh-CN')}`) : null),
+          st.lastRunAt ? h('div', { 'data-bd-note': '' }, `上次跑：${new Date(st.lastRunAt).toLocaleString('zh-CN')}`) : null,
+          st.lastRound ? h('div', { 'data-bd-note': '' },
+            `上一轮：${new Date(st.lastRound.at).toLocaleString('zh-CN')} · `
+            + (st.lastRound.ok ? '正常结束' : (st.lastRound.error || `退出码 ${st.lastRound.code ?? '?'}`))
+            + (st.lastRound.ms ? `（${Math.max(1, Math.round(st.lastRound.ms / 1000))} 秒）` : '')) : null),
 
         /* ── 发言与转写 ── */
         h('div', { 'data-bd-sec': '' },
@@ -776,7 +784,14 @@ window.__ModuleLoader__.load({
             h('button', { 'data-bd-btn': '', disabled: busy === 'verify', onClick: onVerify },
               '复核评论'),
             h('button', { 'data-bd-btn': '', onClick: () => copyText(st.report) }, '复制报告路径')),
-          report !== null ? h('pre', { 'data-bd-pre': '' }, report) : null),
+          report !== null ? h('div', { 'data-bd-sec': '' },
+            report.summary ? h('div', { 'data-bd-note': '' }, '今天汇总：' + report.summary) : null,
+            (report.parsed && Array.isArray(report.parsed.picked) && report.parsed.picked.length)
+              ? h('div', { 'data-bd-kv': '' },
+                report.parsed.picked.map((p, i) => h('div', { 'data-bd-note': '', key: 'pk' + i },
+                  `${i + 1}. ${p.bv}${p.title ? ' · ' + p.title : ''}${p.rpid ? '（评论 ' + p.rpid + '）' : ''}`)))
+              : null,
+            h('pre', { 'data-bd-pre': '' }, report.text)) : null),
       )
     }
 
