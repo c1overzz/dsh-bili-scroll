@@ -32,6 +32,7 @@ import { verifyRecent, appendVerifyToReport } from './lib/verify.mjs'
 import { WINDOWS, stateDirOf, readJson, writeJson, ensureHomeFiles, ensureCharter, charterPath, inWindow, dayKey } from './lib/state.mjs'
 import { loginStart, loginPoll, saveCredential, renderQrPng } from './lib/login.mjs'
 import { ensureUv } from './lib/uvfetch.mjs'
+import { parseReport, summarize } from './lib/report.mjs'
 
 /* ─── 修复①：建 venv 钉 Python 3.10–3.13（issue #15）────────────────────────────── */
 
@@ -1179,6 +1180,12 @@ export function apply(ctx, config) {
   const runDuty = (why = 'window') => {
    try {
     refreshCfg()          // ⭐ 设置页刚改过的值要立刻生效（config 是就地改的，快照会过期）
+    // ⭐ 已经在跑就别再起一个（点两下按钮、或窗口到点又撞上手动跑 ⇒ 两个 agent 抢同一份判重表和报告）
+    if (runningSince) {
+      const mins = Math.max(1, Math.round((Date.now() - runningSince) / 60000))
+      return { started: false, why, error: `上一轮还在跑（已 ${mins} 分钟），等它结束` }
+    }
+    runningSince = Date.now()
     const dsh = resolveDsh()
     // ⭐ 找不到 dsh 就别硬跑：以前会退化成裸 `dsh` ⇒ spawn 失败、只留 exit 1 + 一串乱码 ✗
     if (dsh.missing) {
@@ -1230,6 +1237,9 @@ export function apply(ctx, config) {
     child.stdout?.on('data', pick)
     child.stderr?.on('data', pick)
     child.on('exit', (code) => {
+      // ⭐ 先把"正在跑"落下（复核/数数这些后面的活出错也不该让状态卡在"正在跑"）
+      lastRound = { at: new Date().toISOString(), why, code: code ?? null, ok: code === 0, ms: runningSince ? Date.now() - runningSince : 0 }
+      runningSince = null
       log(`刷B站结束（${why}，code=${code}）`)
       stubReportIfMissing(code)   // ⭐ 没写报告就补一份占位 —— 别让使用者什么都看不到
       rotateLogIfBig()            // ⭐ 日志别无声地长（三天 797KB ⇒ 一年约 100MB）
@@ -1246,9 +1256,15 @@ export function apply(ctx, config) {
       const verifyTimer = setTimeout(() => { Promise.resolve(runVerify('round')).catch((e) => log('复核异常：' + (e?.message ?? e))) }, 90_000)
       verifyTimer.unref?.()   // 别为了一次复核把宿主进程的退出拖住 90 秒
     })
-    child.on('error', (e) => log(`刷B站起不来：${e?.message ?? e}`))
+    child.on('error', (e) => {
+      // 起不来（命令不存在 / 权限）⇒ 也是这一轮结束了，状态别卡着
+      lastRound = { at: new Date().toISOString(), why, code: null, ok: false, error: String(e?.message ?? e), ms: runningSince ? Date.now() - runningSince : 0 }
+      runningSince = null
+      log(`刷B站起不来：${e?.message ?? e}`)
+    })
     return { started: true, why, profile: cfg.headlessProfile, cwd, log: logFile }
    } catch (e) {
+    runningSince = null
     log(`刷B站开跑失败（${why}）：${e?.stack ?? e}`)
     return { started: false, why, error: String(e?.message ?? e) }
    }
@@ -1353,6 +1369,10 @@ export function apply(ctx, config) {
    * 依赖走**国内镜像**（使用者那条网络 pip 直连只有 ~24KB/s ✗；uv + 清华源是几十秒 ✓）。
    */
   let installing = false
+  // ⭐ 这一轮刷B站**正在跑**吗（设置页要显示「正在跑（已 X 分钟）」，否则点完「跑一轮」只能干等）
+  let runningSince = null
+  // ⭐ 上一次跑完的结论（时间 / 因为什么跑的 / 退出码）—— 成功和失败都要有，不然只有"上次跑：几点"
+  let lastRound = null
   const installLogFile = join(stateDir, 'install.log')
   const appendInstall = (s) => { try { appendFileSync(installLogFile, s, 'utf8') } catch { /* 写不进去就算了 */ } }
 
@@ -1614,6 +1634,10 @@ export function apply(ctx, config) {
       pickedToday: countPickedToday(),                          // 今天挑到几条（从报告里数）
       lastRunAt: st.lastRunAt || null,
       lastWhy: st.lastWhy || null,
+      // ⭐ 正在跑 / 上一轮结果（设置页那行「正在跑（已 X 分钟）」就靠这两个）
+      running: Boolean(runningSince),
+      runningMs: runningSince ? Date.now() - runningSince : 0,
+      lastRound: lastRound || null,
       loggedIn: hasCredential(),
       venvReady: venvReadyNow(),
       version: myVersion(),
@@ -1733,13 +1757,20 @@ export function apply(ctx, config) {
     if (req.method === 'POST' && path === '/api/bili-duty/verify') return sendJson(res, 200, await runVerify('manual'))
 
     // 「看今天的报告」：把报告的文本读出来给设置页显示（浏览器不能直接开本地文件 ✗）
+    // ⭐ 顺带解析成结构（挑中几条 / 评论 / 私信 / 复核）—— 设置页不用自己啃 markdown
     if (req.method === 'GET' && path === '/api/bili-duty/report') {
       const day = String(url.searchParams.get('day') || dayKey()).replace(/[^0-9-]/g, '') || dayKey()
       const file = join(outDir, day + '.md')
       let text = ''
       let exists = false
       try { exists = existsSync(file); if (exists) text = readFileSync(file, 'utf8').slice(0, 200000) } catch { /* 读不到就给空 */ }
-      return sendJson(res, 200, { ok: true, day, exists, file, text })
+      let parsed = null
+      try { parsed = exists ? parseReport(text) : null } catch { parsed = null }
+      return sendJson(res, 200, {
+        ok: true, day, exists, file, text,
+        parsed,
+        summary: parsed ? summarize(parsed) : '',
+      })
     }
 
     // 「打开文件夹」：浏览器开不了本地目录 ⇒ 让宿主去开（只认 out / home 两个，别的不受理）
