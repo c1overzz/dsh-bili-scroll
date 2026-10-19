@@ -46,6 +46,12 @@ window.__ModuleLoader__.load({
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body || {}),
     }))
+    const jdel = async (p, body) => asJson(await fetch(API + p, {
+      method: 'DELETE',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body || {}),
+    }))
 
     const CSS = `
 [data-bd-page]{display:flex;flex-direction:column;gap:18px;padding:2px 2px 8px;max-width:640px;}
@@ -149,6 +155,9 @@ window.__ModuleLoader__.load({
       const [perRound, setPerRound] = React.useState(null)
       const [replyPer, setReplyPer] = React.useState(null)
       const [replyKws, setReplyKws] = React.useState(null)   // 楼中楼识别词草稿（一行一个）
+      const [personaName, setPersonaName] = React.useState(null)   // 当前人格名草稿
+      const [personaText, setPersonaText] = React.useState(null)   // 人格正文草稿（直接粘贴 md）
+      const [personaForce, setPersonaForce] = React.useState(false) // 上次被"短太多"拦下 ⇒ 再点一次就是确认覆盖
       const [dmUids, setDmUids] = React.useState(null)      // 私信收件人名单草稿（数组；null = 还没从服务端灌过）
       const [dmMode, setDmMode] = React.useState(null)      // 投递方式：off / only / both
       const [mentionNames, setMentionNames] = React.useState(null)   // 要 @ 谁的名单草稿（null = 还没从服务端灌过）
@@ -184,6 +193,13 @@ window.__ModuleLoader__.load({
           ? cfg.dmUids.map((u) => String(u))
           : (Number(cfg.dmUid) > 0 ? [String(cfg.dmUid)] : []))
         if (cfg && dmMode === null) setDmMode(cfg.dmMode || 'off')
+        // ⭐ 人格：名字从配置里来，正文从 /personas 读一次（之后就是本地草稿，别被轮询冲掉）
+        if (cfg && personaName === null) {
+          setPersonaName(cfg.personaName || '')
+          jget('/personas').then((r) => {
+            if (alive.current && personaText === null) setPersonaText(String(r?.text || ''))
+          }).catch(() => { if (alive.current && personaText === null) setPersonaText('') })
+        }
       }, [cfg])
 
       const win = { ...DEFAULT_WINDOWS, ...(st?.windows || {}) }
@@ -357,6 +373,50 @@ window.__ModuleLoader__.load({
           loginTimer.current = timer
         } catch (e) { setLoginTone('warn'); setLoginState(String(e?.message ?? e)) }
         finally { setBusy('') }
+      }
+
+      /* ⭐ 人格：粘贴保存（不再是"填 .md 路径导入"那一套） */
+      const reloadPersona = async () => {
+        try {
+          const r = await jget('/personas')
+          if (r && r.ok) { setPersonaText(String(r.text || '')); setPersonaName(String(r.current || '')) }
+        } catch { /* 读不到就保留草稿 */ }
+      }
+
+      const onSavePersona = async () => {
+        const name = String(personaName || '').trim()
+        if (!name) { say('先给这份人格起个名字（比如 本鱼），再点保存', 'warn'); return }
+        setBusy('persona')
+        try {
+          const r = await jpost('/personas', { name, text: String(personaText ?? ''), confirm: personaForce })
+          if (r && r.ok) {
+            setPersonaForce(false)
+            setPersonaName(String(r.current || name))
+            say(`人格「${name}」已保存 —— 下一轮就按它说话`, 'good')
+            reloadPersona()
+          } else if (r && r.needConfirm) {
+            setPersonaForce(true)
+            say(String(r.error || '这份比原来短太多 —— 确认要覆盖就再点一次「保存」'), 'warn')
+          } else say(String(r?.error || '没存成'), 'warn')
+        } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
+      }
+
+      const onPickPersona = async (name) => {
+        setPersonaName(name)
+        try { await patch({ personaName: name }, '人格') } catch { /* patch 已经 say 过 */ }
+        reloadPersona()
+      }
+
+      const onDropPersona = async (name) => {
+        setBusy('persona')
+        try {
+          const r = await jdel('/personas', { name })
+          if (r && r.ok) {
+            say(`已删除人格「${name}」`, 'good')
+            setPersonaText('')
+            setPersonaName(String(r.current || ''))
+          } else say(String(r?.error || '没删成'), 'warn')
+        } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
       }
 
       const onSaveText = async () => {
@@ -569,6 +629,39 @@ window.__ModuleLoader__.load({
             st.asrTail ? h('div', null,
               h('div', { 'data-bd-note': '' }, st.asrInstalling ? '正在装转写依赖（进度）：' : '转写依赖的日志（末尾）—— 只有「没字幕的视频」用得到它：'),
               h('pre', { 'data-bd-pre': '' }, st.asrTail)) : null) : null),
+
+        /* ── 人格 ── */
+        h('div', { 'data-bd-sec': '' },
+          h('div', { 'data-bd-h': '' }, '人格（它按这份设定说话）'),
+          h('div', { 'data-bd-note': '' },
+            '把人格卡的内容直接粘进来就行 —— 存好之后下一轮就按它说话；', h('br'),
+            '留空 = 不用人格，按中性说话（会读工作区的 AGENTS.md，但人格卡优先）。'),
+          h('textarea', {
+            'data-bd-input': '', rows: 12, value: personaText ?? '',
+            placeholder: '把人格卡的 md 内容粘进来……',
+            onChange: (e) => { setPersonaText(e.target.value); setPersonaForce(false) },
+          }),
+          h('div', { 'data-bd-row': '' },
+            h('input', {
+              'data-bd-input': '', style: { flex: '0 0 240px' }, value: personaName ?? '',
+              placeholder: '人格名字（比如 本鱼）',
+              onChange: (e) => setPersonaName(e.target.value),
+            }),
+            h('button', {
+              'data-bd-btn': '', 'data-primary': '', disabled: busy === 'persona', onClick: onSavePersona,
+            }, personaForce ? '确认覆盖' : '保存这份人格'),
+            h('span', { 'data-bd-note': '' }, String(String(personaText ?? '').length) + ' 字')),
+          (st.personas || []).length
+            ? h('div', { 'data-bd-row': '', style: { flexWrap: 'wrap', gap: '8px' } },
+                h('span', { 'data-bd-note': '' }, '已存的：'),
+                ...(st.personas || []).map((p) => h('span', { key: 'persona-' + p.name, 'data-bd-row': '', style: { gap: '6px' } },
+                  h('button', {
+                    'data-bd-btn': '',
+                    'data-primary': String(cfg.personaName || '') === p.name ? '' : undefined,
+                    onClick: () => onPickPersona(p.name),
+                  }, p.name + '（' + p.chars + ' 字）'),
+                  h('button', { 'data-bd-btn': '', disabled: busy === 'persona', onClick: () => onDropPersona(p.name) }, '删'))))
+            : null),
 
         /* ── 关注什么 / 在哪儿刷 ── */
         h('div', { 'data-bd-sec': '' },

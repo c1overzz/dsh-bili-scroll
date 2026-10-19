@@ -68,6 +68,22 @@ if (!dmTools.includes('bili_send_message')) fail('私信开着却没给 bili_sen
 const offTools = mod.mcpToolList({ dmMode: 'off', dmUid: 12345 })
 if (offTools.includes('bili_send_message')) fail('私信关着也给了 bili_send_message（白名单太松）')
 console.log('✓ 修复② MCP 白名单 OK：' + dmTools.join(' / '))
+
+/* ── 功能①：人格卡 —— 粘进来就存进 <家目录>/personas/<名字>.md，覆盖前拦"短太多" ── */
+const pName = mod.personaFileName('../../本鱼?.md')
+if (pName !== '本鱼.md') fail('personaFileName 没清洗掉路径分隔符 / 问号：' + JSON.stringify(pName))
+if (mod.personaFileName('   ') !== '') fail('personaFileName 对空名字应返回空串')
+const pdir = mod.personaDirOf(SANDBOX_HOME)
+mkdirSync(pdir, { recursive: true })
+const pSeed = '# 本鱼\n' + 'a'.repeat(300)
+writeFileSync(join(pdir, '本鱼.md'), pSeed, 'utf8')
+const plist = mod.listPersonas(SANDBOX_HOME)
+if (plist.length !== 1 || plist[0].name !== '本鱼' || plist[0].chars !== pSeed.length) fail('listPersonas 没列出 personas/*.md：' + JSON.stringify(plist))
+if (mod.readPersona(SANDBOX_HOME, '本鱼').length !== pSeed.length) fail('readPersona 读不回来')
+if (!mod.personaShrink('a'.repeat(300), 'b'.repeat(100))) fail('短太多的覆盖没被拦住（手滑清空 = 人格卡没了）')
+if (mod.personaShrink('a'.repeat(300), 'b'.repeat(290))) fail('正常的小改动不该被拦')
+console.log('✓ 功能① 人格卡 OK：名字清洗 / 列表 / 读回 / 短太多拦截')
+
 /* ────────────── ② client 半端：假 window.__ModuleLoader__ 上真跑 factory() ────────────── */
 
 const pkg = JSON.parse(readFileSync('./package.json', 'utf8'))
