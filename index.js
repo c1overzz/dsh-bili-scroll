@@ -33,6 +33,49 @@ import { WINDOWS, stateDirOf, readJson, writeJson, ensureHomeFiles, ensureCharte
 import { loginStart, loginPoll, saveCredential, renderQrPng } from './lib/login.mjs'
 import { ensureUv } from './lib/uvfetch.mjs'
 
+/* ─── 修复①：建 venv 钉 Python 3.10–3.13（issue #15）────────────────────────────── */
+
+/** uv 不给 --python 时拿的是"最新 CPython"（2026-10-18 本机建出 3.15），而 av / ctranslate2 /
+ *  aiohttp 在 3.14+ 没有任何 wheel ⇒ 转写依赖 ResolutionImpossible、主依赖卡在 cffi 反复握手 ✗
+ *  ⇒ 建环境必须钉版本（3.12 实测最稳）。 */
+export const PY_OK_MIN = 310
+export const PY_OK_MAX = 313
+
+/** 从 venv 的 pyvenv.cfg 读版本号（3.12.14 → 312；读不到给 0）—— 比 spawn 一遍 python 便宜 */
+export const pyVerOfVenv = (dir) => {
+  try {
+    const m = readFileSync(join(dir, 'pyvenv.cfg'), 'utf8').match(/^version\s*=\s*(\d+)\.(\d+)/m)
+    return m ? Number(m[1]) * 100 + Number(m[2]) : 0
+  } catch { return 0 }
+}
+
+/** 选一个能建 venv 的 Python：显式环境变量 → DSH 自带的 runtime（<家>/dsh-runtimes/*）→ 退字符串 '3.12'
+ *  （字符串会交给 uv --python，让它自己去找；DSH 桌面版自带 3.12，不用另外下） */
+export const venvPythonSpec = async (home = '') => {
+  const env = String(process.env.BILI_DUTY_VENV_PYTHON || '').trim()
+  if (env) return env
+  try {
+    const base = join(String(home), 'dsh-runtimes')
+    for (const n of readdirSync(base)) {
+      const py = process.platform === 'win32'
+        ? join(base, n, 'dependencies', 'python', 'python.exe')
+        : join(base, n, 'dependencies', 'python', 'bin', 'python')
+      if (!existsSync(py)) continue
+      const ver = await new Promise((resolve) => {
+        try {
+          const c = spawn(py, ['-c', 'import sys;print("%d%d" % sys.version_info[:2])'], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] })
+          let out = ''
+          c.stdout?.on('data', (b) => { out += String(b) })
+          c.on('exit', () => resolve(Number(out.trim()) || 0))
+          c.on('error', () => resolve(0))
+        } catch { resolve(0) }
+      })
+      if (ver >= PY_OK_MIN && ver <= PY_OK_MAX) return py
+    }
+  } catch { /* 没有 dsh-runtimes 就走兜底 */ }
+  return '3.12'
+}
+
 export const name = 'bili-scroll'
 export const inject = ['webServer', 'tools', 'settings']
 
@@ -124,6 +167,14 @@ export function apply(ctx, config) {
     UV_PYTHON_INSTALL_DIR: join(stateDir, 'uv-python'),
     ...extra,
   })
+
+  // 家目录：DSH 自带的 Python runtime 在 <家>/dsh-runtimes/*/dependencies/python（钉版本要用）
+  const dshHomeDir = (() => {
+    try {
+      const p = ctx?.get?.('dshHomePath')
+      return typeof p === 'function' ? String(p()) : ''
+    } catch { return '' }
+  })()
 
   // ⭐ "就绪"必须检查依赖真的装上了，不能只看目录存不存在
   //    （2026-10-15：只看目录，害一位真实用户"显示就绪但其实装失败"白折腾 ✗）
@@ -1115,6 +1166,36 @@ export function apply(ctx, config) {
     ? join(stateDir, '.venv', 'Scripts', 'python.exe')
     : join(stateDir, '.venv', 'bin', 'python')
 
+  /** 老环境若是 3.14+ 建的（uv 的 venv 没法就地换 Python），改名弃用、后面重建 */
+  const rebuildIfTooNew = (dir, sink) => {
+    if (!existsSync(dir)) return false
+    const v = pyVerOfVenv(dir)
+    if (!v || v <= PY_OK_MAX) return false
+    const bad = dir + '-py' + v
+    try {
+      rmSync(bad, { recursive: true, force: true })
+      renameSync(dir, bad)
+      sink(`\n⚠️ 环境是 Python ${Math.floor(v / 100)}.${v % 100} 建的（太新 ⇒ 装不上依赖），已改名 ${bad}，重建\n`)
+      return true
+    } catch (e) {
+      sink(`\n⚠️ 旧环境改名失败（${e?.message ?? e}），继续按原样试\n`)
+      return false
+    }
+  }
+  /** 建 venv 的唯一入口：钉版本 → 逐级退回（--python spec → --python 3.12 → uv 默认 → python -m venv） */
+  const makeVenv = async (dir, uvCmd, py, sink) => {
+    rebuildIfTooNew(dir, sink)
+    if (uvCmd) {
+      const spec = await venvPythonSpec(dshHomeDir)
+      if (await spawnTo(uvCmd, ['venv', '--seed', '--python', spec, dir], { sink }) === 0) return 0
+      sink('\n（uv 带 --python 没成 —— 换 3.12 再试一次）\n')
+      if (await spawnTo(uvCmd, ['venv', '--seed', '--python', '3.12', dir], { sink }) === 0) return 0
+      sink('\n（还是没有 3.12 —— 退回 uv 默认 Python，能不能装上看运气）\n')
+      if (await spawnTo(uvCmd, ['venv', '--seed', dir], { sink }) === 0) return 0
+    }
+    return spawnTo(py, ['-m', 'venv', dir], { sink })
+  }
+
   /**
    * 建 venv + 装依赖 —— ⭐ **起完就返回，不等它装完**。
    *
@@ -1256,8 +1337,8 @@ export function apply(ctx, config) {
         const uvCmd = await resolveUv()
         if (!existsSync(py)) {
           // --seed：把 pip 也装进去（uv 默认不给）—— 不然出现问题时连 pip 都没有，没法补救 ✗
-          if (uvCmd) await spawnTo(uvCmd, ['venv', '--seed', asrDir], { sink: appendAsr })
-          else await spawnTo(String(cfg.pythonPath || 'python'), ['-m', 'venv', asrDir], { sink: appendAsr })
+          // ⭐ 钉 Python 3.10–3.13：uv 默认拿最新 CPython（3.15），av / ctranslate2 没有 3.14+ 的 wheel
+          await makeVenv(asrDir, uvCmd, String(cfg.pythonPath || 'python'), appendAsr)
         }
         if (!existsSync(py)) {
           // ⭐ 2026-10-19（用户 `天文星球` 的截图）：uv 报 `Could not acquire lock … uv\cache\.lock 拒绝访问 (os error 5)`
@@ -1316,8 +1397,8 @@ export function apply(ctx, config) {
         if (!existsSync(venvPy)) {
           // ⭐ 2026-10-17（issue #8③）：ASR 那个环境带了 --seed，主环境却漏了 ⇒ uv 建的 venv 默认不含 pip，
           //    一旦镜像失败、回退 `python -m pip` 就是 `No module named pip` ⇒ 连补救的路都没有 ✗
-          if (uvCmd) await spawnLogged(uvCmd, ['venv', '--seed', join(stateDir, '.venv')])
-          if (!existsSync(venvPy) && !uvCmd) await spawnLogged(py, ['-m', 'venv', join(stateDir, '.venv')])
+          // ⭐ 钉 Python 3.10–3.13（同转写那条）：uv 默认拿最新 CPython，av / ctranslate2 / cffi 没有 3.14+ 的 wheel
+          await makeVenv(join(stateDir, '.venv'), uvCmd, py, appendInstall)
         }
         let code = 1
         // ⭐ 2026-10-17（issue #8②）：镜像也会整站拒绝（清华对部分 IP 回 403，而 pip 的报错写成"这个包不存在"，很误导）
