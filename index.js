@@ -144,6 +144,18 @@ const pyEnv = (extra = {}) => ({
   ...extra,
 })
 
+/* ─── 修复②：MCP 工具白名单（issue #25 / #16）──────────────────────────────────── */
+
+/** 值班轮能看到哪些工具（纯函数，给 selfcheck 断言）。不在这里的工具，mcp_server.py 那头根本不注册。 */
+export const mcpToolList = ({ autoComment, replyToComments, dmMode, dmUid } = {}) => {
+  const list = ['bili_search', 'bili_subtitle', 'bili_comments', 'bili_video_info']
+  if (autoComment || replyToComments) list.push('bili_reply')   // 只有真要发评论才给这只
+  // ⭐ 私信模式开着却没有 bili_send_message ⇒ 模型手里压根没这只工具，
+  //    表现成"私信功能装了、开关也开了，但从来没发出去过"（issue #25 / #16 的实证）
+  if (String(dmMode || 'off') !== 'off' && Number(dmUid) > 0) list.push('bili_send_message')
+  return list
+}
+
 export function apply(ctx, config) {
   const pluginDir = dirname(fileURLToPath(import.meta.url))
   // ⭐ 自己的版本号（从 package.json 读，设置页要显示它）
@@ -970,11 +982,7 @@ export function apply(ctx, config) {
    *    mcp_server.py 那头**不在白名单里的工具根本不注册** —— 连名字都不给它看见 ✓。
    *    要读全就手工改这个列表（或者直接跑 mcp_server.py，不设这个变量 = 全放）。
    */
-  const mcpWhitelist = () => {
-    const list = ['bili_search', 'bili_subtitle', 'bili_comments', 'bili_video_info']
-    if (cfg.autoComment || cfg.replyToComments) list.push('bili_reply')   // 只有真要发评论才给这只
-    return list
-  }
+  const mcpWhitelist = () => mcpToolList(cfg)   // 规则见顶层 mcpToolList（私信模式要带 bili_send_message）
 
   const ensureOverlay = () => {
     const file = join(stateDir, 'headless-overlay.yml')
