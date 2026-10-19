@@ -143,6 +143,41 @@ const pyEnv = (extra = {}) => ({
   ...extra,
 })
 
+/* ─── 修复②：三层配置合并（issue #22 / #11 / #14）─────────────────────────────── */
+
+/** 这一层的值"像不像用户真设过"——数组不能直接 !== 比（两个空数组永远不等，
+ *  否则宿主那份空 keywords 会把 config.json 里的关键词盖成 []） */
+export const differsFromDefault = (k, v, defaults = {}) =>
+  (Array.isArray(defaults[k]) ? Array.isArray(v) && v.length > 0 : v !== defaults[k])
+
+/**
+ * 把三层配置并起来（给 selfcheck 断言用，纯函数）：
+ *   ① config.json 打底：宿主 apply() 给的是 cordis fiber.config 本体，volatile 字段是**引用对象**，
+ *      normalize 一个都读不出来 ⇒ hostCfg() 恒等于"全默认" ⇒ 拿它当底 = 设置页永远显示默认值 ✗
+ *   ② user 层显式设过的键 ⇒ 无条件听宿主；
+ *   ③ value 层与默认值不同的键 ⇒ 也是真值（patch.yml 里写的值不一定进 user 层）；
+ *   ④ local-override 里的键（本地刚存、宿主没同步成功）⇒ 以 config.json 为准；
+ *   ⑤ pythonPath 由插件自己算（装依赖时自动写），不让设置页上那个旧 "python" 压回来。
+ */
+export const mergeCfg = (saved = {}, row = null, { host = {}, ov = {}, defaults = {}, hostWins = [] } = {}) => {
+  const out = { ...saved }
+  if (!row) {   // 拿不到设置表单（老宿主 / 设置服务没就绪）⇒ 只采纳启动快照里"真被设过"的键
+    for (const k of Object.keys(defaults)) {
+      if (host[k] !== undefined && differsFromDefault(k, host[k], defaults)) out[k] = host[k]
+    }
+    return out
+  }
+  const user = row.user || {}
+  const value = row.value || {}
+  for (const k of Object.keys(defaults)) {
+    if (hostWins.includes(k)) { out[k] = saved[k]; continue }
+    if (ov[k] !== undefined) { out[k] = saved[k]; continue }
+    if (user[k] !== undefined) { out[k] = user[k]; continue }
+    if (value[k] !== undefined && differsFromDefault(k, value[k], defaults)) out[k] = value[k]
+  }
+  return out
+}
+
 export function apply(ctx, config) {
   const pluginDir = dirname(fileURLToPath(import.meta.url))
   // ⭐ 自己的版本号（从 package.json 读，设置页要显示它）
@@ -287,7 +322,9 @@ export function apply(ctx, config) {
    */
   const settingsDesc = (fresh = false) => {
     const t = Date.now()
-    if (!fresh && t - settingsRow.at < 3000) return settingsRow.row   // 挡 UI 轮询：describe() 要扫所有条目
+    // ⭐ 启动期 describe() 可能还拿不到表单项（设置服务没就绪）⇒ 那个 null **不许缓存**：
+    //    缓存了的话头 3 秒里一律按「拿不到设置表单」那条路走（config.json 打底），用户看到的就是"全默认"（issue #22 的放大点）
+    if (!fresh && settingsRow.row && t - settingsRow.at < 3000) return settingsRow.row   // 挡 UI 轮询：describe() 要扫所有条目
     let row = null
     try {
       const rows = ctx.settings?.describe?.() || []
@@ -296,27 +333,9 @@ export function apply(ctx, config) {
     settingsRow = { at: t, row }
     return row
   }
-  const loadCfg = () => {
-    const saved = savedCfg()
-    const row = settingsDesc()
-    // ⭐ 读回来统一过一遍范围：原生设置页那边我们是钳不到写的（见 clampPatch 的注释）
-    if (!row) return clampPatch(saved)
-    const user = row.user || {}
-    const out = { ...hostCfg() }
-    // ⚠️ 2026-10-18（用户实证 + 他的 dsh 定位）：`pythonPath` 是**装依赖时自动写的**，
-    //    但它一旦在 DSH 原生设置里有过值（默认 "python"），就会被宿主覆盖回来 ⇒
-    //    「重装依赖」日志写着"已把 pythonPath 设为 venv"，实际生效的还是系统那个空壳 python
-    //    ⇒ 画二维码 import 不到 qrcode ⇒ **永远不出码** ✗
-    //    ⇒ 这个键不让宿主对账（它由插件自己算出来，不该被界面上的旧值压住）
-    const HOST_WINS_EXCLUDED = new Set(['pythonPath'])
-    const ov = readOverride()   // 本地刚存、宿主没同步成功的键 ⇒ 以本地为准
-    for (const k of Object.keys(DEFAULTS)) {
-      if (HOST_WINS_EXCLUDED.has(k)) { out[k] = saved[k]; continue }
-      if (ov[k] !== undefined) { out[k] = saved[k]; continue }
-      if (user[k] === undefined) out[k] = saved[k]
-    }
-    return clampPatch(out)
-  }
+  const loadCfg = () => clampPatch(mergeCfg(savedCfg(), settingsDesc(), {
+    host: hostCfg(), ov: readOverride(), defaults: DEFAULTS, hostWins: ['pythonPath'],
+  }))   // 合并规则见 mergeCfg（config.json 打底 + 用户层/生效层叠加）
   const cfg = loadCfg()
   // ⭐ 配置是"随时可能被设置页就地改掉"的东西 ⇒ 每个入口用之前重算一遍（cfg 这个对象要一直指向同一份）
   const refreshCfg = () => { Object.assign(cfg, loadCfg()) }

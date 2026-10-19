@@ -62,6 +62,21 @@ writeFileSync(join(fakeVenv, 'pyvenv.cfg'), 'home = C:\\Python313\r\nversion = 3
 if (mod.pyVerOfVenv(fakeVenv) !== 313) fail('pyVerOfVenv 读不出 pyvenv.cfg 的版本号（重建判据会失效）')
 console.log(`✓ 修复① venv Python spec = ${venvSpec}（pyvenv.cfg 版本识别 OK）`)
 
+/* ── 修复②：loadCfg 以 config.json 打底，不再被"全默认"盖回去 ── */
+const merged = mod.mergeCfg(
+  { perDay: 7, pythonPath: 'C:/py312/python.exe' },
+  { user: {}, value: {} },
+  { host: { perDay: 5, pythonPath: 'python' }, defaults: { perDay: 5, pythonPath: 'python' }, hostWins: ['pythonPath'] },
+)
+if (merged.perDay !== 7) fail('loadCfg 把 config.json 里的 perDay 盖成了默认值（issue #22）')
+if (merged.pythonPath !== 'C:/py312/python.exe') fail('loadCfg 让设置页上的旧 pythonPath 压过了装好的 venv')
+const forced = mod.mergeCfg({ perDay: 7 }, { user: { perDay: 3 }, value: {} }, { defaults: { perDay: 5 } })
+if (forced.perDay !== 3) fail('loadCfg 没听用户在设置页显式设过的值')
+// 数组不能按 !== 比：宿主那份空数组不能把 config.json 里的关键词/名单盖成 []
+const arrKeep = mod.mergeCfg({ keywords: ['x'] }, null, { host: { keywords: [] }, defaults: { keywords: [] } })
+if (JSON.stringify(arrKeep.keywords) !== '["x"]') fail('loadCfg 把 config.json 里的关键词盖成了空数组')
+console.log('✓ 修复② loadCfg 合并规则 OK（config.json 打底 + 用户层覆盖 + pythonPath 特例）')
+
 /* ────────────── ② client 半端：假 window.__ModuleLoader__ 上真跑 factory() ────────────── */
 
 const pkg = JSON.parse(readFileSync('./package.json', 'utf8'))
