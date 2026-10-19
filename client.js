@@ -182,7 +182,10 @@ window.__ModuleLoader__.load({
 
       const cfg = st?.config
       React.useEffect(() => {
-        if (cfg && kws === null) setKws((cfg.keywords || []).join('\n'))
+        if (cfg && kws === null) {
+          const list = (Array.isArray(cfg.keywords) ? cfg.keywords : []).map((s) => String(s))
+          setKws(list.length ? list : [''])          // 空配置也给一个空框，用户直接填，不用先点「添加」
+        }
         if (cfg && ws === null) setWs(cfg.workspace || '')
         if (cfg && rl === null) setRl(cfg.reportLevel || 'full')
         if (cfg && perDay === null) setPerDay(String(cfg.perDay ?? 5))
@@ -426,9 +429,22 @@ window.__ModuleLoader__.load({
         } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
       }
 
-      const onSaveText = async () => {
-        const list = String(kws || '').split('\n').map((s) => s.trim()).filter(Boolean)
-        await patch({ keywords: list, workspace: String(ws || '').trim() }, '关键词与工作区')
+      /* ⭐ 关键词：一个词一个输入框（原来是整块 textarea，一行一个，改一个词要全量重写） */
+      const commitKws = (list) =>
+        patch({ keywords: list.map((s) => String(s ?? '').trim()).filter(Boolean) }, '关键词')
+
+      const onKwAt = (i, v) => setKws((a) => (a || []).map((s, j) => (j === i ? v : s)))
+
+      const onKwAdd = () => setKws((a) => [...(a || []), ''])
+
+      const onKwDrop = (i) => {
+        const next = (kws || []).filter((_, j) => j !== i)
+        setKws(next.length ? next : [''])
+        commitKws(next)     // 删掉一个要立刻落盘 —— 那个输入框的失焦事件不会再来
+      }
+
+      const onSaveWs = async () => {
+        await patch({ workspace: String(ws || '').trim() }, '工作区')
       }
 
       /* ⭐ 要 @ 谁：名单草稿在本地，失焦 / 增删时整份写回去（不能一条条 patch，会互相覆盖） */
@@ -689,10 +705,16 @@ window.__ModuleLoader__.load({
         /* ── 关注什么 / 在哪儿刷 ── */
         h('div', { 'data-bd-sec': '' },
           h('div', { 'data-bd-h': '' }, '关注什么'),
-          h('textarea', {
-            'data-bd-input': '', rows: 5, placeholder: '一行一个关键词；留空用内置那几组',
-            value: kws ?? '', onChange: (e) => setKws(e.target.value),
-          }),
+          h('div', { 'data-bd-label': '' }, '关键词（一个词一个框；留空用内置那几组）'),
+          ...(kws || []).map((kw, i) => h('div', { 'data-bd-row': '', key: 'kw-' + i },
+            h('input', {
+              'data-bd-input': '', value: kw,
+              placeholder: i === 0 ? '比如 抽象 / 整活 / 猫meme' : '再加一个关键词',
+              onChange: (e) => onKwAt(i, e.target.value),
+              onBlur: () => commitKws(kws || []),
+            }),
+            h('button', { 'data-bd-btn': '', onClick: () => onKwDrop(i) }, '删'))),
+          h('button', { 'data-bd-btn': '', onClick: onKwAdd }, '＋ 加一个关键词'),
           h('div', { 'data-bd-label': '' }, '工作区（它按这里的 AGENTS.md 认设定）'),
           h('input', {
             'data-bd-input': '', value: ws ?? '',
@@ -712,7 +734,7 @@ window.__ModuleLoader__.load({
             h('option', { value: 'brief' }, '薄 —— 每条一两行，只留值不值得 + 链接'),
             h('option', { value: 'off' }, '不写 —— 只发评论，不生成日报文件')),
           h('div', { 'data-bd-row': '' },
-            h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: Boolean(busy), onClick: onSaveText }, '保存'),
+            h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: Boolean(busy), onClick: onSaveWs }, '保存工作区'),
             msg ? h('div', { 'data-bd-msg': '', 'data-good': msgTone === 'good' ? '' : undefined, 'data-warn': msgTone === 'warn' ? '' : undefined }, msg) : null)),
 
         /* ── 环境与账号 ── */
