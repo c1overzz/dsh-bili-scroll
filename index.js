@@ -55,8 +55,10 @@ export const Config = !z ? undefined : z.object({
   night: z.boolean().default(true).extra('volatile', true),
   /** 自动评论 @ 使用者（默认关 —— 会拿用户的号说话，必须他自己开） */
   autoComment: z.boolean().default(false).extra('volatile', true),
-  /** ⭐ 私信投递：off=只发评论（现状）· only=只私信（完全不公开评论）· both=评论 + 私信 */
-  dmMode: z.string().default('off').extra('volatile', true),
+  /** ⭐ 私信开关（2026-10-20 起）：开 = 每条评论的正文另发一条私信给下面名单里的人；名单空 = 不发 */
+  autoDm: z.boolean().default(false).extra('volatile', true),
+  /** ⚠️ 老键（已废弃）：off / only / both。只在读老配置时由 clampPatch 迁移一次，之后不再写 */
+  dmMode: z.string().default('').extra('volatile', true),
   /** ⭐ 私信发给谁的 UID（数字）。要在 dmMode 不是 off 时填 */
   dmUid: z.natural().default(0).extra('volatile', true),
   /** ⭐ 私信发给谁的名单（UID 字符串数组）：非空就以它为准，`dmUid` 只当老配置的兜底 */
@@ -114,14 +116,36 @@ const pyEnv = (extra = {}) => ({
 /* ─── 修复②：MCP 工具白名单（issue #25 / #16）──────────────────────────────────── */
 
 /** 值班轮能看到哪些工具（纯函数，给 selfcheck 断言）。不在这里的工具，mcp_server.py 那头根本不注册。 */
-export const mcpToolList = ({ autoComment, replyToComments, dmMode, dmUid, dmUids } = {}) => {
+export const mcpToolList = ({ autoComment, replyToComments, autoDm, dmMode, dmUid, dmUids } = {}) => {
   const list = ['bili_search', 'bili_subtitle', 'bili_comments', 'bili_video_info']
   if (autoComment || replyToComments) list.push('bili_reply')   // 只有真要发评论才给这只
   // ⭐ 私信模式开着却没有 bili_send_message ⇒ 模型手里压根没这只工具，
   //    表现成"私信功能装了、开关也开了，但从来没发出去过"（issue #25 / #16 的实证）
   const hasUid = Number(dmUid) > 0 || (Array.isArray(dmUids) && dmUids.some((u) => Number(u) > 0))
-  if (String(dmMode || 'off') !== 'off' && hasUid) list.push('bili_send_message')
+  // 新开关 autoDm 优先；没给就退回老键 dmMode（off = 关）—— selfcheck / 老调用方都能用
+  const dmOn = autoDm === undefined ? String(dmMode || 'off') !== 'off' : Boolean(autoDm)
+  if (dmOn && hasUid) list.push('bili_send_message')
   return list
+}
+
+/* ─── 投递开关：公开评论 / 私信（2026-10-20 拆开）──────────────────────────── */
+
+/**
+ * 把配置里的投递字段归一成 { autoComment, autoDm }（纯函数，给 selfcheck / wpr2-test 断言）：
+ *   · 老键 dmMode：off ⇒ 只关私信；only ⇒ 关公开评论 + 开私信；both ⇒ 开私信（并丢掉这个键，不再写回）
+ *   · 显式传的 autoComment / autoDm **最后生效**（新键优先，老配置零回归）
+ */
+export const migrateDelivery = (p = {}) => {
+  const out = {}
+  if ('dmMode' in p && p.dmMode !== undefined) {
+    const m = String(p.dmMode || '').trim().toLowerCase()
+    if (m === 'only') { out.autoComment = false; out.autoDm = true }
+    else if (m === 'both') out.autoDm = true
+    else if (m === 'off') out.autoDm = false
+  }
+  if ('autoComment' in p) out.autoComment = Boolean(p.autoComment)
+  if ('autoDm' in p) out.autoDm = Boolean(p.autoDm)
+  return out
 }
 
 /* ─── 功能①：评论里可以 @ 多个人 ────────────────────────────────────────────── */
@@ -264,8 +288,8 @@ export function apply(ctx, config) {
    *     ② **定时器回调里绝不让异常外冒**（见 tick）—— 未捕获异常会杀掉整个宿主进程。
    */
   const DEFAULTS = {
-    perDay: 5, everyDays: 1, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
-    dmMode: 'off', dmUid: 0, dmUids: [],
+    perDay: 5, everyDays: 1, peakValley: false, noon: true, night: true, autoComment: false, autoDm: false, transcribe: false, asrModel: 'small',
+    dmMode: '', dmUid: 0, dmUids: [],
     keywords: [], commentPerRound: 1, mentionName: '', mentionNames: [], pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, replyKeywords: [], windows: {},
   }
   const normalize = (src, base) => {
@@ -301,6 +325,8 @@ export function apply(ctx, config) {
     if ('replyToComments' in p) p.replyToComments = Boolean(p.replyToComments)
     if ('replyPerRound' in p) p.replyPerRound = Math.max(1, Math.min(Number(p.replyPerRound) || 1, 10))
     if ('commentPerRound' in p) p.commentPerRound = Math.max(0, Math.min(Number(p.commentPerRound) || 0, 20))
+    // ⭐ 2026-10-20：投递方式拆成两个独立开关（autoComment / autoDm），老键 dmMode 只在读到时迁移一次
+    if ('dmMode' in p || 'autoComment' in p || 'autoDm' in p) Object.assign(p, migrateDelivery(p))
     // ⭐ 名单类：去空、去重、截断（评论 @ 多个人时正文放不下；私信收件人 10 个也够了）
     if ('mentionNames' in p) p.mentionNames = [...new Set((Array.isArray(p.mentionNames) ? p.mentionNames : [])
       .map((s) => String(s ?? '').trim()).filter(Boolean))].slice(0, 10)
@@ -599,15 +625,13 @@ export function apply(ctx, config) {
       force: { type: 'boolean', description: '本人当场让你发的，传 true 越过"自动评论关着"的闸' },
     },
     async execute(args) {
-      // dmMode==='only' 时本轮根本不该发公开评论 —— 在工具层也一并挡掉（除非当场 force）
-      const commentOn = Boolean(cfg.autoComment && mentionListOf(cfg).length && cfg.dmMode !== 'only')
+      // 公开评论没开（或 @ 名单空着）时，工具层也一并挡掉（除非当场 force）
+      const commentOn = Boolean(cfg.autoComment && mentionListOf(cfg).length)
       if (!commentOn && !args.force) {
         return {
           ok: false,
           blocked: true,
-          hint: cfg.dmMode === 'only'
-            ? '现在是「只私信」模式（dmMode=only）—— 规定不发公开评论，改成用 bili_send_message 私信。确实要发时传 force: true。'
-            : '要发评论得同时满足两条：设置里开着「自动评论并 @ 你」、并且「要 @ 谁」名单里至少有一个名字。或者本人当场让你发时传 force: true。',
+          hint: '要发评论得同时满足两条：设置里开着「自动公开评论」、并且「要 @ 谁」名单里至少有一个名字。或者本人当场让你发时传 force: true。',
         }
       }
       return call('bili_reply', {
@@ -641,7 +665,9 @@ export function apply(ctx, config) {
         }])),
         peakValley: cfg.peakValley,
         autoComment: cfg.autoComment,
-        dmMode: cfg.dmMode,
+        autoDm: Boolean(cfg.autoDm),
+        commentsOn: Boolean(cfg.autoComment && mentionListOf(cfg).length),
+        dmOn: Boolean(cfg.autoDm && dmListOf(cfg).length),
         dmUid: Number(cfg.dmUid) || 0,
         dmUids: dmListOf(cfg),
         mentionNames: mentionListOf(cfg),
@@ -705,7 +731,7 @@ export function apply(ctx, config) {
     name: 'bili_config',
     description: '读 / 改「刷B站」的设置。不给 `patch` 就是读；给了就改（只认 schema 里的字段）。\n'
       + '例：`{"perDay":5,"peakValley":true,"noon":true,"night":true,"autoComment":false,"transcribe":false,"keywords":["DeepSeek Harness"]}`；'
-      + '私信投递：`{"dmMode":"only","dmUid":12345678}`（dmMode = off / only / both）；名单：`{"dmUids":["123","456"]}`、`{"mentionNames":["甲","乙"]}`。',
+      + '投递开关：`{"autoComment":true}`（公开评论）、`{"autoDm":true,"dmUid":12345678}`（私信；老键 dmMode 只在读老配置时迁移）；名单：`{"dmUids":["123","456"]}`、`{"mentionNames":["甲","乙"]}`。',
     parameters: { patch: { type: 'object', additionalProperties: true, description: '要改的字段（可省）' } },
     async execute(args) {
       let host = null
@@ -936,12 +962,11 @@ export function apply(ctx, config) {
     // ⭐ 2026-10-19：commentPerRound 升级成「每轮互动次数」—— 一个数同时压住「这一轮挑几条视频 / 发几条评论 / 私信里带几条」
     const interactN = Math.max(0, Math.min(Number(cfg.commentPerRound ?? 1) || 0, 20))
     const roundPick = Math.min(left, interactN)
-    // ⭐ 投递方式（2026-10-17 加）：dmMode = off（只评论）· only（只私信）· both（都发）
-    //    commentOn 是"这一轮到底能不能发公开评论"的唯一判据（工具层的闸用的是同一套逻辑）
+    // ⭐ 2026-10-20：投递拆成两个独立开关 —— 「公开评论」(autoComment) 与「私信」(autoDm)，不再有 only/both
     const mentions = mentionListOf(cfg)   // 要 @ 谁：mentionNames 优先，mentionName 兜底
-    const commentOn = Boolean(cfg.autoComment && mentions.length && cfg.dmMode !== 'only')
+    const commentsOn = Boolean(cfg.autoComment && mentions.length)
     const dmTargets = dmListOf(cfg)       // 私信发给谁：dmUids 优先，dmUid 兜底
-    const dmOn = Boolean(cfg.dmMode !== 'off' && dmTargets.length)
+    const dmOn = Boolean(cfg.autoDm && dmTargets.length)
     return `你是这个账号的 B站 助手。`
       + `下面是使用者的设定（如果有）—— **按它来**，别用你默认那套人格。`
       + ownerDoc
@@ -974,27 +999,25 @@ export function apply(ctx, config) {
       + `⭐ 另外把这一轮**看过的每一条视频（挑中的和跳过的都算）**追加进归档：${join(digestDir, `${dayKey().slice(0, 7)}.md`)}`
       + ` —— 一行一条：日期 · BV 号 · 标题 · UP · 一句话结论 · 链接（跳过的那条在后面注明理由）；`
       + `这是**给以后检索用**的（报告是给人看的，归档是给"回头翻"用的），别省略、也别只写挑中的。`
-      + `自动评论并 @ ${mentions.length ? mentions.join('、') : '（还没填要 @ 谁）'} 是${commentOn
-        ? `开着的（每轮互动次数 ${interactN}（这一轮挑几条视频、发几条评论、私信里带几条都按它），评论每条在正文里纯文本 @ 名单里的**全部 ${mentions.length} 个人**（${mentions.join(' ')}，每个名字前加 @、中间用空格隔开），150 字内）`
-        : (cfg.dmMode === 'only'
-          ? '关着的 —— 当前是「**只私信**」模式：**这一轮一条公开评论都不许发**，改走私信'
-          : '关着的（只写报告，别发评论）')}。`
+      + `这一轮投递：${commentsOn && dmOn ? '公开评论 + 私信（两样都发）' : commentsOn ? '只发公开评论' : dmOn ? '只发私信（公开评论关着，一条公开评论都不发）' : '都不发（只写报告）'}。`
+      + (commentsOn
+        ? `⭐ **公开评论**：每条挑中的视频，正文里纯文本 @ 名单里的**全部 ${mentions.length} 个人**（${mentions.join(' ')}，每个名字前加 @、中间空格隔开），150 字内；发完把评论 rpid 记进报告。`
+        : `⚠️ 这一轮**不发公开评论**（开关关着，或 @ 名单是空的）—— 正文那句话只留给私信用。`)
       + (dmOn
-        ? `⭐⭐ **私信投递**：用 bili_send_message 私信 UID **${dmTargets.join('、')}**。`
-          + `🔴 **规矩（2026-10-20 起）：一条评论 → 每个收件人各发一条私信**，`
-          + `这一轮挑 ${interactN} 条评论就发 ${interactN} × ${dmTargets.length} 条私信，**别合并成一条**；`
-          + `🔴 **私信正文 = 那条评论的正文去掉所有「@人名」**（其余一字不改）：评论里 @ 了几个就删几个；`
-          + `例：评论「@甲 @乙 @丙 这视频讲得值……」→ 私信「这视频讲得值……」。`
+        ? `⭐⭐ **私信**：用 bili_send_message 私信 UID **${dmTargets.join('、')}**。`
+          + `🔴 **一条评论 → 每个收件人各发一条私信**，这一轮挑 ${interactN} 条评论就发 ${interactN} × ${dmTargets.length} 条，**别合并成一条**；`
+          + (commentsOn
+            ? `🔴 **私信正文 = 那条评论的正文去掉所有「@人名」**（其余一字不改）：评论里 @ 了几个就删几个；`
+            : `🔴 公开评论没开 ⇒ **私信正文就是那句本来要发的评论正文**（去掉所有 @人名 之后的样子，本来没 @ 就原样用）；`)
           + `🔴 **末尾另起一行补视频链接**（就是这条评论对应的视频，别搞错）：https://www.bilibili.com/video/BV号；`
           + `⚠️ 删掉 @ 后若只剩空，就别发这条私信，报告里记一句跳过。`
           + `🔴🔴 **私信是写给「人」看的，必须是干净的人话** —— **不许出现任何设置名 / 内部术语 / 台账口径** ✗：`
-          + `dmMode、only、判据、白名单、prompt、token、复核 这类词，**一个都不许出现在私信正文里**；`
+          + `autoComment、autoDm、only、both、判据、白名单、prompt、token、复核 这类词，**一个都不许出现在私信正文里**；`
           + `**更不许写「公开评论一条没发 / 楼中楼跳过」这种内部机制说明** ✗。`
           + `⚠️ 私信里**不用 @ 任何人**；⚠️ 私信里**不要**写"本鱼 / 本鲸 / 主人 / 人家"那套；`
           + `⚠️ 发完把「已私信 ${dmTargets.length} 人 × N 条」记进报告（**报告里**可以写口径）。`
-          + (cfg.dmMode === 'both' ? `⚠️ 现在是 **both**：公开评论照发（走下面那一整套规矩），私信**另外**再发一条。` : '')
         : '')
-      + (cfg.replyToComments
+      + (commentsOn && cfg.replyToComments
         ? `回复评论：开着（每轮最多回 ${Number(cfg.replyPerRound) || 1} 条）—— 只回「直接回复到你那条评论下面的人」，回完记进报告；找不到你那条评论就跳过，别硬找。`
           + ((Array.isArray(cfg.replyKeywords) ? cfg.replyKeywords : []).length
             ? `识别词：${cfg.replyKeywords.join('、')} —— **只有留言里带这些词的人才回**；一个都没带就这一轮谁都不回（别硬凑）。`
@@ -1613,7 +1636,7 @@ export function apply(ctx, config) {
       const body = await readBody(req)
       const patch = {}
       for (const k of ['perDay', 'everyDays', 'peakValley', 'noon', 'night', 'autoComment', 'transcribe', 'asrModel',
-        'commentPerRound', 'mentionName', 'mentionNames', 'dmMode', 'dmUid', 'dmUids',
+        'commentPerRound', 'mentionName', 'mentionNames', 'autoDm', 'dmMode', 'dmUid', 'dmUids',
         'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound',
         'replyKeywords', 'windows']) {
         if (k in body) patch[k] = body[k]

@@ -155,7 +155,7 @@ window.__ModuleLoader__.load({
       const [replyPer, setReplyPer] = React.useState(null)
       const [replyKws, setReplyKws] = React.useState(null)   // 楼中楼识别词草稿（一行一个）
       const [dmUids, setDmUids] = React.useState(null)      // 私信收件人名单草稿（数组；null = 还没从服务端灌过）
-      const [dmMode, setDmMode] = React.useState(null)      // 投递方式：off / only / both
+      const [autoDm, setAutoDm] = React.useState(null)      // 投递方式：off / only / both
       const [mentionNames, setMentionNames] = React.useState(null)   // 要 @ 谁的名单草稿（null = 还没从服务端灌过）
       const [login, setLogin] = React.useState(null)
       const [runNote, setRunNote] = React.useState(null)
@@ -189,10 +189,14 @@ window.__ModuleLoader__.load({
         if (cfg && dmUids === null) setDmUids((Array.isArray(cfg.dmUids) && cfg.dmUids.length)
           ? cfg.dmUids.map((u) => String(u))
           : (Number(cfg.dmUid) > 0 ? [String(cfg.dmUid)] : []))
-        if (cfg && dmMode === null) setDmMode(cfg.dmMode || 'off')
+        if (cfg && autoDm === null) setAutoDm(Boolean(cfg.autoDm ?? (cfg.dmMode && cfg.dmMode !== 'off')))
       }, [cfg])
 
       const win = { ...DEFAULT_WINDOWS, ...(st?.windows || {}) }
+      const mentionCount = (mentionNames || []).map((s) => String(s || '').trim()).filter(Boolean).length
+      const dmCount = (dmUids || []).map((u) => String(u || '').trim()).filter(Boolean).length
+      const commentsOnNow = Boolean(cfg?.autoComment && mentionCount)
+      const dmOnNow = Boolean((autoDm ?? cfg?.autoDm) && dmCount)
 
       const say = (text, tone) => {
         setMsg(text); setMsgTone(tone || '')
@@ -465,100 +469,96 @@ window.__ModuleLoader__.load({
                   onBlur: (e) => onWinTime(k, 'end', e),
                 }))))) : null),
 
-        /* ── 一轮挑几条 ── */
+        /* ── 每天跑多少 ── */
         h('div', { 'data-bd-sec': '' },
-          h('div', { 'data-bd-h': '' }, '一轮挑几条'),
-          h('div', { 'data-bd-row': '' },
-            h('div', { 'data-bd-grow': '' },
-              h('div', { 'data-bd-label': '' }, '每天最多挑几条'),
-              h('div', { 'data-bd-note': '' }, '填 0 = 不自动刷（还是能手动跑）')),
+          h('div', { 'data-bd-h': '' }, '每天跑多少'),
+          h('div', { 'data-bd-row': '', style: { flexWrap: 'wrap', gap: '6px' } },
+            h('span', { 'data-bd-note': '' }, '每天最多挑'),
             h('input', {
               'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 0, max: 50,
+              style: { flex: '0 0 84px', textAlign: 'center' },
               value: perDay ?? '',
               onChange: (e) => setPerDay(e.target.value),
               onBlur: () => { const n = Math.max(0, Math.min(Number(perDay) || 0, 50)); setPerDay(String(n)); patch({ perDay: n }, '每天挑几条') },
-            })),
-          h('div', { 'data-bd-row': '' },
-            h('div', { 'data-bd-grow': '' },
-              h('div', { 'data-bd-label': '' }, '每几天自动跑一轮'),
-              h('div', { 'data-bd-note': '' }, '填 1 = 每个谷时都跑；填 3 = 隔三天跑一次（只拦自动跑，手动按钮随时能跑）')),
+            }),
+            h('span', { 'data-bd-note': '' }, '条；每'),
             h('input', {
               'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 1, max: 9,
+              style: { flex: '0 0 84px', textAlign: 'center' },
               value: everyDays ?? '',
               onChange: (e) => setEveryDays(e.target.value),
               onBlur: () => { const n = Math.max(1, Math.min(Number(everyDays) || 1, 9)); setEveryDays(String(n)); patch({ everyDays: n }, '每几天跑一轮') },
-            })),
+            }),
+            h('span', { 'data-bd-note': '' }, '天自动跑一轮，每轮互动'),
+            h('input', {
+              'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 0, max: 20,
+              style: { flex: '0 0 84px', textAlign: 'center' },
+              value: perRound ?? '',
+              onChange: (e) => setPerRound(e.target.value),
+              onBlur: () => { const n = Math.max(0, Math.min(Number(perRound) || 0, 20)); setPerRound(String(n)); patch({ commentPerRound: n }, '每轮互动次数') },
+            }),
+            h('span', { 'data-bd-note': '' }, '条')),
+          h('div', { 'data-bd-note': '' },
+            '「每轮互动」一个数同时压住三处：这一轮挑几条视频、发几条评论、私信里带几条；填 0 = 这一轮不发评论/私信。'
+            + ' 「每天最多挑」是全天总量；「每几天」只拦自动跑，手动按钮随时能跑。'),
           st.lastRunAt ? h('div', { 'data-bd-note': '' }, `上次跑：${new Date(st.lastRunAt).toLocaleString('zh-CN')}`) : null),
 
         /* ── 发言与转写 ── */
         h('div', { 'data-bd-sec': '' },
           h('div', { 'data-bd-h': '' }, '它会不会替你说话'),
           h(ToggleRow, {
-            label: '回复评论（只回楼中楼）',
-            note: '默认关；开了之后它只回「直接回复到你那条评论下面的人」，不参与讨论',
-            on: sw('replyToComments'),
-            onChange: (v) => patch({ replyToComments: v }, '回复评论'),
-          }),
-          sw('replyToComments') ? h('div', { 'data-bd-sub': '' },
-            h('div', { 'data-bd-row': '' },
-              h('div', { 'data-bd-grow': '' },
-                h('div', { 'data-bd-label': '' }, '每轮最多回几条'),
-                h('div', { 'data-bd-note': '' }, '只回直接回在你那条评论下面的人')),
-              h('input', {
-                'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 1, max: 10,
-                value: replyPer ?? '',
-                onChange: (e) => setReplyPer(e.target.value),
-                onBlur: () => { const n = Math.max(1, Math.min(Number(replyPer) || 1, 10)); setReplyPer(String(n)); patch({ replyPerRound: n }, '每轮几条回复') },
-              })),
-            h('div', { 'data-bd-label': '' }, '识别词（可选，一行一个）'),
-            h('textarea', {
-              'data-bd-input': '', rows: 3, value: replyKws ?? '',
-              placeholder: '比如 插件 / 好用 / 怎么装 —— 只有留言里带这些词的人才回；留空 = 谁直接回你都回',
-              onChange: (e) => setReplyKws(e.target.value),
-            }),
-            h('button', {
-              'data-bd-btn': '',
-              onClick: () => patch({ replyKeywords: String(replyKws || '').split('\n').map((s) => s.trim()).filter(Boolean) }, '识别词'),
-            }, '保存识别词')) : null,
-          h(ToggleRow, {
-            label: '自动评论并 @ 你',
-            note: '默认关；开了之后它会在挑中的视频下面留评论，并 @ 你填的那个人',
+            label: '自动公开评论',
+            note: '默认关；开了之后它会在挑中的视频下面留评论，并把「要 @ 谁」名单里的人全 @ 上',
             on: sw('autoComment'),
-            onChange: (v) => patch({ autoComment: v }, '自动评论'),
+            onChange: (v) => patch({ autoComment: v }, '自动公开评论'),
           }),
           sw('autoComment') ? h('div', { 'data-bd-sub': '' },
-            h('div', { 'data-bd-row': '' },
-              h('div', { 'data-bd-grow': '' },
-                h('div', { 'data-bd-label': '' }, '每轮互动次数'),
-                h('div', { 'data-bd-note': '' }, '一个数同时压住三处：这一轮挑几条视频、发几条评论、私信里带几条；填 0 = 这一轮不发评论')),
-              h('input', {
-                'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 0, max: 20,
-                value: perRound ?? '',
-                onChange: (e) => setPerRound(e.target.value),
-                // ⭐ 0 是合法值（= 这一轮不发评论）；范围与 index.js 的 clampPatch 一致（0–20）
-                onBlur: () => { const n = Math.max(0, Math.min(Number(perRound) || 0, 20)); setPerRound(String(n)); patch({ commentPerRound: n }, '每轮互动次数') },
-              })),
             h('div', { 'data-bd-label': '' }, '要 @ 谁（B站 昵称，可以填多个）'),
             ...(mentionNames || []).map((name, i) => h('div', { 'data-bd-row': '', key: 'mention-' + i },
               h('input', {
                 'data-bd-input': '', value: name,
-                placeholder: i === 0 ? '填你要 @ 的人的 B站 昵称；留空 = 只写报告、不发评论' : '再加一个要 @ 的人',
+                placeholder: i === 0 ? '填你要 @ 的人的 B站 昵称；留空 = 只写报告、不发公开评论' : '再加一个要 @ 的人',
                 onChange: (e) => onMentionAt(i, e.target.value),
                 onBlur: () => commitMentions(mentionNames || []),
               }),
               h('button', { 'data-bd-btn': '', onClick: () => onMentionDrop(i) }, '删'))),
             h('button', { 'data-bd-btn': '', onClick: onMentionAdd }, '＋ 加一个要 @ 的人'),
-            h('div', { 'data-bd-note': '' }, '留空的话它就不发评论了 —— 因为评论存在的意义就是 @ 那一下；',
-              h('br'), '填多个的话，每条评论轮流 @ 一个（不会一条里 @ 一串）')) : null,
-          h('div', { 'data-bd-label': '' }, '投递方式（评论 还是 私信）'),
-          h('select', {
-            'data-bd-input': '', value: dmMode ?? 'off',
-            onChange: (e) => { setDmMode(e.target.value); patch({ dmMode: e.target.value }, '投递方式') },
-          },
-            h('option', { value: 'off' }, '只发评论 —— 在视频下面 @ 你（默认）'),
-            h('option', { value: 'only' }, '只私信 —— 一条公开评论都不发，最不打扰别人'),
-            h('option', { value: 'both' }, '评论 + 私信 —— 两边都发')),
-          (dmMode && dmMode !== 'off') ? h('div', { 'data-bd-sub': '' },
+            h('div', { 'data-bd-note': '' }, '名单空着的话这一轮就不发公开评论 —— 评论存在的意义就是 @ 那一下；',
+              h('br'), '填多个的话，每条评论把他们**全部** @ 上（每个名字前加 @、中间用空格隔开）'),
+            h(ToggleRow, {
+              label: '回复楼中楼（只回直接回你的人）',
+              note: '默认关；开了之后它只回「直接回复到你那条评论下面的人」，不参与讨论',
+              on: sw('replyToComments'),
+              onChange: (v) => patch({ replyToComments: v }, '回复评论'),
+            }),
+            sw('replyToComments') ? h('div', { 'data-bd-sub': '' },
+              h('div', { 'data-bd-row': '' },
+                h('div', { 'data-bd-grow': '' },
+                  h('div', { 'data-bd-label': '' }, '每轮最多回几条'),
+                  h('div', { 'data-bd-note': '' }, '只回直接回在你那条评论下面的人')),
+                h('input', {
+                  'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 1, max: 10,
+                  value: replyPer ?? '',
+                  onChange: (e) => setReplyPer(e.target.value),
+                  onBlur: () => { const n = Math.max(1, Math.min(Number(replyPer) || 1, 10)); setReplyPer(String(n)); patch({ replyPerRound: n }, '每轮几条回复') },
+                })),
+              h('div', { 'data-bd-label': '' }, '识别词（可选，一行一个）'),
+              h('textarea', {
+                'data-bd-input': '', rows: 3, value: replyKws ?? '',
+                placeholder: '比如 插件 / 好用 / 怎么装 —— 只有留言里带这些词的人才回；留空 = 谁直接回你都回',
+                onChange: (e) => setReplyKws(e.target.value),
+              }),
+              h('button', {
+                'data-bd-btn': '',
+                onClick: () => patch({ replyKeywords: String(replyKws || '').split('\n').map((s) => s.trim()).filter(Boolean) }, '识别词'),
+              }, '保存识别词')) : null) : null,
+          h(ToggleRow, {
+            label: '私信',
+            note: '默认关；开了之后，每条评论的正文会另发一条私信给下面填的 UID（末尾带视频链接）',
+            on: Boolean(autoDm),
+            onChange: (v) => { setAutoDm(v); patch({ autoDm: v }, '私信') },
+          }),
+          autoDm ? h('div', { 'data-bd-sub': '' },
             h('div', { 'data-bd-label': '' }, '私信发给谁（B站 UID，数字，可以填多个）'),
             ...(dmUids || []).map((uid, i) => h('div', { 'data-bd-row': '', key: 'dm-' + i },
               h('input', {
@@ -569,10 +569,10 @@ window.__ModuleLoader__.load({
               }),
               h('button', { 'data-bd-btn': '', onClick: () => onDmUidDrop(i) }, '删'))),
             h('button', { 'data-bd-btn': '', onClick: onDmUidAdd }, '＋ 加一个收件人'),
-            h('div', { 'data-bd-note': '' }, '私信内容 = 本轮每条的「标题 + 链接 + 一句话」，一轮合并成一条发（不受 150 字限制）；',
-              h('br'), '填多个收件人的话，每个人各发一条（内容相同）'),
+            h('div', { 'data-bd-note': '' }, '每条评论对应每个收件人各发一条；正文 = 那条评论去掉全部 @人名，末尾另起一行补视频链接（不受 150 字限制）；',
+              h('br'), '公开评论关着时，那句话就直接当私信正文发'),
             h('div', { 'data-bd-note': '' }, '⚠️ 建议先让这个号和收件人互关：B站 对「陌生人私信」会限流，还可能不弹提醒')) : null,
-          h(ToggleRow, {
+﻿          h(ToggleRow, {
             label: '本地转写没字幕的视频',
             note: '默认关；开了以后，没字幕的视频会在本机转写一遍（不花 API 钱）',
             on: sw('transcribe'),
@@ -591,9 +591,16 @@ window.__ModuleLoader__.load({
               '（模型默认 small，几百 MB，走国内镜像；装一次就够了）'),
             st.asrTail ? h('div', null,
               h('div', { 'data-bd-note': '' }, st.asrInstalling ? '正在装转写依赖（进度）：' : '转写依赖的日志（末尾）—— 只有「没字幕的视频」用得到它：'),
-              h('pre', { 'data-bd-pre': '' }, st.asrTail)) : null) : null),
+              h('pre', { 'data-bd-pre': '' }, st.asrTail)) : null) : null,
+          h('div', { 'data-bd-note': '', style: { marginTop: '8px' } },
+            '这一轮：' + (commentsOnNow && dmOnNow
+              ? `评论 ${mentionCount} 人 · 私信 ${dmCount} 人`
+              : commentsOnNow ? `只发公开评论（@ ${mentionCount} 人）`
+                : dmOnNow ? '只发私信（公开评论关着）'
+                  : '只写报告，不发评论 / 私信'))),
 
         /* ── 关注什么 / 在哪儿刷 ── */
+
         h('div', { 'data-bd-sec': '' },
           h('div', { 'data-bd-h': '' }, '关注什么'),
           h('textarea', {

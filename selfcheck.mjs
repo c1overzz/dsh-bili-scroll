@@ -53,6 +53,12 @@ try {
 console.log(`✓ host 半端 OK：name=${mod.name}  inject=${JSON.stringify(mod.inject)}  工具 ${registered.length} 个`)
 for (const n of registered) console.log(`    - ${n}`)
 
+/* ── 白名单：私信模式必须把 bili_send_message 放进白名单（issue #25 / #16）── */
+const dmTools = mod.mcpToolList({ autoDm: true, dmUid: 12345 })
+if (!dmTools.includes('bili_send_message')) fail('私信开着却没给 bili_send_message —— 模型手里没有这只工具')
+const offTools = mod.mcpToolList({ autoDm: false, dmUid: 12345 })
+if (offTools.includes('bili_send_message')) fail('私信关着也给了 bili_send_message（白名单太松）')
+console.log('✓ 修复② MCP 白名单 OK：' + dmTools.join(' / '))
 /* ────────────── ② client 半端：假 window.__ModuleLoader__ 上真跑 factory() ────────────── */
 
 const pkg = JSON.parse(readFileSync('./package.json', 'utf8'))
