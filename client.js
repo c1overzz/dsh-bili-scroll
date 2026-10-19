@@ -154,7 +154,7 @@ window.__ModuleLoader__.load({
       const [replyPer, setReplyPer] = React.useState(null)
       const [dmUid, setDmUid] = React.useState(null)        // 私信收件人 UID（本地草稿）
       const [dmMode, setDmMode] = React.useState(null)      // 投递方式：off / only / both
-      const [mention, setMention] = React.useState(null)
+      const [mentionNames, setMentionNames] = React.useState(null)   // 要 @ 谁的名单草稿（null = 还没从服务端灌过）
       const [login, setLogin] = React.useState(null)
       const [runNote, setRunNote] = React.useState(null)
       const [report, setReport] = React.useState(null)        // 非 null = 报告已展开   // 顶部那行状态（跑一轮/装依赖的反馈原来在最底下，看不见）
@@ -177,7 +177,10 @@ window.__ModuleLoader__.load({
         if (cfg && perDay === null) setPerDay(String(cfg.perDay ?? 5))
         if (cfg && perRound === null) setPerRound(String(cfg.commentPerRound ?? 1))
         if (cfg && replyPer === null) setReplyPer(String(cfg.replyPerRound ?? 1))
-        if (cfg && mention === null) setMention(cfg.mentionName || '')
+        // ⭐ 名单草稿：以 mentionNames 为准；老配置只有 mentionName 时把它塞进列表里（显示即所见）
+        if (cfg && mentionNames === null) setMentionNames((Array.isArray(cfg.mentionNames) && cfg.mentionNames.length)
+          ? cfg.mentionNames.map((s) => String(s))
+          : (cfg.mentionName ? [String(cfg.mentionName)] : []))
         if (cfg && dmUid === null) setDmUid(cfg.dmUid ? String(cfg.dmUid) : '')
         if (cfg && dmMode === null) setDmMode(cfg.dmMode || 'off')
       }, [cfg])
@@ -351,6 +354,20 @@ window.__ModuleLoader__.load({
         await patch({ keywords: list, workspace: String(ws || '').trim() }, '关键词与工作区')
       }
 
+      /* ⭐ 要 @ 谁：名单草稿在本地，失焦 / 增删时整份写回去（不能一条条 patch，会互相覆盖） */
+      const commitMentions = (list) =>
+        patch({ mentionNames: list.map((s) => String(s ?? '').trim()).filter(Boolean) }, '要 @ 谁')
+
+      const onMentionAt = (i, v) => setMentionNames((a) => (a || []).map((s, j) => (j === i ? v : s)))
+
+      const onMentionAdd = () => setMentionNames((a) => [...(a || []), ''])
+
+      const onMentionDrop = (i) => {
+        const next = (mentionNames || []).filter((_, j) => j !== i)
+        setMentionNames(next)
+        commitMentions(next)     // 删掉一个也要立刻落盘 —— 那个输入框失焦事件已经不会再来了
+      }
+
       if (!cfg) {
         return h('div', { 'data-bd-page': '' },
           h('div', { 'data-bd-note': '' }, fails >= 3
@@ -456,14 +473,18 @@ window.__ModuleLoader__.load({
                 // ⭐ 0 是合法值（= 这一轮不发评论）；范围与 index.js 的 clampPatch 一致（0–20）
                 onBlur: () => { const n = Math.max(0, Math.min(Number(perRound) || 0, 20)); setPerRound(String(n)); patch({ commentPerRound: n }, '每轮几条评论') },
               })),
-            h('div', { 'data-bd-label': '' }, '要 @ 谁（B站 昵称）'),
-            h('input', {
-              'data-bd-input': '', value: mention ?? '',
-              placeholder: '填你要 @ 的那个人的 B站 昵称；留空 = 只写报告、不发评论',
-              onChange: (e) => setMention(e.target.value),
-              onBlur: () => { const v = String(mention || '').trim(); setMention(v); patch({ mentionName: v }, '要 @ 谁') },
-            }),
-            h('div', { 'data-bd-note': '' }, '留空的话它就不发评论了 —— 因为评论存在的意义就是 @ 那一下')) : null,
+            h('div', { 'data-bd-label': '' }, '要 @ 谁（B站 昵称，可以填多个）'),
+            ...(mentionNames || []).map((name, i) => h('div', { 'data-bd-row': '', key: 'mention-' + i },
+              h('input', {
+                'data-bd-input': '', value: name,
+                placeholder: i === 0 ? '填你要 @ 的人的 B站 昵称；留空 = 只写报告、不发评论' : '再加一个要 @ 的人',
+                onChange: (e) => onMentionAt(i, e.target.value),
+                onBlur: () => commitMentions(mentionNames || []),
+              }),
+              h('button', { 'data-bd-btn': '', onClick: () => onMentionDrop(i) }, '删'))),
+            h('button', { 'data-bd-btn': '', onClick: onMentionAdd }, '＋ 加一个要 @ 的人'),
+            h('div', { 'data-bd-note': '' }, '留空的话它就不发评论了 —— 因为评论存在的意义就是 @ 那一下；',
+              h('br'), '填多个的话，每条评论轮流 @ 一个（不会一条里 @ 一串）')) : null,
           h('div', { 'data-bd-label': '' }, '投递方式（评论 还是 私信）'),
           h('select', {
             'data-bd-input': '', value: dmMode ?? 'off',
