@@ -135,6 +135,9 @@ export const Config = !z ? undefined : z.object({
   replyPerRound: z.number().default(1).extra('volatile', true),
   /** ⭐ 楼中楼识别词（可选）：非空时只回留言里带这些词的；空 = 不看内容（谁直接回它就回谁） */
   replyKeywords: z.array(z.string()).default([]).extra('volatile', true),
+  /** ⭐ 谷时窗口覆盖（可选）：只改 start/end，label 沿用 lib/state.mjs 默认；空 = 12:00–14:00 / 18:00–09:00
+   *  ⚠️ 用 z.any()：schemastery 的对象没有 .optional()，形状由 clampPatch 兜（写/读两头都钳） */
+  windows: z.any().default({}).extra('volatile', true),
 })
 
 /**
@@ -176,6 +179,24 @@ export const mentionListOf = (cfg = {}) => {
     .map((s) => String(s ?? '').trim())
     .filter(Boolean)
   return [...new Set(list)].slice(0, 10)
+}
+
+/* ─── 功能④：谷时窗口可以自己改（原来写死在 lib/state.mjs）────────────────── */
+
+/** 归一化窗口覆盖（纯函数，给 selfcheck 断言）：只认 `HH:MM`，不合法/缺一半的那档直接丢 ⇒ 回落到默认 */
+export const normWindows = (w = {}) => {
+  const hhmm = (v) => {
+    const m = /^(\d{1,2}):(\d{1,2})$/.exec(String(v ?? '').trim())
+    if (!m) return ''
+    return `${String(Math.min(23, Number(m[1]))).padStart(2, '0')}:${String(Math.min(59, Number(m[2]))).padStart(2, '0')}`
+  }
+  const out = {}
+  for (const k of ['noon', 'night']) {
+    const start = hhmm(w?.[k]?.start)
+    const end = hhmm(w?.[k]?.end)
+    if (start && end) out[k] = { start, end }
+  }
+  return out
 }
 
 /* ─── 功能②：私信可以发给多个人 ────────────────────────────────────────────── */
@@ -292,7 +313,7 @@ export function apply(ctx, config) {
   const DEFAULTS = {
     perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
     dmMode: 'off', dmUid: 0, dmUids: [],
-    keywords: [], commentPerRound: 1, mentionName: '', mentionNames: [], pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, replyKeywords: [],
+    keywords: [], commentPerRound: 1, mentionName: '', mentionNames: [], pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, replyKeywords: [], windows: {},
   }
   const normalize = (src, base) => {
     const out = { ...base }
@@ -335,6 +356,8 @@ export function apply(ctx, config) {
     // ⭐ 楼中楼识别词：去空、去重、最多 20 个
     if ('replyKeywords' in p) p.replyKeywords = [...new Set((Array.isArray(p.replyKeywords) ? p.replyKeywords : [])
       .map((s) => String(s ?? '').trim()).filter(Boolean))].slice(0, 20)
+    // ⭐ 谷时窗口：只认 HH:MM；不合法的那一档直接丢（宁可回默认，也别让定时器按坏时间跑）
+    if ('windows' in p) p.windows = normWindows(p.windows)
     return p
   }
 
@@ -434,6 +457,8 @@ export function apply(ctx, config) {
   const cfg = loadCfg()
   // ⭐ 配置是"随时可能被设置页就地改掉"的东西 ⇒ 每个入口用之前重算一遍（cfg 这个对象要一直指向同一份）
   const refreshCfg = () => { Object.assign(cfg, loadCfg()) }
+  // ⭐ 谷时窗口 = lib/state.mjs 的默认值 + 用户在设置页覆盖的 start/end（只覆盖时间，label 沿用默认）
+  const effWindows = () => Object.fromEntries(Object.entries(WINDOWS).map(([k, w]) => [k, { ...w, ...(cfg.windows?.[k] || {}) }]))
   const saveCfg = (patch) => {
     Object.assign(cfg, normalize(patch, cfg))
     // ⭐ 记下"这些键由插件面板说了算"（0.1.11：loadCfg 拿它决定谁赢）
@@ -655,7 +680,7 @@ export function apply(ctx, config) {
         perDay: cfg.perDay,
         // ⭐ 2026-10-19：这一轮会用哪个 dsh（空 = 没找到 ⇒ 那一轮根本跑不起来）
         dshCli: dshCliCached(),
-        windows: Object.fromEntries(Object.entries(WINDOWS).map(([k, w]) => [k, {
+        windows: Object.fromEntries(Object.entries(effWindows()).map(([k, w]) => [k, {
           label: w.label, start: w.start, end: w.end,
           switchOn: Boolean(cfg[k]),
           opening: inWindow(now, w),
@@ -734,7 +759,7 @@ export function apply(ctx, config) {
         // ⭐ 设置页显式设过的键以宿主为准 ⇒ 必须跟着写一份，否则"改了没反应"（钳范围也在这里）
         host = (await persistCfg(args.patch)).host
       }
-      return { ok: true, config: cfg, windows: WINDOWS, home: stateDir, venvReady: venvReadyNow(), host }
+      return { ok: true, config: cfg, windows: effWindows(), home: stateDir, venvReady: venvReadyNow(), host }
     },
   })
 
@@ -1224,7 +1249,7 @@ export function apply(ctx, config) {
       if (String(cfg.reportLevel || 'full') === 'off' && roundsToday(now) >= 1) return
       for (const k of ['noon', 'night']) {
         if (!cfg[k]) continue
-        if (!inWindow(now, WINDOWS[k])) continue
+        if (!inWindow(now, effWindows()[k])) continue
         const key = `${today}:${k}`
         if (st.windows?.[key]) continue
         bumpState({ windows: { ...(st.windows || {}), [key]: true }, count: roundsToday(now) + 1, lastRunAt: now.toISOString(), lastWhy: k })
@@ -1558,7 +1583,7 @@ export function apply(ctx, config) {
       ok: true,
       home: stateDir,
       config: cfg,
-      windows: WINDOWS,
+      windows: effWindows(),
       today,
       ranToday: st.day === today ? Number(st.count || 0) : 0,   // 今天跑了几轮
       pickedToday: countPickedToday(),                          // 今天挑到几条（从报告里数）
@@ -1595,7 +1620,7 @@ export function apply(ctx, config) {
     if (req.method === 'GET' && path === '/api/bili-duty/status') return sendJson(res, 200, status())
 
     if (req.method === 'GET' && path === '/api/bili-duty/config') {
-      return sendJson(res, 200, { ok: true, config: cfg, windows: WINDOWS, home: stateDir })
+      return sendJson(res, 200, { ok: true, config: cfg, windows: effWindows(), home: stateDir })
     }
 
     if (req.method === 'POST' && path === '/api/bili-duty/config') {
@@ -1604,7 +1629,7 @@ export function apply(ctx, config) {
       for (const k of ['perDay', 'peakValley', 'noon', 'night', 'autoComment', 'transcribe', 'asrModel',
         'commentPerRound', 'mentionName', 'mentionNames', 'dmMode', 'dmUid', 'dmUids',
         'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound',
-        'replyKeywords']) {
+        'replyKeywords', 'windows']) {
         if (k in body) patch[k] = body[k]
       }
       // ⭐ 范围钳制 + 两份都写（config.json / DSH 原生设置页），统一走 persistCfg —— 见文件上方
