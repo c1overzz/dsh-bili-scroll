@@ -1,3 +1,21 @@
+## 0.2.0 — 2026-10-20
+
+**新：「荐片」模式 —— 按你的 B站 浏览历史做个性化推荐，推到 DSH 面板和手机**
+
+- 每轮先读最近 N 天浏览历史（含**看到第几分钟**）→ 算完播率 → 更新 `profile.md` 兴趣画像；
+- 多路召回（首页推荐流 / 看过的视频的相关推荐 / 关注 UP 新稿 / 稍后再看 / 按画像搜索 / 热榜兜底）
+  → 去重（历史 + 已推）→ 硬过滤（avoid / 时长 / 标题党）→ 轻筛 → 精读简介·评论·字幕 → 打分；
+- 产出 1–10 条（默认 4）「是什么 + 为什么推给你 + 看点」，写进 `feed/batches/<batchId>.json`；
+- **DSH 左侧栏 🐟 打开「荐片」面板**：封面卡片、摘要、推荐理由、看点、喜欢 / 不感兴趣 / 已看过、画像查看与编辑；
+- **手机推送**四种通道：Server酱³ / ntfy / 企业微信 / 自定义 webhook（URL 由用户自己填，插件不内置任何 key）；
+- 定时：`feedTimes` 1–3 个时间点（本地时间）；深度三档 `light / medium / deep`（默认 `medium`）；
+- **全程不公开发言**：不评论、不私信、不发动态；历史 / 画像 / 反馈只存在 `<DSH_HOME>/bili-duty/feed/`；
+- 新增 4 个 DSH 工具：`bili_feed_status` / `bili_feed_run` / `bili_feed_feedback` / `bili_feed_profile`；
+- 新增 6 个 MCP 工具：`bili_history` / `bili_rcmd_feed` / `bili_related` / `bili_toview` / `bili_followings` / `bili_up_videos`；
+- 新增两道自检：`node tools/feed-unit.mjs`（纯函数 29 项）、`node tools/feed-host-test.mjs`（路由/配置 11 项）。
+
+---
+
 ## 0.1.13 — 2026-10-19
 
 **修（严重：设置页停在"读设置中…"，0.1.11 / 0.1.12 都带这个 bug）**

@@ -14,17 +14,23 @@ B站数据采集 MCP 服务，支持 OpenClaw / Claude Code / Cursor / Cline
 #      ③ 登录成功后凭证**原子写**（先写 .tmp 再 os.replace）
 #      ④ `bili_comments` 把抓取异常带进返回（风控 -412 不再伪装成"这条视频 0 条评论"）
 #      ⑤ `bili_reply` 回执带上 `rpid` / `rpid_str` / `root` / `parent`（判重表与评论复核要用）
+#      ⑥ 「荐片」召回用的 6 个只读工具（bili_history / bili_rcmd_feed / bili_related /
+#         bili_toview / bili_followings / bili_up_videos）：风控/网络错误带 `error` 字段、
+#         不吞成空列表；分页拉取带限速；字段名按 `_scratch/bili-feed/02-需求定稿与技术方案.md` §9 冻结合同
+#      ⑦ 「荐片」的 batch 要 `pubdate`：`bili_search` / `bili_video_info` 各**追加**一个 `pubdate` 字段
+#         （纯增量，老调用方忽略即可；拿不到给 0）
 import asyncio
 import json
 import base64
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
 from bilibili_api import video, search, comment, Credential, dynamic, opus
-from bilibili_api import hot, rank, user, session, favorite_list
+from bilibili_api import hot, rank, user, session, favorite_list, homepage
 from bilibili_api.video_uploader import (
     VideoUploader, VideoUploaderPage, VideoMeta, Lines,
 )
@@ -302,6 +308,8 @@ async def bili_search(keyword: str, num: int = 10, order: str = "totalrank") -> 
             "danmaku": item.get("video_review", 0),
             "duration": item.get("duration", ""),
             "description": item.get("description", "")[:200],
+            # 荐片 batch 的 item 需要 pubdate（秒级）；纯增量字段，老调用方忽略即可
+            "pubdate": item.get("pubdate", 0) or 0,
         })
 
     return json.dumps({"keyword": keyword, "count": len(videos), "videos": videos}, ensure_ascii=False)
@@ -493,6 +501,8 @@ async def bili_video_info(bvid: str) -> str:
         "description": info.get("desc"),
         "author": info.get("owner", {}).get("name"),
         "duration": info.get("duration"),
+        # 荐片 batch 的 item 需要 pubdate（秒级）；纯增量字段，老调用方忽略即可
+        "pubdate": info.get("pubdate", 0) or 0,
         "pages": len(info.get("pages", [])),
         "tags": [t.get("tag_name") for t in info.get("tag", []) if t.get("tag_name")],
         "stat": {
@@ -1408,6 +1418,448 @@ async def bili_received_at_and_likes() -> str:
     except Exception as e:
         result["likes_error"] = str(e)
     return json.dumps(result, ensure_ascii=False)
+
+
+# ========================================================================
+#        V1.3 — 「荐片」召回（只读，供每日荐片那一轮拼候选池）
+#
+# 合同：`_scratch/bili-feed/02-需求定稿与技术方案.md` §9（字段名一个都不能改）。
+# 约定：
+#   · 全部走 `get_cred()`：没登录直接抛错（和既有工具一致），**不静默返回空列表**；
+#   · 抓取失败（风控 -412 / 网络异常 / 接口改版）一律把异常写进 `error` 字段
+#     （参考 `bili_comments` 的做法）——调用方必须能分辨「真的没有」和「没抓到」；
+#   · 所有返回都 `json.dumps(..., ensure_ascii=False)`。
+# ========================================================================
+
+
+def _err(e: Exception) -> str:
+    """统一异常文本：带上类型，方便调用方/日志区分是风控还是网络还是代码问题。"""
+    return f"{type(e).__name__}: {e}"
+
+
+def _as_int(val, default: int = 0) -> int:
+    """宽容地转 int（接口偶尔给字符串 / None）。"""
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return default
+
+
+def _cover(url) -> str:
+    """封面统一成 https 绝对地址：部分接口给的是 `//i0.hdslb.com/...` 协议相对地址。"""
+    s = str(url or "")
+    if s.startswith("//"):
+        return "https:" + s
+    return s
+
+
+def _duration_seconds(item: dict) -> int:
+    """时长统一成秒：视频卡片给 int；UP 投稿列表给 `length`（"12:34"）字符串。"""
+    dur = item.get("duration")
+    if isinstance(dur, (int, float)):
+        return int(dur)
+    if isinstance(dur, str) and dur.strip().isdigit():
+        return int(dur.strip())
+    length = item.get("length")
+    if isinstance(length, str) and ":" in length:
+        secs = 0
+        for part in length.split(":"):
+            secs = secs * 60 + _as_int(part)
+        return secs
+    return _as_int(length if length is not None else dur)
+
+
+def _brief_video(item) -> dict:
+    """把「推荐流 / 相关推荐」的视频卡片压成合同要求的紧凑字段（缺的给空/0，不抛）。"""
+    if not isinstance(item, dict):
+        return {}
+    owner = item.get("owner") or {}
+    stat = item.get("stat") or {}
+    return {
+        "bvid": item.get("bvid") or "",
+        "title": item.get("title") or "",
+        "author": owner.get("name") or item.get("author") or "",
+        "cover": _cover(item.get("pic") or item.get("cover")),
+        "duration": _duration_seconds(item),
+        "play": _as_int(stat.get("view", item.get("play"))),
+        "description": (item.get("desc") or item.get("description") or "")[:200],
+        # 推荐流 / 相关推荐都带 pubdate（秒级）；拿不到给 0（章程里 item.pubdate 允许 0）
+        "pubdate": _as_int(item.get("pubdate")),
+    }
+
+
+def _toview_video(item) -> dict:
+    """稍后再看条目的字段集（合同里没有 author 之外多给的字段）。"""
+    v = _brief_video(item)
+    if not v:
+        return {}
+    return {k: v[k] for k in ("bvid", "title", "author", "cover", "duration", "play")}
+
+
+def _video_rows_from(container, depth: int = 0) -> list:
+    """从「稍后再看」各种可能的响应容器里挑出视频卡片列表。
+
+    接口返回形状不稳定（可能是 `list` / `medias` / `videos` / 独立的 `toview` 对象，
+    也可能只是收藏夹入口、`id=0` 那项里再嵌条目），所以这里做有限深度的结构化提取：
+    **只认带 bvid 的 dict**，提取不到就返回 []，由调用方决定要不要换接口。
+    """
+    if depth > 4:
+        return []
+    if isinstance(container, list):
+        rows = [x for x in container if isinstance(x, dict) and x.get("bvid")]
+        if rows:
+            return rows
+        # 列表里可能是收藏夹入口（id=0 = 稍后再看），继续往里找
+        for x in container:
+            if isinstance(x, dict):
+                got = _video_rows_from(x, depth + 1)
+                if got:
+                    return got
+        return []
+    if isinstance(container, dict):
+        tv = container.get("toview")
+        if isinstance(tv, (dict, list)):
+            got = _video_rows_from(tv, depth + 1)
+            if got:
+                return got
+        for key in ("list", "medias", "videos", "items", "item"):
+            val = container.get(key)
+            if isinstance(val, (list, dict)):
+                got = _video_rows_from(val, depth + 1)
+                if got:
+                    return got
+        # 收藏夹入口列表里 title 为「稍后再看」/id=0 的那项
+        for val in container.values():
+            if isinstance(val, dict) and (
+                val.get("id") == 0 or "稍后再看" in str(val.get("title") or "")
+            ):
+                got = _video_rows_from(val, depth + 1)
+                if got:
+                    return got
+    return []
+
+
+# ========== Tool 25: 浏览历史（旧版接口，带 progress/duration） ==========
+
+@tool()
+async def bili_history(days: int = 30, max_items: int = 300) -> str:
+    """
+    获取自己最近 N 天的B站浏览历史（含看到第几秒的进度）
+
+    Args:
+        days: 往前取多少天的历史，默认30
+        max_items: 最多取多少条，默认300
+
+    Returns:
+        {fetched_at, days, count, items:[{bvid,title,author,cover,duration,progress,view_at}]}
+        progress 保留原值（-1 表示没有记录）；抓取失败时额外带 error 字段
+    """
+    cred = get_cred()
+    days = max(1, _as_int(days, 30))
+    max_items = max(1, _as_int(max_items, 300))
+    fetched_at = int(time.time())
+    cutoff = fetched_at - days * 86400
+
+    items = []
+    fetch_error = None
+    page = 1
+    try:
+        # 旧版接口（/x/v2/history）：带 progress / duration，正好是完播信号要的
+        # 每页固定 100 条（接口的 ps 是 const 100）；页与页之间限速 0.4s
+        while len(items) < max_items and page <= 200:
+            data = await user.get_self_history(
+                page_num=page, per_page_item=100, credential=cred
+            )
+            rows = (data or {}).get("list") or []
+            if not rows:
+                break
+            reached_cutoff = False
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                view_at = _as_int(row.get("view_at"))
+                # 合同按「秒」算时间窗口/完播；接口本来就是秒，但万一哪天改成毫秒 ⇒ 这里统一回秒
+                if view_at > 10 ** 12:
+                    view_at //= 1000
+                if view_at and view_at < cutoff:
+                    reached_cutoff = True
+                    break
+                history = row.get("history") or {}
+                bvid = row.get("bvid") or history.get("bvid") or ""
+                if not bvid:
+                    # 直播 / 番剧 / 活动页没有 bvid，不是荐片的候选
+                    continue
+                progress = row.get("progress")
+                items.append({
+                    "bvid": bvid,
+                    "title": row.get("title") or "",
+                    "author": row.get("author_name") or "",
+                    "cover": _cover(row.get("cover")),
+                    "duration": _as_int(row.get("duration")),
+                    "progress": -1 if progress is None else _as_int(progress, -1),
+                    "view_at": view_at,
+                })
+                if len(items) >= max_items:
+                    break
+            if reached_cutoff or len(items) >= max_items:
+                break
+            page += 1
+            await asyncio.sleep(0.4)
+    except Exception as e:
+        # 风控 / 网络 / 凭证过期：不能当成「最近没逛B站」⇒ 带 error 回去
+        fetch_error = _err(e)
+
+    out = {
+        "fetched_at": fetched_at,
+        "days": days,
+        "count": len(items),
+        "items": items,
+    }
+    if fetch_error:
+        out["error"] = fetch_error
+    return json.dumps(out, ensure_ascii=False)
+
+
+# ========== Tool 26: 首页推荐流 ==========
+
+@tool()
+async def bili_rcmd_feed(ps: int = 30) -> str:
+    """
+    获取B站首页推荐流（登录态下的个性化推荐，作为荐片的主候选池）
+
+    Args:
+        ps: 返回条数，默认30
+
+    Returns:
+        {count, items:[{bvid,title,author,cover,duration,play,description,pubdate}]}；失败时额外带 error
+    """
+    cred = get_cred()
+    ps = max(1, _as_int(ps, 30))
+
+    items = []
+    fetch_error = None
+    try:
+        # 注意：homepage.get_videos() 本身不收 ps（固定返回 30 条左右），这里按 ps 截断
+        data = await homepage.get_videos(credential=cred)
+        if isinstance(data, dict):
+            rows = data.get("item") or data.get("items") or []
+        elif isinstance(data, list):
+            rows = data
+        else:
+            rows = []
+        for row in rows:
+            v = _brief_video(row)
+            if v.get("bvid"):
+                items.append(v)
+            if len(items) >= ps:
+                break
+    except Exception as e:
+        fetch_error = _err(e)
+
+    out = {"count": len(items), "items": items}
+    if fetch_error:
+        out["error"] = fetch_error
+    return json.dumps(out, ensure_ascii=False)
+
+
+# ========== Tool 27: 相关推荐 ==========
+
+@tool()
+async def bili_related(bvid: str, num: int = 20) -> str:
+    """
+    获取某个视频的相关推荐（用历史上完播率高的视频去「顺藤摸瓜」）
+
+    Args:
+        bvid: 源视频BV号，如"BV1uNk1YxEJQ"
+        num: 返回条数，默认20
+
+    Returns:
+        {bvid, count, items:[{bvid,title,author,cover,duration,play,description,pubdate}]}；失败时额外带 error
+    """
+    cred = get_cred()
+    bvid = (bvid or "").strip()
+    num = max(1, _as_int(num, 20))
+    if not bvid:
+        return json.dumps({"bvid": bvid, "count": 0, "items": [], "error": "bvid 不能为空"}, ensure_ascii=False)
+
+    items = []
+    fetch_error = None
+    try:
+        # video.Video.get_related() 不收条数参数（固定返回一页），这里按 num 截断
+        data = await video.Video(bvid=bvid, credential=cred).get_related()
+        if isinstance(data, list):
+            rows = data
+        elif isinstance(data, dict):
+            rows = data.get("data") or data.get("list") or data.get("items") or []
+        else:
+            rows = []
+        for row in rows:
+            v = _brief_video(row)
+            if v.get("bvid"):
+                items.append(v)
+            if len(items) >= num:
+                break
+    except Exception as e:
+        fetch_error = _err(e)
+
+    out = {"bvid": bvid, "count": len(items), "items": items}
+    if fetch_error:
+        out["error"] = fetch_error
+    return json.dumps(out, ensure_ascii=False)
+
+
+# ========== Tool 28: 稍后再看 ==========
+
+@tool()
+async def bili_toview() -> str:
+    """
+    获取「稍后再看」列表（用户自己标记过的待看视频，强兴趣信号）
+
+    Returns:
+        {count, items:[{bvid,title,author,cover,duration,play}]}；失败时额外带 error
+    """
+    cred = get_cred()
+
+    rows = []
+    fetch_error = None
+    # ① 合同指定的入口：主页「收藏夹 + 稍后再看」导航接口
+    try:
+        data = await homepage.get_favorite_list_and_toview(credential=cred)
+        rows = _video_rows_from(data)
+    except Exception as e:
+        fetch_error = _err(e)
+
+    # ② bilibili-api 17.4.2 的这个导航接口按接口语义只给「收藏夹 + 稍后再看」的**入口**
+    #    （id=0 的稍后再看只有 media_count），不一定带视频条目 ⇒ 提取不到就退回官方
+    #    「稍后再看列表」接口（/x/v2/history/toview）取条目，保证这个工具总是能出条目。
+    if not rows:
+        try:
+            data = await user.get_toview_list(credential=cred)
+            rows = _video_rows_from(data)
+            if rows:
+                fetch_error = None   # 入口接口失败/无条目，但备用接口拿到了完整结果
+        except Exception as e:
+            fetch_error = (fetch_error + " | " if fetch_error else "") + _err(e)
+
+    items = []
+    for row in rows:
+        v = _toview_video(row)
+        if v.get("bvid"):
+            items.append(v)
+
+    out = {"count": len(items), "items": items}
+    if fetch_error:
+        out["error"] = fetch_error
+    return json.dumps(out, ensure_ascii=False)
+
+
+# ========== Tool 29: 我关注的人 ==========
+
+@tool()
+async def bili_followings(ps: int = 50, pn: int = 1) -> str:
+    """
+    获取自己关注的人列表（荐片用它挑「最近在看的 UP」）
+
+    Args:
+        ps: 每页数量，默认50
+        pn: 页码，默认1
+
+    Returns:
+        {count, items:[{mid,uname,sign}]}；失败时额外带 error
+    """
+    cred = get_cred()
+    ps = max(1, _as_int(ps, 50))
+    pn = max(1, _as_int(pn, 1))
+
+    items = []
+    fetch_error = None
+    try:
+        me = await user.get_self_info(credential=cred)
+        my_mid = _as_int((me or {}).get("mid") or getattr(cred, "dedeuserid", 0))
+        if my_mid <= 0:
+            fetch_error = "无法从 get_self_info 取到自己的 mid"
+        else:
+            data = await user.User(uid=my_mid, credential=cred).get_followings(pn=pn, ps=ps)
+            rows = (data or {}).get("list") or []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                mid = _as_int(row.get("mid"))
+                if mid <= 0:
+                    continue
+                items.append({
+                    "mid": mid,
+                    "uname": row.get("uname") or "",
+                    "sign": row.get("sign") or "",
+                })
+                if len(items) >= ps:
+                    break
+    except Exception as e:
+        fetch_error = _err(e)
+
+    out = {"count": len(items), "items": items}
+    if fetch_error:
+        out["error"] = fetch_error
+    return json.dumps(out, ensure_ascii=False)
+
+
+# ========== Tool 30: 某 UP 的最新投稿 ==========
+
+@tool()
+async def bili_up_videos(mid: int, ps: int = 10) -> str:
+    """
+    获取某个 UP 主的最新投稿（荐片用它看「关注的人最近发了什么」）
+
+    Args:
+        mid: UP 主的 UID
+        ps: 返回条数，默认10
+
+    Returns:
+        {count, items:[{bvid,title,cover,duration,created,pubdate}]}；失败时额外带 error
+    """
+    cred = get_cred()
+    mid = _as_int(mid)
+    ps = max(1, _as_int(ps, 10))
+    if mid <= 0:
+        return json.dumps({"count": 0, "items": [], "error": "mid 必须是有效的 UID"}, ensure_ascii=False)
+
+    items = []
+    fetch_error = None
+    try:
+        u = user.User(uid=mid, credential=cred)
+        data = await u.get_videos(pn=1, ps=ps, order=user.VideoOrder.PUBDATE)
+        lst = (data or {}).get("list") if isinstance(data, dict) else {}
+        if isinstance(lst, dict):
+            rows = lst.get("vlist") or []
+        elif isinstance(lst, list):
+            rows = lst
+        else:
+            rows = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            bvid = row.get("bvid") or ""
+            if not bvid:
+                continue
+            created = _as_int(row.get("created"))
+            items.append({
+                "bvid": bvid,
+                "title": row.get("title") or "",
+                "cover": _cover(row.get("pic") or row.get("cover")),
+                "duration": _duration_seconds(row),
+                "created": created,
+                # 这个接口只给 created（发布即投稿时间），没单独的 pubdate ⇒ 用 created 兜底
+                "pubdate": _as_int(row.get("pubdate") or created),
+            })
+            if len(items) >= ps:
+                break
+    except Exception as e:
+        fetch_error = _err(e)
+
+    out = {"count": len(items), "items": items}
+    if fetch_error:
+        out["error"] = fetch_error
+    return json.dumps(out, ensure_ascii=False)
 
 
 # ========== 启动 ==========

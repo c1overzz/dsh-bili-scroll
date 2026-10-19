@@ -21,6 +21,18 @@
    · 装完可以用设置页的「**测一下**」自检：它真跑一次登录检查 + 一次搜索，直接回答"能不能用"。
 5. **别擅自打开「自动评论并 @ 你」** —— 那是拿用户的号说话；要用得让用户自己填「要 @ 谁」。
 
+## 荐片模式（0.2.0 新增，装完后可选开）
+
+- 跟「刷B站」共用同一套**主依赖 + 扫码登录**；先按上面第 4 步把环境弄好，再用荐片。
+- 开启位置：**设置 → 荐片** —— 打开「荐片总开关」→ 填每天跑的时间点（1–3 个，默认 21:00）→ 选每批条数（默认 4）与深度（默认「中」）。
+  - 深度三档：轻（不读字幕）/ 中（入选者才读字幕）/ 深（候选中段都读）；越深越准、越贵。
+- 看推荐：**左侧栏底部的 🐟 按钮** → 右侧滑出「荐片」面板；卡片上的 👍/👎/已看过 会进下一轮画像。
+- **不要替用户配手机推送**（Server酱³ / ntfy / 企业微信 / webhook 的 URL 里有 key）：让用户自己在「设置 → 荐片」里选通道并粘贴；
+  配好后可以用页面里的「发条测试」验证，别拿真推荐去试探。
+- **隐私**：浏览历史、兴趣画像、反馈只落在 `<DSH_HOME>/bili-duty/feed/`，不上传；面板与推送里也不会出现账号 / UID / 路径。
+- 手动来一批：面板里「现在来一批」，或让 Agent 调 `bili_feed_run`；状态看 `bili_feed_status`，画像看/改 `bili_feed_profile`。
+- ⚠️ 一轮荐片要读历史、跑多路召回、精读几条字幕 —— 比「刷B站」一轮贵；建议先只开一个时间点、深度先用「中」。
+
 ## ⚠️ 已知环境差异（有用户反馈）
 
 - ⭐⭐ **桌面版 DSH（NEXT）/ 0.2.x 装不起来 —— 已知真 bug，0.1.4 起已修**：0.1.3 及以前装到桌面版上，
@@ -42,12 +54,13 @@
 
 ## 仓库结构（改代码时看这里）
 
-- `index.js` —— host 半端：11 个工具 + 谷时定时器 + HTTP 接口 + 配置（`config.json` 与 DSH 原生设置页**逐字段对账**：见 `loadCfg` / `saveCfgHost`）+ 值班轮的工具白名单（`mcpWhitelist` → `BILI_MCP_TOOLS`）
-- `client.js` —— 浏览器半端：设置页（注册在 `settings.section`）
-- `lib/` —— 状态目录与家目录 / 极小的 MCP stdio 客户端 / 扫码登录 / **`hostdeps.mjs`（从宿主树取 `@deepseek-ai/*`，拿不到就退到自己依赖 / 本地等价实现）** / **`verify.mjs`（评论发出后复核）**
-- `prompts/duty.md` —— 一轮要做的事（判定口径 + 红线，**用户可以改**）；升级规矩见 `lib/state.mjs` 的 `ensureCharter`（用户改过 ⇒ 保留他那份、新版落 `duty.md.new`）
-- `vendor/bilibili-mcp/` —— 内置的 Python MCP（MIT，AGI_Ananas）
-- `selfcheck.mjs` + `tools/` —— 本地预检：`node selfcheck.mjs`（**现在不用解析钩子了**；`tools/register.mjs` 那条还留着当备份）
+- `index.js` —— host 半端：15 个工具（11 个刷B站 + 4 个荐片）+ 谷时定时器 + **荐片定时器** + HTTP 接口（`/api/bili-duty/*` 与 `/api/bili-feed/*`）+ 配置（`config.json` 与 DSH 原生设置页**逐字段对账**：见 `loadCfg` / `saveCfgHost`）+ 两套工具白名单（`mcpWhitelist` 刷B站 / `FEED_TOOLS` 荐片 → `BILI_MCP_TOOLS`）
+- `client.js` —— 浏览器半端：两个设置页 section（刷B站 / 荐片）+ **左侧栏 🐟 按钮 + `shell.overlay` 荐片面板**
+- `lib/` —— 状态目录与家目录 / 极小的 MCP stdio 客户端 / 扫码登录 / **`hostdeps.mjs`（从宿主树取 `@deepseek-ai/*`，拿不到就退到自己依赖 / 本地等价实现）** / **`verify.mjs`（评论发出后复核）** / **`feed.mjs`（荐片的数据层：历史→摘要/信号、画像、batch 校验、提示词）** / **`push.mjs`（手机推送四通道）**
+- `prompts/duty.md` —— 刷B站一轮要做的事（判定口径 + 红线，**用户可以改**）；升级规矩见 `lib/state.mjs` 的 `ensureCharter`（用户改过 ⇒ 保留他那份、新版落 `duty.md.new`）
+- `prompts/feed.md` —— 荐片一轮的章程（画像 → 召回 → 精读 → batch JSON；不支持用户改写，升级即覆盖）
+- `vendor/bilibili-mcp/` —— 内置的 Python MCP（MIT，AGI_Ananas）+ 本插件补的 6 个荐片召回工具
+- `selfcheck.mjs` + `tools/` —— 本地预检：`node selfcheck.mjs`（**现在不用解析钩子了**；`tools/register.mjs` 那条还留着当备份）；荐片另有两道：`tools/feed-unit.mjs`、`tools/feed-host-test.mjs`、`tools/feed-mcp-smoke.py`
 
 ## 约定
 

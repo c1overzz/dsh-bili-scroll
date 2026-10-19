@@ -32,6 +32,12 @@ import { verifyRecent, appendVerifyToReport } from './lib/verify.mjs'
 import { WINDOWS, stateDirOf, readJson, writeJson, ensureHomeFiles, ensureCharter, charterPath, inWindow, dayKey } from './lib/state.mjs'
 import { loginStart, loginPoll, saveCredential, renderQrPng } from './lib/login.mjs'
 import { ensureUv } from './lib/uvfetch.mjs'
+import {
+  feedPaths, ensureFeedDirs, defaultProfile, parseFeedTimes, batchIdOf,
+  loadFeedback, validateBatch, appendRecommended, appendFeedback, readBatchFile,
+  readFeedState, writeFeedState, markFeedRan, writeHistory, buildFeedPrompt, FEED_MAX_ITEMS,
+} from './lib/feed.mjs'
+import { sendPush, isPushConfigured, testBatch } from './lib/push.mjs'
 
 export const name = 'bili-scroll'
 export const inject = ['webServer', 'tools', 'settings']
@@ -86,6 +92,24 @@ export const Config = !z ? undefined : z.object({
   replyToComments: z.boolean().default(false).extra('volatile', true),
   /** 每轮最多回几条 */
   replyPerRound: z.number().default(1).extra('volatile', true),
+  /** ⭐ 荐片（个性化推荐）总开关 —— 默认关；开了才会按 feedTimes 自动跑 */
+  feedOn: z.boolean().default(false).extra('volatile', true),
+  /** ⭐ 每天自动跑的时间点（HH:MM，1–3 个） */
+  feedTimes: z.array(z.string()).default(['21:00']).extra('volatile', true),
+  /** ⭐ 每批推几条（1–10，实际范围由 clampPatch 钳） */
+  feedPerBatch: z.natural().default(4).extra('volatile', true),
+  /** ⭐ 精读深度：light / medium / deep */
+  feedDepth: z.string().default('medium').extra('volatile', true),
+  /** ⭐ 读多少天的浏览历史（7–90） */
+  feedHistoryDays: z.natural().default(30).extra('volatile', true),
+  /** ⭐ 不想看的关键词（硬过滤） */
+  feedAvoid: z.array(z.string()).default([]).extra('volatile', true),
+  /** ⭐ 使用者手填「最近在关注什么」（参与画像） */
+  feedProfileNote: z.string().default('').extra('volatile', true),
+  /** ⭐ 手机推送通道：off / serverchan / ntfy / wecom / webhook */
+  pushType: z.string().default('off').extra('volatile', true),
+  /** ⭐ 推送 URL（用户自己粘贴完整地址） */
+  pushUrl: z.string().default('').extra('volatile', true),
 })
 
 /**
@@ -182,6 +206,25 @@ export function apply(ctx, config) {
   // 宿主依赖是从哪儿取的（桌面版那次事故的排查看这里：duty.log 里会写明白）
   for (const n of hostDeps.notes) log(n)
 
+  /* ─────────────── 荐片：家目录预建 + 白名单 ───────────────
+   * 沙箱规则：headless 那一轮只能写「启动前就已存在」的目录 ⇒ 宿主必须先把 feed/ 与 batches/ 建好。
+   */
+  let fpaths
+  try { fpaths = ensureFeedDirs(stateDir) } catch (e) { fpaths = feedPaths(stateDir); log('建荐片目录失败（不影响刷B站）：' + (e?.message ?? e)) }
+  // ⭐ 画像与 batch 输出文件都要**宿主先建好**：headless 那一轮被沙箱关着，「新建文件」会被拒
+  //    （2026-10-14 的规矩；用户改过的 profile.md 不覆盖）
+  try { if (!existsSync(fpaths.profile)) writeFileSync(fpaths.profile, defaultProfile(), 'utf8') } catch (e) { log('预建兴趣画像失败：' + (e?.message ?? e)) }
+  // 空台账先落下（Agent 只读它们；没有文件时它会以为"记录读不到"，白写一段 notes）
+  for (const f of [fpaths.recommended, fpaths.feedback]) {
+    try { if (!existsSync(f)) writeFileSync(f, '', 'utf8') } catch (e) { log('预建荐片台账失败：' + (e?.message ?? e)) }
+  }
+  let feedRunning = false
+  /** 荐片那一轮能看到的 MCP 工具（白名单；名单外连名字都不注册） */
+  const FEED_TOOLS = [
+    'bili_history', 'bili_rcmd_feed', 'bili_related', 'bili_toview', 'bili_followings', 'bili_up_videos',
+    'bili_search', 'bili_video_info', 'bili_comments', 'bili_subtitle', 'bili_hot_videos',
+  ]
+
   /**
    * ⚠️ 2026-10-14 事故（第一次挂上就炸了整个 DSH，见当天的 lesson）：
    *   `apply(ctx, config)` 传进来的那个 `config`，字段值**不保证是标量** —— 我们的 `config.pythonPath`
@@ -196,6 +239,8 @@ export function apply(ctx, config) {
     perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
     dmMode: 'off', dmUid: 0,
     keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1,
+    feedOn: false, feedTimes: ['21:00'], feedPerBatch: 4, feedDepth: 'medium', feedHistoryDays: 30, feedAvoid: [], feedProfileNote: '',
+    pushType: 'off', pushUrl: '',
   }
   const normalize = (src, base) => {
     const out = { ...base }
@@ -229,6 +274,19 @@ export function apply(ctx, config) {
     if ('replyToComments' in p) p.replyToComments = Boolean(p.replyToComments)
     if ('replyPerRound' in p) p.replyPerRound = Math.max(1, Math.min(Number(p.replyPerRound) || 1, 10))
     if ('commentPerRound' in p) p.commentPerRound = Math.max(0, Math.min(Number(p.commentPerRound) || 0, 20))
+    // ── 荐片字段的范围（写/读两头共用；schema 里故意不写 max，见文件开头的教训）──
+    if ('feedOn' in p) p.feedOn = Boolean(p.feedOn)
+    if ('feedTimes' in p) p.feedTimes = parseFeedTimes(p.feedTimes)
+    if ('feedPerBatch' in p) p.feedPerBatch = Math.max(1, Math.min(Number(p.feedPerBatch) || 4, FEED_MAX_ITEMS))
+    if ('feedDepth' in p) p.feedDepth = ['light', 'medium', 'deep'].includes(String(p.feedDepth)) ? String(p.feedDepth) : 'medium'
+    if ('feedHistoryDays' in p) p.feedHistoryDays = Math.max(7, Math.min(Number(p.feedHistoryDays) || 30, 90))
+    if ('feedAvoid' in p) {
+      const arr = Array.isArray(p.feedAvoid) ? p.feedAvoid : (p.feedAvoid === '' ? [] : [p.feedAvoid])
+      p.feedAvoid = [...new Set(arr.map((s) => String(s ?? '').trim().slice(0, 30)).filter(Boolean))].slice(0, 30)
+    }
+    if ('feedProfileNote' in p) p.feedProfileNote = String(p.feedProfileNote ?? '').slice(0, 500)
+    if ('pushType' in p) p.pushType = ['off', 'serverchan', 'ntfy', 'wecom', 'webhook'].includes(String(p.pushType)) ? String(p.pushType) : 'off'
+    if ('pushUrl' in p) p.pushUrl = String(p.pushUrl ?? '').trim().slice(0, 500)
     return p
   }
 
@@ -622,6 +680,62 @@ export function apply(ctx, config) {
     },
   })
 
+  /* ── 荐片工具（主会话里的那只 Agent 也能用） ── */
+
+  tool({
+    name: 'bili_feed_status',
+    description: '看「荐片」的状态：开没开、上次什么时候跑、上一批 id、上次错误、历史条数、推送是否配好。',
+    parameters: {},
+    async execute() { return feedStatusNow() },
+  })
+
+  tool({
+    name: 'bili_feed_run',
+    description: '**立刻跑一批荐片**（不等定时）：后台起一轮，面板里看进度。需要先装主依赖 + 扫码登录。',
+    parameters: {},
+    async execute() {
+      refreshCfg()
+      if (feedRunning) return { ok: true, started: false, running: true, hint: '上一轮还没跑完' }
+      if (!venvReadyNow()) return { ok: false, started: false, error: '主依赖还没装好：去「刷B站」设置页点「装主依赖」' }
+      if (!hasCredential()) return { ok: false, started: false, error: '还没登录 B站：去「刷B站」设置页点「扫码登录」' }
+      runFeed('manual').catch((e) => recordFeedError('手动触发失败：' + (e?.message ?? e)))
+      return { ok: true, started: true, hint: '后台跑，完成后面板里能看到这一批' }
+    },
+  })
+
+  tool({
+    name: 'bili_feed_feedback',
+    description: '对一条推荐给反馈：like=喜欢 / dislike=不感兴趣 / seen=看过了。会进下一轮的画像参考。',
+    parameters: {
+      bvid: { type: 'string', description: 'BV号' },
+      action: { type: 'string', description: 'like / dislike / seen' },
+    },
+    async execute(args) {
+      const bvid = String(args?.bvid || '')
+      const action = String(args?.action || '')
+      if (!/^BV[0-9A-Za-z]{10}$/.test(bvid)) return { ok: false, error: 'bvid 不合法' }
+      if (!['like', 'dislike', 'seen'].includes(action)) return { ok: false, error: 'action 只能是 like / dislike / seen' }
+      appendFeedback(stateDir, { bvid, action, batchId: '' })
+      return { ok: true }
+    },
+  })
+
+  tool({
+    name: 'bili_feed_profile',
+    description: '读 / 改「荐片」的兴趣画像（markdown）。不给 markdown 就是读；给了就覆盖保存（下一轮按新版来）。',
+    parameters: { markdown: { type: 'string', description: '（可选）新的画像 markdown，≤100KB' } },
+    async execute(args) {
+      if (typeof args?.markdown === 'string') {
+        const md = args.markdown.slice(0, 100 * 1024)
+        try { writeFileSync(fpaths.profile, md, 'utf8'); log('[feed] 画像已被主会话手动更新') } catch (e) { return { ok: false, error: String(e?.message ?? e) } }
+        return { ok: true, saved: true }
+      }
+      let md = ''
+      try { md = readFileSync(fpaths.profile, 'utf8') } catch { md = defaultProfile() }
+      return { ok: true, markdown: md }
+    },
+  })
+
   /* ─────────────── 跑一轮（跟老方案同一条路：dsh --profile headless <prompt>） ─────────────── */
 
   const dutyStateFile = join(stateDir, 'state.json')
@@ -784,6 +898,24 @@ export function apply(ctx, config) {
     return { command: 'dsh', args: [], shell: true, fallback: true, hint }
   }
 
+  /**
+   * 读使用者工作区的 AGENTS.md（「刷B站」与「荐片」共用）。
+   * ⚠️ 留空 = 不读设定（宁可按中性说话，也别猜错人设）；读不到就返回空串。
+   */
+  const readOwnerDoc = () => {
+    try {
+      const wsDir = String(cfg.workspace || '').trim()
+      const agents = wsDir ? join(wsDir, 'AGENTS.md') : ''
+      if (agents && existsSync(agents)) {
+        const text = readFileSync(agents, 'utf8')
+        return '\n\n===== 使用者的 AGENTS.md（他写给自己 AI 的人设与准则，**按这个来**）=====\n'
+          + text.slice(0, 6000)
+          + '\n===== 设定结束 =====\n'
+      }
+    } catch { /* 读不到就算了，别因此跑不成 */ }
+    return ''
+  }
+
   const promptFor = () => {
     // ⭐ 章程取哪一份：家里那份优先（ensureCharter 保证铺好；他改过的话就是他那份，升级的事由 ensureCharter 记账处理）
     let duty = charterPath(pluginDir, stateDir)
@@ -795,21 +927,7 @@ export function apply(ctx, config) {
     //    AGENTS.md 本来就会自动注入；这里再点一句，保证它真按使用者的设定来（别人的设定同理）。
     // ⭐ 那一轮的工作目录是**插件家**（沙箱只让它写自己工作目录里的东西 ✗），
     //    所以"使用者的设定"由**我们自己读进来**喂给它 —— 它在宿主进程里跑，没有沙箱限制 ✓
-    let ownerDoc = ''
-    try {
-      // ⚠️ 2026-10-16 用户反馈（"只要给人设就会走偏"）：留空时我们以前退到 `process.cwd()`，
-      //    也就是 **dsh 进程自己的工作目录** —— 那对多数人根本不是他的工作区 ✗
-      //    ⇒ 读错人设、甚至把别的目录的设定读进来 ✓
-      //    ⭐ 现在的规矩：**留空 = 不读设定**（宁可按中性说话，也别猜错 ✓）；要按人设就自己填工作区 ✓。
-      const wsDir = String(cfg.workspace || '').trim()
-      const agents = wsDir ? join(wsDir, 'AGENTS.md') : ''
-      if (agents && existsSync(agents)) {
-        const text = readFileSync(agents, 'utf8')
-        ownerDoc = '\n\n===== 使用者的 AGENTS.md（他写给自己 AI 的人设与准则，**按这个来**）=====\n'
-          + text.slice(0, 6000)
-          + '\n===== 设定结束 =====\n'
-      }
-    } catch { /* 读不到就算了，别因此跑不成 */ }
+    const ownerDoc = readOwnerDoc()
     // ⭐ 「每天最多挑 N 条」是**全天**的账：上一轮已经挑过的要扣掉，这一轮只给剩下的额度
     const quota = Math.max(0, Number(cfg.perDay) || 0)
     const already = countPickedToday()
@@ -1065,6 +1183,245 @@ export function apply(ctx, config) {
    }
   }
 
+  /* ─────────────── 荐片（个性化推荐） ───────────────
+   * 跟「刷B站」共用同一套家目录 / MCP / headless 形状，区别是：
+   *   ① 宿主先拉一次浏览历史（MCP bili_history）→ history.json + 摘要 + 机器信号
+   *   ② 再起一轮 headless，让 Agent 按章程读画像、多路召回、精读、写 batch JSON
+   *   ③ 宿主校验 batch → 入库（recommended.jsonl）→ 推送手机 → 面板轮询展示
+   * 全程**不公开发言**（不评论、不私信）。
+   */
+  const feedCharterPath = () => {
+    try { if (existsSync(fpaths.charter)) return fpaths.charter } catch { /* 兜底用插件里那份 */ }
+    return join(pluginDir, 'prompts', 'feed.md')
+  }
+  const recordFeedError = (msg) => {
+    const text = String(msg || '').slice(0, 500)
+    log('[feed] ' + text)
+    try {
+      const st = readFeedState(stateDir)
+      writeFeedState(stateDir, { ...st, day: dayKey(), lastAttemptAt: new Date().toISOString(), lastError: text })
+    } catch { /* 记不下来也不影响主流程 */ }
+  }
+  const feedStatusNow = () => {
+    refreshCfg()
+    const st = readFeedState(stateDir)
+    let hist = null
+    try { hist = JSON.parse(readFileSync(fpaths.history, 'utf8')) } catch { /* 没拉过 */ }
+    return {
+      ok: true,
+      on: Boolean(cfg.feedOn),
+      running: feedRunning,
+      lastRunAt: st.lastRunAt || null,
+      lastAttemptAt: st.lastAttemptAt || null,
+      lastBatchId: st.lastBatchId || null,
+      lastError: st.lastError || '',
+      hasProfile: existsSync(fpaths.profile),
+      historyCount: Number(hist?.count || 0),
+      historyFetchedAt: hist?.fetchedAt || null,
+      pushReady: isPushConfigured(cfg),
+      venvReady: venvReadyNow(),
+      loggedIn: hasCredential(),
+      config: {
+        feedOn: cfg.feedOn, feedTimes: cfg.feedTimes, feedPerBatch: cfg.feedPerBatch,
+        feedDepth: cfg.feedDepth, feedHistoryDays: cfg.feedHistoryDays,
+        feedAvoid: cfg.feedAvoid, feedProfileNote: cfg.feedProfileNote,
+        pushType: cfg.pushType, pushUrl: cfg.pushUrl,
+      },
+      home: stateDir,
+    }
+  }
+  /**
+   * 荐片那一轮的 overlay —— 跟 duty 那份分开写（两套白名单、两个 MCP 条目），
+   * 避免两个模式互相覆盖对方正在用的文件。
+   */
+  const ensureFeedOverlay = () => {
+    const file = join(stateDir, 'headless-overlay-feed.yml')
+    const script = join(stateDir, 'mcp_server.py')
+    const posix = (p) => String(p).replace(/\\/g, '/')
+    const yml = []
+    for (const id of ['credentials', 'authorization', 'deepseek-account']) {
+      yml.push('- id: ' + id, '  disabled: false', '')
+    }
+    yml.push(
+      '- insert:',
+      '    - id: mcp-bili-feed',
+      "      name: '@deepseek-ai/dsh-mcp-client'",
+      '      config:',
+      '        serverName: bili-feed',
+      '        transport: stdio',
+      `        command: '${posix(cfg.pythonPath || 'python')}'`,
+      '        args:',
+      `          - '${posix(script)}'`,
+      '        env:',
+      `          BILI_MCP_TOOLS: '${FEED_TOOLS.join(',')}'`,
+      '',
+    )
+    try { writeFileSync(file, yml.join('\n'), 'utf8'); return file } catch (e) { log(`写荐片 overlay 失败：${e?.message ?? e}`); return null }
+  }
+  const feedPromptFor = (batchId) => {
+    const batchFile = join(fpaths.batches, batchId + '.json')
+    return buildFeedPrompt({
+      ownerDoc: readOwnerDoc(),
+      stateDir,
+      // 章程里的 <家目录> 占位符在拼提示词这一步换成绝对路径（别让模型自己猜，实测会猜成 ~）
+      charter: String(feedCharterPath()).split('<家目录>').join(stateDir),
+      batchId,
+      batchFile,
+      perBatch: Math.max(1, Number(cfg.feedPerBatch) || 4),
+      depth: String(cfg.feedDepth || 'medium'),
+      historyDays: Math.max(7, Number(cfg.feedHistoryDays) || 30),
+      avoid: Array.isArray(cfg.feedAvoid) ? cfg.feedAvoid : [],
+      profileNote: String(cfg.feedProfileNote || ''),
+      now: new Date(),
+      tools: FEED_TOOLS,
+    })
+  }
+  /** 记下「今天这个时间点已经跑过」，避免 60 秒的 tick 重复触发 */
+  const markFeedTime = (time) => {
+    try {
+      const st = readFeedState(stateDir)
+      writeFeedState(stateDir, { ...markFeedRan(st, dayKey(), time), lastAttemptAt: new Date().toISOString() })
+    } catch (e) { log('[feed] 记运行时间失败：' + (e?.message ?? e)) }
+  }
+  /** 子进程输出 → duty.log（GBK 兜底，跟 runDuty 里同一套判据） */
+  const feedPipe = (buf) => {
+    try {
+      const b = Buffer.isBuffer(buf) ? buf : Buffer.from(String(buf))
+      let text = b.toString('utf8')
+      if (text.includes('\uFFFD')) {
+        try { text = new TextDecoder('gbk').decode(b) } catch { /* 解不出来就用 utf8 那份 */ }
+      }
+      appendFileSync(logFile, '[feed] ' + text, 'utf8')
+    } catch { /* 写不进去也绝不能抛 */ }
+  }
+  /**
+   * 一轮结束：读 batch → 校验 → 入库 → 推送。
+   * 失败一律只记 lastError（面板可见），不抛、不污染 recommended.jsonl。
+   */
+  const finalizeFeed = async (batchId, code) => {
+    try {
+      const raw = readBatchFile(stateDir, batchId)
+      if (!raw) { recordFeedError(`这一轮没有产出 batch 文件（退出码 ${code}）`); return }
+      const v = validateBatch(raw, { batchId, maxItems: FEED_MAX_ITEMS })
+      if (!v.ok) { recordFeedError(`这一轮产出不合格（退出码 ${code}）：${v.error}`); return }
+      appendRecommended(stateDir, v.batch)
+      const st = readFeedState(stateDir)
+      writeFeedState(stateDir, {
+        ...st,
+        day: dayKey(),
+        lastBatchId: v.batch.id,
+        lastRunAt: new Date().toISOString(),
+        lastAttemptAt: new Date().toISOString(),
+        lastError: '',
+      })
+      log(`[feed] 本批 ${v.batch.items.length} 条已入库（${v.batch.id}）`)
+      if (isPushConfigured(cfg)) {
+        const pr = await sendPush(cfg, v.batch, { log: (m) => log('[feed] ' + m) })
+        if (pr.ok) log(`[feed] 已推送（${pr.type}）`)
+        else recordFeedError(`推送失败：${pr.error}`)
+      } else {
+        log('[feed] 推送没配，跳过（面板里仍可看）')
+      }
+    } catch (e) { recordFeedError('处理产出失败：' + (e?.message ?? e)) }
+  }
+  /**
+   * 跑一轮荐片。**立刻返回**（真正的活在后台），进度/结果看 feed/state.json 与面板。
+   */
+  const runFeed = async (why = 'window') => {
+    if (feedRunning) return { started: false, running: true, error: '上一轮荐片还没跑完' }
+    refreshCfg()
+    if (!cfg.feedOn && why !== 'manual') return { started: false, error: '荐片没开' }
+    if (!venvReadyNow()) { recordFeedError('主依赖还没装好：去设置页点「装主依赖」'); return { started: false, error: '主依赖没装好' } }
+    if (!hasCredential()) { recordFeedError('还没登录 B站：去设置页点「扫码登录」'); return { started: false, error: '还没登录 B站' } }
+    feedRunning = true
+    const batchId = batchIdOf(new Date())
+    try {
+      log(`[feed] 开跑（${why}），batch=${batchId}`)
+      // ① 拉历史（这一步在宿主里做，失败就不起子进程了）
+      const raw = await call('bili_history', {
+        days: Math.max(7, Number(cfg.feedHistoryDays) || 30),
+        max_items: 300,
+      }, { timeoutMs: 240000 })
+      const items = raw && Array.isArray(raw.items) ? raw.items : []
+      // ⚠️ MCP 那边风控/网络失败时回的是 {count:0, items:[], error:"..."} ——
+      //    别把「没抓到」当成「最近没逛 B站」写进 history.json（那会让画像空转一轮）
+      if (raw && raw.error) {
+        recordFeedError('拉浏览历史失败（可能是风控 / 登录过期 / 接口变动）：' + String(raw.error).slice(0, 300))
+        feedRunning = false
+        return { started: false, error: '拉浏览历史失败' }
+      }
+      if (!items.length) {
+        recordFeedError('浏览历史是空的（最近确实没逛，或者登录已失效），这一轮不跑')
+        feedRunning = false
+        return { started: false, error: '没拿到浏览历史' }
+      }
+      try {
+        const { history } = writeHistory(stateDir, items, { days: Math.max(7, Number(cfg.feedHistoryDays) || 30) })
+        log(`[feed] 历史 ${history.count} 条，已写摘要与信号`)
+      } catch (e) { log('[feed] 写历史失败（继续跑）：' + (e?.message ?? e)) }
+      // ⭐ 先占住 batch 文件（沙箱不让新建文件；这一轮写不出来的话它至少是个空壳，
+      //    校验会判失败并把原因写进 lastError，不会污染 recommended）
+      try {
+        writeFileSync(join(fpaths.batches, batchId + '.json'), JSON.stringify({ id: batchId, items: [], _placeholder: true }, null, 2), 'utf8')
+      } catch (e) { log('[feed] 预建 batch 文件失败：' + (e?.message ?? e)) }
+      // ② 起 headless 那一轮
+      const dsh = resolveDsh()
+      if (dsh.missing) { recordFeedError('找不到 dsh，这一轮没跑：' + dsh.hint); feedRunning = false; return { started: false, error: '找不到 dsh' } }
+      const overlay = ensureFeedOverlay()
+      const args = [...dsh.args, '--profile', cfg.headlessProfile || 'headless']
+      if (overlay) args.push('--patch', overlay)
+      args.push(feedPromptFor(batchId))
+      log(`[feed] 起子进程：${dsh.command} ${args.slice(0, 3).join(' ')} …  cwd=${stateDir}`)
+      const child = spawn(dsh.command, args, {
+        cwd: stateDir,
+        shell: dsh.shell,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: uvEnv({ BILI_DUTY_HOME: stateDir, ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}) }),
+      })
+      child.stdout?.on('data', feedPipe)
+      child.stderr?.on('data', feedPipe)
+      child.on('exit', (code) => {
+        log(`[feed] 结束（code=${code}）`)
+        finalizeFeed(batchId, code)
+          .catch((e) => recordFeedError('收尾异常：' + (e?.message ?? e)))
+          .finally(() => { feedRunning = false })
+      })
+      child.on('error', (e) => { recordFeedError('荐片子进程起不来：' + (e?.message ?? e)); feedRunning = false })
+      return { started: true, batchId, why }
+    } catch (e) {
+      recordFeedError('这一轮失败：' + (e?.message ?? e))
+      feedRunning = false
+      return { started: false, error: String(e?.message ?? e) }
+    }
+  }
+  /**
+   * 荐片定时：到点（±15 分钟窗口）且今天这个时间没跑过 ⇒ 起一轮。
+   * 🔴 跟谷时定时器同一条铁律：这里抛出的异常绝不能让宿主进程陪葬。
+   */
+  const feedTick = (now) => {
+    try {
+      if (!cfg.feedOn || feedRunning) return
+      const st = readFeedState(stateDir)
+      const today = dayKey(now)
+      const done = (st.day === today && Array.isArray(st.runs?.[today])) ? st.runs[today] : []
+      const times = Array.isArray(cfg.feedTimes) ? cfg.feedTimes : []
+      for (const t of times) {
+        if (done.includes(t)) continue
+        const m = /^(\d{1,2}):(\d{2})$/.exec(String(t))
+        if (!m) continue
+        const due = new Date(now)
+        due.setHours(Number(m[1]), Number(m[2]), 0, 0)
+        const delta = now.getTime() - due.getTime()
+        if (delta >= 0 && delta <= 15 * 60 * 1000) {
+          markFeedTime(t)
+          runFeed(`window:${t}`).catch((e) => log('[feed] 定时触发异常：' + (e?.message ?? e)))
+          return
+        }
+      }
+    } catch (e) { log('[feed] 定时器这一跳出错（已兜住）：' + (e?.stack ?? e)) }
+  }
+
   /* ─────────────── 谷时定时器 ───────────────
    * 🔴 2026-10-14 事故（使用者那边表现为"DSH 突然崩了、网页 Failed to fetch (gateway/internal)"）：
    *    第一版是 `setInterval(tick, 60_000)`，回调里抛的 TypeError **没人接**，直接把整个宿主进程带走
@@ -1074,8 +1431,10 @@ export function apply(ctx, config) {
   const tick = () => {
     try {
       refreshCfg()                    // ⭐ 定时器活得比设置页久：每一跳都重新读一遍配置
-      if (!cfg.peakValley) return
       const now = new Date()
+      // ⭐ 荐片先判（它自己看 feedOn）；异常自己兜住，绝不影响下面「刷B站」的逻辑
+      try { feedTick(now) } catch (e) { log('[feed] 定时器这一跳出错（已兜住）：' + (e?.stack ?? e)) }
+      if (!cfg.peakValley) return
       const st = readJson(dutyStateFile, {})
       const today = dayKey(now)
       // ⭐ 闸门看的是「今天已经**挑到几条**」（从今天的报告里数出来），不是「跑了几轮」
@@ -1433,7 +1792,9 @@ export function apply(ctx, config) {
       const patch = {}
       for (const k of ['perDay', 'peakValley', 'noon', 'night', 'autoComment', 'transcribe', 'asrModel',
         'commentPerRound', 'mentionName', 'dmMode', 'dmUid',
-        'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound']) {
+        'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound',
+        'feedOn', 'feedTimes', 'feedPerBatch', 'feedDepth', 'feedHistoryDays', 'feedAvoid', 'feedProfileNote',
+        'pushType', 'pushUrl']) {
         if (k in body) patch[k] = body[k]
       }
       // ⭐ 范围钳制 + 两份都写（config.json / DSH 原生设置页），统一走 persistCfg —— 见文件上方
@@ -1584,19 +1945,89 @@ export function apply(ctx, config) {
       return sendJson(res, 200, { ok: r.state !== 'unknown', state: r.state, code: r.code, message: r.message })
     }
 
+    // ── 荐片（个性化推荐）：面板 / 反馈 / 画像 / 手动跑 / 推送测试 ──
+    if (req.method === 'GET' && path === '/api/bili-feed/status') return sendJson(res, 200, feedStatusNow())
+
+    if (req.method === 'GET' && path === '/api/bili-feed/batch') {
+      const st = readFeedState(stateDir)
+      const id = String(url.searchParams.get('id') || st.lastBatchId || '')
+      const raw = readBatchFile(stateDir, id)
+      let batch = null
+      if (raw) {
+        const v = validateBatch(raw, { batchId: String(raw.id || id), maxItems: FEED_MAX_ITEMS })
+        if (v.ok) batch = v.batch
+      }
+      // 面板用最近 500 条反馈自己映射到当前批次（同一 bvid 取最后一条）
+      return sendJson(res, 200, { ok: true, batch, feedback: loadFeedback(stateDir, 500) })
+    }
+
+    if (req.method === 'GET' && path === '/api/bili-feed/profile') {
+      let md = ''
+      try { md = readFileSync(fpaths.profile, 'utf8') } catch { md = defaultProfile() }
+      return sendJson(res, 200, { ok: true, markdown: md })
+    }
+
+    if (req.method === 'POST' && path === '/api/bili-feed/profile') {
+      const body = await readBody(req)
+      const md = String(body?.markdown ?? '')
+      if (md.length > 100 * 1024) return sendJson(res, 200, { ok: false, error: '画像太长了（上限 100KB）' })
+      try {
+        writeFileSync(fpaths.profile, md, 'utf8')
+        log('[feed] 画像已被使用者手动更新')
+        return sendJson(res, 200, { ok: true })
+      } catch (e) { return sendJson(res, 200, { ok: false, error: String(e?.message ?? e) }) }
+    }
+
+    if (req.method === 'POST' && path === '/api/bili-feed/feedback') {
+      const body = await readBody(req)
+      const bvid = String(body?.bvid || '')
+      const action = String(body?.action || '')
+      if (!/^BV[0-9A-Za-z]{10}$/.test(bvid) || !['like', 'dislike', 'seen'].includes(action)) {
+        return sendJson(res, 200, { ok: false, error: '参数不对（要 bvid + action：like/dislike/seen）' })
+      }
+      try { appendFeedback(stateDir, { bvid, action, batchId: String(body?.batchId || '') }) } catch (e) {
+        return sendJson(res, 200, { ok: false, error: String(e?.message ?? e) })
+      }
+      log(`[feed] 反馈：${action} ${bvid}`)
+      return sendJson(res, 200, { ok: true })
+    }
+
+    if (req.method === 'POST' && path === '/api/bili-feed/run') {
+      refreshCfg()
+      if (feedRunning) return sendJson(res, 200, { ok: true, started: false, running: true })
+      if (!venvReadyNow()) return sendJson(res, 200, { ok: false, started: false, error: '主依赖还没装好：去「刷B站」那页点「装主依赖」' })
+      if (!hasCredential()) return sendJson(res, 200, { ok: false, started: false, error: '还没登录 B站：去「刷B站」那页点「扫码登录」' })
+      runFeed('manual').catch((e) => recordFeedError('手动触发失败：' + (e?.message ?? e)))
+      return sendJson(res, 200, { ok: true, started: true, running: true })
+    }
+
+    if (req.method === 'POST' && path === '/api/bili-feed/push-test') {
+      refreshCfg()
+      if (!isPushConfigured(cfg)) return sendJson(res, 200, { ok: false, error: '推送还没配：先选通道并填 URL' })
+      const r = await sendPush(cfg, testBatch(new Date()), { log: (m) => log('[feed] ' + m) })
+      return sendJson(res, 200, { ok: Boolean(r.ok), error: r.error || '' })
+    }
+
     return sendJson(res, 404, { ok: false, error: `unknown ${req.method} ${path}` })
   }
 
   try {
+    /** 同一套 handle 同时服务两个前缀：刷B站（/api/bili-duty）与荐片（/api/bili-feed） */
+    const apiHandler = async (req, res) => {
+      try { await handle(req, res, new URL(req.url, 'http://127.0.0.1')) } catch (e) {
+        sendJson(res, 500, { ok: false, error: e?.message ?? String(e) })
+      }
+    }
     ctx.effect(() => ctx.webServer.register({
       kind: 'prefix',
       path: '/api/bili-duty',
-      handler: async (req, res) => {
-        try { await handle(req, res, new URL(req.url, 'http://127.0.0.1')) } catch (e) {
-          sendJson(res, 500, { ok: false, error: e?.message ?? String(e) })
-        }
-      },
+      handler: apiHandler,
     }), 'bili-duty: /api/bili-duty 路由')
+    ctx.effect(() => ctx.webServer.register({
+      kind: 'prefix',
+      path: '/api/bili-feed',
+      handler: apiHandler,
+    }), 'bili-duty: /api/bili-feed 路由（荐片）')
   } catch (e) { log(`HTTP 路由没挂上：${e?.message ?? e}`) }
 
   ctx.effect(() => () => { try { mcp?.stop() } catch { /* 收摊 */ } }, 'bili-duty: 收 MCP 子进程')

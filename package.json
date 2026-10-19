@@ -1,7 +1,7 @@
 {
   "name": "dsh-bili-scroll",
-  "version": "0.1.13",
-  "description": "DSH 插件：每天替你刷一轮 B站 —— 读字幕挑出值得的、写一份日报，值得的就 @ 你",
+  "version": "0.2.0",
+  "description": "DSH 插件：每天替你刷一轮 B站 —— 读字幕挑出值得的、写一份日报，值得的就 @ 你；新增「荐片」模式：按你的浏览历史做个性化推荐，推到面板和手机",
   "keywords": [
     "dsh",
     "dsh-plugin",
@@ -61,7 +61,10 @@
       "inject": [
         "@deepseek-ai/dsh-client-runtime",
         "@deepseek-ai/dsh-client-ui-settings",
-        "@deepseek-ai/dsh-client-ui-settings-plugins"
+        "@deepseek-ai/dsh-client-ui-settings-plugins",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-layout"
       ]
     }
   },

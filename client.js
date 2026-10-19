@@ -89,6 +89,63 @@ window.__ModuleLoader__.load({
   background:var(--dsw-alias-bg-overlay,rgba(128,128,128,.14));color:var(--dsw-alias-label-secondary,#c9ccd1);}
 `
 
+    /* 荐片：侧栏按钮 / 右侧面板。全部 data-bf- 前缀，跟原有 data-bd- 隔离 */
+    const FEED_CSS = `
+[data-bf-fab]{position:relative;display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;
+  border:0;border-radius:8px;background:transparent;color:inherit;cursor:pointer;font-size:15px;line-height:1;padding:0;}
+[data-bf-fab]:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.22));}
+[data-bf-fish]{display:block;}
+[data-bf-dot]{position:absolute;top:1px;right:1px;width:7px;height:7px;border-radius:50%;background:#ef4444;
+  box-shadow:0 0 0 2px var(--dsw-alias-bg-base,#111);}
+[data-bf-overlay]{position:fixed;inset:0;z-index:9000;pointer-events:none;}
+[data-bf-backdrop]{position:absolute;inset:0;background:rgba(0,0,0,.32);pointer-events:auto;}
+[data-bf-drawer]{position:absolute;top:0;right:0;height:100%;width:min(440px,100vw);display:flex;flex-direction:column;
+  pointer-events:auto;background:var(--dsw-alias-bg-base,#16181c);
+  border-left:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.12));box-shadow:-16px 0 48px rgba(0,0,0,.28);}
+[data-bf-head]{display:flex;align-items:center;gap:8px;padding:12px 14px;
+  border-bottom:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.1));}
+[data-bf-headline]{display:flex;align-items:baseline;gap:8px;flex:1;min-width:0;}
+[data-bf-logo]{font-size:18px;}
+[data-bf-h1]{font-size:14px;font-weight:600;}
+[data-bf-sub]{font-size:11px;color:var(--dsw-alias-label-tertiary,#9aa0a6);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+[data-bf-x]{border:0;background:transparent;color:inherit;font-size:14px;cursor:pointer;padding:4px 6px;border-radius:6px;opacity:.7;}
+[data-bf-x]:hover{opacity:1;background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.2));}
+[data-bf-toolbar]{display:flex;gap:8px;padding:10px 14px;
+  border-bottom:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.08));}
+[data-bf-list]{flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:14px;}
+[data-bf-card]{border:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.1));border-radius:12px;overflow:hidden;
+  background:var(--dsw-alias-bg-overlay,rgba(128,128,128,.06));}
+[data-bf-cover]{position:relative;aspect-ratio:16/9;background:linear-gradient(135deg,#243447,#12202f);
+  display:flex;align-items:center;justify-content:center;}
+[data-bf-cover] img{width:100%;height:100%;object-fit:cover;display:block;}
+[data-bf-coverph]{font-size:26px;opacity:.5;}
+[data-bf-dur]{position:absolute;right:8px;bottom:8px;font-size:11px;padding:1px 6px;border-radius:5px;
+  background:rgba(0,0,0,.68);color:#fff;}
+[data-bf-cardbody]{padding:10px 12px 12px;display:flex;flex-direction:column;gap:7px;}
+[data-bf-title]{font-size:13px;font-weight:600;line-height:19px;cursor:pointer;}
+[data-bf-title]:hover{text-decoration:underline;}
+[data-bf-meta]{font-size:11px;color:var(--dsw-alias-label-tertiary,#9aa0a6);}
+[data-bf-summary]{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,#c9ccd1);}
+[data-bf-why]{font-size:12px;line-height:18px;padding:7px 9px;border-radius:8px;
+  background:rgba(59,130,246,.12);border-left:2px solid #3b82f6;}
+[data-bf-hl]{display:flex;flex-wrap:wrap;gap:6px;}
+[data-bf-chip]{font-size:11px;padding:2px 7px;border-radius:6px;
+  background:var(--dsw-alias-bg-overlay,rgba(128,128,128,.14));color:var(--dsw-alias-label-secondary,#c9ccd1);}
+[data-bf-actions]{display:flex;flex-wrap:wrap;gap:6px;margin-top:2px;}
+[data-bf-actions] [data-bd-btn]{padding:5px 9px;font-size:11px;}
+[data-bf-actions] [data-bd-btn][data-bf-on]{border-color:#3b82f6;background:rgba(59,130,246,.18);}
+[data-bf-empty]{margin:auto;padding:40px 10px;text-align:center;font-size:12px;line-height:20px;
+  color:var(--dsw-alias-label-tertiary,#9aa0a6);}
+[data-bf-foot]{padding:9px 14px;border-top:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.1));
+  font-size:11px;color:var(--dsw-alias-label-tertiary,#9aa0a6);}
+[data-bf-modal]{position:absolute;inset:0;background:rgba(0,0,0,.42);display:flex;align-items:center;
+  justify-content:center;pointer-events:auto;padding:16px;}
+[data-bf-modalbox]{width:min(420px,92vw);max-height:86vh;display:flex;flex-direction:column;gap:10px;padding:14px;
+  border-radius:12px;background:var(--dsw-alias-bg-base,#16181c);
+  border:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.12));}
+[data-bf-modalbox] textarea{flex:1;min-height:220px;resize:vertical;font-family:inherit;}
+`
+
     // ⚠️ 与 lib/state.mjs 的 WINDOWS 保持一致（官方口径：工作日 9–12、14–18 是高峰，其余都是谷时）
     const DEFAULT_WINDOWS = {
       noon: { label: '中午谷时', start: '12:00', end: '14:00' },
@@ -130,6 +187,405 @@ window.__ModuleLoader__.load({
         return () => { alive = false; clearInterval(t) }
       }, [intervalMs])
       return [st, setSt]
+    }
+
+    /* ────────────── 荐片：数据与状态仓库 ────────────── */
+
+    const FEED_API = '/api/bili-feed'
+    const feedGet = async (p) => asJson(await fetch(FEED_API + p, { credentials: 'same-origin' }))
+    const feedPost = async (p, body) => asJson(await fetch(FEED_API + p, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body || {}),
+    }))
+
+    /** 荐片 UI 的极简外部 store（按钮与面板共享 open / 批次 / 反馈） */
+    const feedStore = {
+      state: { open: false, status: null, batch: null, feedback: {}, msg: '', msgTone: '' },
+      listeners: new Set(),
+      set(patch) {
+        this.state = { ...this.state, ...patch }
+        for (const fn of [...this.listeners]) { try { fn() } catch { /* 单个订阅挂了不影响别人 */ } }
+      },
+      subscribe(fn) { this.listeners.add(fn); return () => { this.listeners.delete(fn) } },
+      toggle() { this.set({ open: !this.state.open }) },
+      close() { this.set({ open: false }) },
+    }
+    const useFeed = () => {
+      const [snap, setSnap] = React.useState(feedStore.state)
+      React.useEffect(() => feedStore.subscribe(() => setSnap(feedStore.state)), [])
+      return snap
+    }
+    const feedbackMapOf = (rows) => {
+      const m = {}
+      for (const r of rows || []) { if (r && r.bvid) m[r.bvid] = r.action }
+      return m
+    }
+    const FEED_SEEN_KEY = 'dsh-bili-feed-lastSeen'
+    const markFeedSeen = (id) => { try { if (id) window.localStorage.setItem(FEED_SEEN_KEY, String(id)) } catch { /* 无痕模式就算了 */ } }
+    const isFeedUnread = (id) => { try { return Boolean(id) && window.localStorage.getItem(FEED_SEEN_KEY) !== String(id) } catch { return false } }
+
+    /** 秒 → mm:ss / h:mm:ss */
+    const fmtSec = (s) => {
+      const n = Math.max(0, Math.round(Number(s) || 0))
+      const h = Math.floor(n / 3600); const m = Math.floor((n % 3600) / 60); const x = n % 60
+      const p = (v) => String(v).padStart(2, '0')
+      return h ? `${h}:${p(m)}:${p(x)}` : `${m}:${p(x)}`
+    }
+    const fmtNum = (n) => {
+      const v = Number(n) || 0
+      if (v >= 10000) return (v / 10000).toFixed(1) + '万'
+      return String(v)
+    }
+
+    /* ────────────── 荐片：设置页 ────────────── */
+
+    function FeedPanel() {
+      const [st, setSt] = React.useState(null)
+      const [busy, setBusy] = React.useState('')
+      const [msg, setMsg] = React.useState('')
+      const [tone, setTone] = React.useState('')
+      // ⚠️ 输入框一律绑本地草稿：页面每 5 秒轮询，直接把 cfg 绑上去会打断输入
+      const [times, setTimes] = React.useState(null)
+      const [perBatch, setPerBatch] = React.useState(null)
+      const [depth, setDepth] = React.useState(null)
+      const [days, setDays] = React.useState(null)
+      const [avoid, setAvoid] = React.useState(null)
+      const [note, setNote] = React.useState(null)
+      const [pushType, setPushType] = React.useState(null)
+      const [pushUrl, setPushUrl] = React.useState(null)
+
+      React.useEffect(() => {
+        let alive = true
+        const load = async () => {
+          try { const d = await feedGet('/status'); if (alive && d?.ok) setSt(d) } catch { /* 抖动就下次再问 */ }
+        }
+        load()
+        const t = setInterval(load, 5000)
+        return () => { alive = false; clearInterval(t) }
+      }, [])
+
+      const cfg = st?.config
+      React.useEffect(() => {
+        if (!cfg) return
+        if (times === null) setTimes((cfg.feedTimes || []).join(', '))
+        if (perBatch === null) setPerBatch(String(cfg.feedPerBatch ?? 4))
+        if (depth === null) setDepth(cfg.feedDepth || 'medium')
+        if (days === null) setDays(String(cfg.feedHistoryDays ?? 30))
+        if (avoid === null) setAvoid((cfg.feedAvoid || []).join('\n'))
+        if (note === null) setNote(cfg.feedProfileNote || '')
+        if (pushType === null) setPushType(cfg.pushType || 'off')
+        if (pushUrl === null) setPushUrl(cfg.pushUrl || '')
+      }, [cfg])
+
+      const say = (t, k) => { setMsg(t); setTone(k || '') }
+      const reload = async () => { try { const d = await feedGet('/status'); if (d?.ok) setSt(d) } catch { /* 下次 */ } }
+
+      const patch = async (p, what) => {
+        setBusy(JSON.stringify(p))
+        try {
+          const r = await jpost('/config', p)
+          await reload()
+          if (r?.host && r.host.ok === false) say((what || '设置') + '：插件这份存了，但 DSH 设置页那份没写进去（' + r.host.error + '）', 'warn')
+          else say((what || '设置') + '：已保存', 'good')
+        } catch (e) { say(String(e?.message ?? e), 'warn') }
+        finally { setBusy('') }
+      }
+
+      const onRun = async () => {
+        setBusy('run')
+        try {
+          const r = await feedPost('/run', {})
+          say(r?.started ? '已经在后台跑一批了 —— 面板里能看到进度（第一次要拉历史+精读，慢一点正常）' : ('没跑起来：' + (r?.error || '未知原因')), r?.started ? 'good' : 'warn')
+        } catch (e) { say(String(e?.message ?? e), 'warn') }
+        finally { setBusy('') }
+      }
+
+      const onTestPush = async () => {
+        setBusy('push-test')
+        try {
+          const r = await feedPost('/push-test', {})
+          say(r?.ok ? '测试推送已发出 —— 看看手机收到没有' : ('推送失败：' + (r?.error || '未知原因')), r?.ok ? 'good' : 'warn')
+        } catch (e) { say(String(e?.message ?? e), 'warn') }
+        finally { setBusy('') }
+      }
+
+      const onSaveText = async () => {
+        const list = String(avoid || '').split('\n').map((s) => s.trim()).filter(Boolean)
+        await patch({
+          feedTimes: String(times || '').trim(),
+          feedPerBatch: Math.max(1, Math.min(Number(perBatch) || 4, 10)),
+          feedHistoryDays: Math.max(7, Math.min(Number(days) || 30, 90)),
+          feedAvoid: list,
+          feedProfileNote: String(note || '').trim(),
+          pushType: pushType || 'off',
+          pushUrl: String(pushUrl || '').trim(),
+        }, '荐片设置')
+      }
+
+      if (!st) return h('div', { 'data-bd-page': '' }, h('div', { 'data-bd-note': '' }, '读荐片设置中…'))
+
+      const depthLabel = { light: '轻 —— 不读字幕，最省', medium: '中 —— 入选的才读字幕（默认）', deep: '深 —— 候选中段都读，最准也最贵' }
+      const pushLabel = { off: '不推手机（只在本地面板看）', serverchan: 'Server酱³ / Turbo', ntfy: 'ntfy', wecom: '企业微信机器人', webhook: '自定义 webhook' }
+
+      return h('div', { 'data-bd-page': '' },
+        /* 状态 */
+        h('div', { 'data-bd-row': '' },
+          h('span', { 'data-bd-badge': '' }, st.on ? '荐片已开' : '荐片关着'),
+          h('span', { 'data-bd-badge': '' }, '历史 ' + (st.historyCount || 0) + ' 条'),
+          h('span', { 'data-bd-badge': '' }, st.pushReady ? '手机推送已配' : '手机推送未配'),
+          st.running ? h('span', { 'data-bd-badge': '' }, '正在跑…') : null,
+          h('div', { 'data-bd-grow': '' }),
+          h('button', { 'data-bd-btn': '', disabled: Boolean(busy), onClick: onRun }, '现在来一批'),
+          h('button', { 'data-bd-btn': '', disabled: Boolean(busy), onClick: reload }, '刷新')),
+        st.lastError ? h('div', { 'data-bd-msg': '', 'data-warn': '' }, '上次没跑成：' + st.lastError) : null,
+        (!st.venvReady || !st.loggedIn)
+          ? h('div', { 'data-bd-msg': '', 'data-warn': '' },
+            '荐片复用「刷B站」的环境与登录：' + (!st.venvReady ? '主依赖还没装好（去「刷B站」页点「装主依赖」）' : '') + (!st.venvReady && !st.loggedIn ? '；' : '') + (!st.loggedIn ? 'B站还没登录（去「刷B站」页点「扫码登录」）' : ''))
+          : null,
+        !st.hasProfile ? h('div', { 'data-bd-note': '' }, '画像还没生成 —— 第一轮跑完会自动写一份；也可以在第一轮之前手动编辑（面板 → 画像）。') : null,
+
+        /* 什么时候跑 */
+        h('div', { 'data-bd-sec': '' },
+          h('div', { 'data-bd-h': '' }, '什么时候自己跑'),
+          h(ToggleRow, {
+            label: '荐片总开关',
+            note: '打开后按下面的时间点自动跑；关着也能随时点「现在来一批」',
+            on: Boolean(cfg.feedOn),
+            onChange: (v) => patch({ feedOn: v }, '荐片总开关'),
+          }),
+          h('div', { 'data-bd-label': '' }, '每天几点跑（1–3 个，逗号分隔，24 小时制）'),
+          h('input', {
+            'data-bd-input': '', value: times ?? '', placeholder: '21:00 或 12:30, 21:00',
+            onChange: (e) => setTimes(e.target.value),
+          }),
+          h('div', { 'data-bd-note': '' }, '⭐ 21:00 之后是 DeepSeek 谷时，更便宜；白天跑会贵一些。')),
+
+        /* 推多少 / 读多深 */
+        h('div', { 'data-bd-sec': '' },
+          h('div', { 'data-bd-h': '' }, '推多少、读多深'),
+          h('div', { 'data-bd-row': '' },
+            h('div', { 'data-bd-grow': '' },
+              h('div', { 'data-bd-label': '' }, '每批推几条'),
+              h('div', { 'data-bd-note': '' }, '1–10，默认 4；宁缺毋滥，不够会少推')),
+            h('input', {
+              'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 1, max: 10,
+              value: perBatch ?? '', onChange: (e) => setPerBatch(e.target.value),
+            })),
+          h('div', { 'data-bd-label': '' }, '读多深'),
+          h('select', {
+            'data-bd-input': '', value: depth ?? 'medium',
+            onChange: (e) => { setDepth(e.target.value); patch({ feedDepth: e.target.value }, '精读深度') },
+          },
+            h('option', { value: 'light' }, depthLabel.light),
+            h('option', { value: 'medium' }, depthLabel.medium),
+            h('option', { value: 'deep' }, depthLabel.deep)),
+          h('div', { 'data-bd-row': '' },
+            h('div', { 'data-bd-grow': '' },
+              h('div', { 'data-bd-label': '' }, '读多少天的浏览历史'),
+              h('div', { 'data-bd-note': '' }, '7–90，默认 30；越短越贴近「最近在看什么」')),
+            h('input', {
+              'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 7, max: 90,
+              value: days ?? '', onChange: (e) => setDays(e.target.value),
+            }))),
+
+        /* 不想要什么 / 最近在关注 */
+        h('div', { 'data-bd-sec': '' },
+          h('div', { 'data-bd-h': '' }, '让它更懂你'),
+          h('div', { 'data-bd-label': '' }, '不想看的关键词（一行一个，硬过滤）'),
+          h('textarea', {
+            'data-bd-input': '', rows: 3, placeholder: '例：asmr\n短剧\n带货',
+            value: avoid ?? '', onChange: (e) => setAvoid(e.target.value),
+          }),
+          h('div', { 'data-bd-label': '' }, '最近在关注什么（手填，直接进画像）'),
+          h('textarea', {
+            'data-bd-input': '', rows: 3, maxLength: 500,
+            placeholder: '例：最近在折腾 DSH 插件、想找自建 NAS 的教程',
+            value: note ?? '', onChange: (e) => setNote(e.target.value),
+          })),
+
+        /* 推送 */
+        h('div', { 'data-bd-sec': '' },
+          h('div', { 'data-bd-h': '' }, '推到哪儿（可选）'),
+          h('select', {
+            'data-bd-input': '', value: pushType ?? 'off',
+            onChange: (e) => setPushType(e.target.value),
+          }, Object.keys(pushLabel).map((k) => h('option', { key: k, value: k }, pushLabel[k]))),
+          (pushType && pushType !== 'off') ? h('div', { 'data-bd-sub': '' },
+            h('div', { 'data-bd-label': '' }, '推送 URL（完整地址，含 key；只存本机）'),
+            h('input', {
+              'data-bd-input': '', value: pushUrl ?? '',
+              placeholder: pushType === 'serverchan' ? 'https://sctapi.ftqq.com/<SENDKEY>.send'
+                : pushType === 'ntfy' ? 'https://ntfy.sh/<你的主题>'
+                  : pushType === 'wecom' ? 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=<KEY>'
+                    : 'https://你的服务/hook',
+              onChange: (e) => setPushUrl(e.target.value),
+            }),
+            h('div', { 'data-bd-row': '' },
+              h('button', { 'data-bd-btn': '', disabled: Boolean(busy), onClick: onTestPush }, '发条测试'),
+              h('div', { 'data-bd-note': '' }, '先保存再测试；Server酱 的 URL 里 key 就是你的发送密钥，别发给别人'))) : null),
+
+        /* 保存 */
+        h('div', { 'data-bd-sec': '' },
+          h('div', { 'data-bd-row': '' },
+            h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: Boolean(busy), onClick: onSaveText }, '保存荐片设置'),
+            msg ? h('div', { 'data-bd-msg': '', 'data-good': tone === 'good' ? '' : undefined, 'data-warn': tone === 'warn' ? '' : undefined }, msg) : null),
+          h('div', { 'data-bd-note': '' },
+            '⭐ 这一页只影响「荐片」；「刷B站」的关键词/评论/日报在上一页。',
+            h('br'),
+            '面板入口在左下角 🐟；点开是最近一批推荐，喜欢/不感兴趣会写进下一轮的画像。')),
+      )
+    }
+
+    /* ────────────── 荐片：侧栏按钮 ────────────── */
+
+    function FeedButton(props) {
+      const [st, setSt] = React.useState(null)
+      React.useEffect(() => {
+        let alive = true
+        const load = async () => { try { const d = await feedGet('/status'); if (alive && d?.ok) setSt(d) } catch { /* 抖一下无所谓 */ } }
+        load()
+        const t = setInterval(load, 60_000)
+        return () => { alive = false; clearInterval(t) }
+      }, [])
+      const unread = isFeedUnread(st?.lastBatchId)
+      return h('button', {
+        'data-bf-fab': '', type: 'button', title: '大肥鱼荐片',
+        onClick: () => { if (typeof props?.toggle === 'function') props.toggle(); else feedStore.toggle() },
+      }, h('span', { 'data-bf-fish': '' }, '🐟'), unread ? h('span', { 'data-bf-dot': '' }) : null)
+    }
+
+    /* ────────────── 荐片：面板 ────────────── */
+
+    function FeedCard({ item, action, onFeedback }) {
+      const [imgOk, setImgOk] = React.useState(true)
+      const openLink = () => { try { window.open(item.url, '_blank', 'noopener') } catch { /* 弹窗被拦就算了 */ } }
+      return h('div', { 'data-bf-card': '' },
+        h('div', { 'data-bf-cover': '' },
+          (item.cover && imgOk)
+            ? h('img', { src: item.cover, alt: '', loading: 'lazy', onError: () => setImgOk(false) })
+            : h('span', { 'data-bf-coverph': '' }, '🐟'),
+          h('span', { 'data-bf-dur': '' }, fmtSec(item.duration))),
+        h('div', { 'data-bf-cardbody': '' },
+          h('div', { 'data-bf-title': '', onClick: openLink }, item.title),
+          h('div', { 'data-bf-meta': '' }, [item.author, item.stats && item.stats.view ? '播放 ' + fmtNum(item.stats.view) : '', fmtSec(item.duration)].filter(Boolean).join(' · ')),
+          item.summary ? h('div', { 'data-bf-summary': '' }, item.summary) : null,
+          item.why ? h('div', { 'data-bf-why': '' }, '🐟 ' + item.why) : null,
+          (item.highlights && item.highlights.length)
+            ? h('div', { 'data-bf-hl': '' }, ...item.highlights.map((x, i) => h('span', { key: i, 'data-bf-chip': '' }, x)))
+            : null,
+          h('div', { 'data-bf-actions': '' },
+            h('button', { 'data-bd-btn': '', 'data-bf-on': action === 'like' ? '' : undefined, onClick: () => onFeedback(item, 'like') }, '👍 喜欢'),
+            h('button', { 'data-bd-btn': '', 'data-bf-on': action === 'dislike' ? '' : undefined, onClick: () => onFeedback(item, 'dislike') }, '👎 不感兴趣'),
+            h('button', { 'data-bd-btn': '', 'data-bf-on': action === 'seen' ? '' : undefined, onClick: () => onFeedback(item, 'seen') }, '已看过'),
+            h('button', { 'data-bd-btn': '', onClick: openLink }, '打开 B站')))
+      )
+    }
+
+    function FeedDrawer() {
+      const snap = useFeed()
+      const [profileOpen, setProfileOpen] = React.useState(false)
+      const [profileText, setProfileText] = React.useState('')
+      const [profileBusy, setProfileBusy] = React.useState(false)
+      const [localMsg, setLocalMsg] = React.useState('')
+
+      React.useEffect(() => {
+        if (!snap.open) return
+        let alive = true
+        const load = async () => {
+          try {
+            const [s, b] = await Promise.all([feedGet('/status'), feedGet('/batch')])
+            if (!alive) return
+            feedStore.set({ status: s, batch: b?.batch || null, feedback: feedbackMapOf(b?.feedback) })
+            if (b?.batch?.id) markFeedSeen(b.batch.id)
+          } catch (e) { if (alive) setLocalMsg(String(e?.message ?? e)) }
+        }
+        load()
+        const t = setInterval(load, 30_000)
+        return () => { alive = false; clearInterval(t) }
+      }, [snap.open])
+
+      React.useEffect(() => { if (!snap.open) { setProfileOpen(false); setLocalMsg('') } }, [snap.open])
+
+      const st = snap.status || {}
+      const batch = snap.batch
+      const feedback = snap.feedback || {}
+      const refresh = async () => {
+        try {
+          const [s, b] = await Promise.all([feedGet('/status'), feedGet('/batch')])
+          feedStore.set({ status: s, batch: b?.batch || null, feedback: feedbackMapOf(b?.feedback) })
+          setLocalMsg('')
+        } catch (e) { setLocalMsg(String(e?.message ?? e)) }
+      }
+      const onRun = async () => {
+        setLocalMsg('已请求跑一批…')
+        try {
+          const r = await feedPost('/run', {})
+          setLocalMsg(r?.started ? '后台跑一批中，稍后点「刷新」' : ('没跑起来：' + (r?.error || '未知原因')))
+        } catch (e) { setLocalMsg(String(e?.message ?? e)) }
+      }
+      const openProfile = async () => {
+        setProfileOpen(true); setProfileText('读画像中…')
+        try { const r = await feedGet('/profile'); setProfileText(r?.markdown || '') } catch (e) { setProfileText('读不到：' + String(e?.message ?? e)) }
+      }
+      const saveProfile = async () => {
+        setProfileBusy(true)
+        try {
+          const r = await feedPost('/profile', { markdown: profileText })
+          if (r?.ok) { setLocalMsg('画像已保存，下一轮按新版来'); setProfileOpen(false) }
+          else setLocalMsg('保存失败：' + (r?.error || '未知原因'))
+        } catch (e) { setLocalMsg(String(e?.message ?? e)) }
+        finally { setProfileBusy(false) }
+      }
+      const sendFeedback = async (item, action) => {
+        feedStore.set({ feedback: { ...feedback, [item.bvid]: action } })
+        try { await feedPost('/feedback', { bvid: item.bvid, action, batchId: batch?.id || '' }) }
+        catch (e) { setLocalMsg('反馈没发出去：' + String(e?.message ?? e)) }
+      }
+
+      if (!snap.open) return null
+      const items = (batch && Array.isArray(batch.items)) ? batch.items : []
+      return h('div', { 'data-bf-overlay': '' },
+        h('div', { 'data-bf-backdrop': '', onClick: () => feedStore.close() }),
+        h('aside', { 'data-bf-drawer': '' },
+          h('div', { 'data-bf-head': '' },
+            h('div', { 'data-bf-headline': '' },
+              h('span', { 'data-bf-logo': '' }, '🐟'),
+              h('span', { 'data-bf-h1': '' }, '大肥鱼荐片'),
+              batch ? h('span', { 'data-bf-sub': '' }, items.length + ' 条 · ' + new Date(batch.createdAt || Date.now()).toLocaleString('zh-CN')) : null),
+            h('button', { 'data-bf-x': '', title: '关闭', onClick: () => feedStore.close() }, '✕')),
+          h('div', { 'data-bf-toolbar': '' },
+            h('button', { 'data-bd-btn': '', 'data-primary': '', onClick: onRun }, '现在来一批'),
+            h('button', { 'data-bd-btn': '', onClick: refresh }, '刷新'),
+            h('button', { 'data-bd-btn': '', onClick: openProfile }, '画像')),
+          (localMsg || snap.msg) ? h('div', { 'data-bd-msg': '', 'data-warn': '' }, localMsg || snap.msg) : null,
+          st.lastError ? h('div', { 'data-bd-msg': '', 'data-warn': '' }, '上次没跑成：' + st.lastError) : null,
+          !st.on ? h('div', { 'data-bd-msg': '', 'data-warn': '' }, '荐片总开关是关的 —— 到「设置 → 荐片」里打开，或直接点「现在来一批」试一次。') : null,
+          h('div', { 'data-bf-list': '' },
+            items.length
+              ? items.map((it) => h(FeedCard, { key: it.bvid, item: it, action: feedback[it.bvid] || '', onFeedback: sendFeedback }))
+              : h('div', { 'data-bf-empty': '' },
+                st.running
+                  ? '正在跑第一批…（第一次要拉历史 + 精读，慢一点正常）'
+                  : '还没推过 —— 到点会自动跑，也可以点「现在来一批」')),
+          h('div', { 'data-bf-foot': '' },
+            st.running ? '🐟 正在跑…' : (st.lastRunAt ? '上次跑：' + new Date(st.lastRunAt).toLocaleString('zh-CN') : '还没跑过'),
+            st.historyCount ? ' · 历史 ' + st.historyCount + ' 条' : '',
+            st.pushReady ? ' · 手机推送已配' : ' · 手机推送未配'),
+          profileOpen ? h('div', { 'data-bf-modal': '' },
+            h('div', { 'data-bf-modalbox': '' },
+              h('div', { 'data-bf-h1': '' }, '我的 B站 兴趣画像'),
+              h('div', { 'data-bd-note': '' }, '这是大肥鱼下一轮会读的画像；你可以直接改，保存后下一轮以你为准。'),
+              h('textarea', {
+                'data-bd-input': '', rows: 16, value: profileText,
+                onChange: (e) => setProfileText(e.target.value),
+              }),
+              h('div', { 'data-bf-actions': '' },
+                h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: profileBusy, onClick: saveProfile }, '保存画像'),
+                h('button', { 'data-bd-btn': '', onClick: () => setProfileOpen(false) }, '取消')))) : null
+        )
+      )
     }
 
     /* ────────────── 设置页正文 ────────────── */
@@ -574,12 +1030,42 @@ window.__ModuleLoader__.load({
         document.head.appendChild(style)
         ctx.effect(() => () => style.remove(), 'dsh-bili-scroll: 设置页样式')
 
-        // ⭐ 进「设置」：label 就是左侧导航里那一项（抄 dsh-meme 的写法）
+        // 荐片的样式单独一份（data-bf- 前缀，跟原有 data-bd- 隔离）
+        const feedStyle = document.createElement('style')
+        feedStyle.setAttribute('data-plugin-css', 'dsh-bili-scroll-feed')
+        feedStyle.textContent = FEED_CSS
+        document.head.appendChild(feedStyle)
+        ctx.effect(() => () => feedStyle.remove(), 'dsh-bili-scroll: 荐片样式')
+
         const slots = (typeof ctx.get === 'function' ? ctx.get('slots') : undefined) || ctx.slots
         if (!slots) return
+
+        // 「刷B站」设置页（原有，一个字不动）
         slots.inject('settings.section', () => slots.register(
           { name: 'settings.section', id: 'bili-scroll', order: 30, label: '刷B站' },
           () => h(Panel),
+        ))
+
+        // 「荐片」设置页（第二个 section）
+        slots.inject('settings.section', () => slots.register(
+          { name: 'settings.section', id: 'bili-feed', order: 31, label: '荐片' },
+          () => h(FeedPanel),
+        ))
+
+        // 左侧栏底部的 🐟 按钮（点开右侧面板）
+        slots.inject('sidebar.footer.action', () => slots.register(
+          {
+            name: 'sidebar.footer.action',
+            id: 'bili-feed',
+            inject: () => ({ toggle: () => feedStore.toggle() }),
+          },
+          FeedButton,
+        ))
+
+        // 右侧滑出面板（帧级浮层；关闭时组件返回 null，不挡任何点击）
+        slots.inject('shell.overlay', () => slots.register(
+          { name: 'shell.overlay', id: 'bili-feed' },
+          FeedDrawer,
         ))
       },
     }

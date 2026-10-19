@@ -11,3 +11,8 @@ log/
 
 # 给你本机双击用的脚本（里面有本机绝对路径），不进仓库
 *.cmd
+
+# Python 字节码（vendor 里的 MCP 被 py_compile / 运行时会产生）
+__pycache__/
+*.pyc
+
