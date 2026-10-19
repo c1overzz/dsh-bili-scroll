@@ -12,7 +12,10 @@
 - **全程不公开发言**：不评论、不私信、不发动态；历史 / 画像 / 反馈只存在 `<DSH_HOME>/bili-duty/feed/`；
 - 新增 4 个 DSH 工具：`bili_feed_status` / `bili_feed_run` / `bili_feed_feedback` / `bili_feed_profile`；
 - 新增 6 个 MCP 工具：`bili_history` / `bili_rcmd_feed` / `bili_related` / `bili_toview` / `bili_followings` / `bili_up_videos`；
-- 新增两道自检：`node tools/feed-unit.mjs`（纯函数 29 项）、`node tools/feed-host-test.mjs`（路由/配置 11 项）。
+- 新增三道自检：`node tools/feed-unit.mjs`（纯函数 29 项）、`node tools/feed-host-test.mjs`（路由/配置 13 项）、
+  `node tools/feed-e2e-test.mjs`（假 MCP + 假 dsh + 本地 webhook 的**整轮冒烟**：历史→提示词→子进程→batch 校验→入库→推送）。
+- 已在隔离 DSH 实例（0.1.7-rc.2 + web profile）实机验证：侧栏 🐟 按钮 / 面板卡片 / 反馈落盘 / 画像弹层 /
+  设置页保存（含 DSH 原生设置同步）。真实 B站 登录态的整轮仍需真机验证（仓库里没有凭证）。
 
 ---
 

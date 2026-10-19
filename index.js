@@ -1334,7 +1334,13 @@ export function apply(ctx, config) {
     if (!venvReadyNow()) { recordFeedError('主依赖还没装好：去设置页点「装主依赖」'); return { started: false, error: '主依赖没装好' } }
     if (!hasCredential()) { recordFeedError('还没登录 B站：去设置页点「扫码登录」'); return { started: false, error: '还没登录 B站' } }
     feedRunning = true
-    const batchId = batchIdOf(new Date())
+    // ⭐ 同一分钟内连点两次「现在来一批」时别复用同一个文件名（否则后一批会覆盖前一批）；
+    //    定时跑不会撞，只有手动连点会。
+    const baseId = batchIdOf(new Date())
+    let batchId = baseId
+    try {
+      for (let n = 2; n < 20 && existsSync(join(fpaths.batches, batchId + '.json')); n += 1) batchId = `${baseId}-${n}`
+    } catch { /* 判断不了就按原 id */ }
     try {
       log(`[feed] 开跑（${why}），batch=${batchId}`)
       // ① 拉历史（这一步在宿主里做，失败就不起子进程了）

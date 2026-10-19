@@ -60,7 +60,7 @@
 - `prompts/duty.md` —— 刷B站一轮要做的事（判定口径 + 红线，**用户可以改**）；升级规矩见 `lib/state.mjs` 的 `ensureCharter`（用户改过 ⇒ 保留他那份、新版落 `duty.md.new`）
 - `prompts/feed.md` —— 荐片一轮的章程（画像 → 召回 → 精读 → batch JSON；不支持用户改写，升级即覆盖）
 - `vendor/bilibili-mcp/` —— 内置的 Python MCP（MIT，AGI_Ananas）+ 本插件补的 6 个荐片召回工具
-- `selfcheck.mjs` + `tools/` —— 本地预检：`node selfcheck.mjs`（**现在不用解析钩子了**；`tools/register.mjs` 那条还留着当备份）；荐片另有两道：`tools/feed-unit.mjs`、`tools/feed-host-test.mjs`、`tools/feed-mcp-smoke.py`
+- `selfcheck.mjs` + `tools/` —— 本地预检：`node selfcheck.mjs`（**现在不用解析钩子了**；`tools/register.mjs` 那条还留着当备份）；荐片另有：`tools/feed-unit.mjs`（纯函数）、`tools/feed-host-test.mjs`（路由/配置）、`tools/feed-e2e-test.mjs`（假 MCP + 假 dsh 的整轮冒烟）、`tools/feed-mcp-smoke.py`（MCP 白名单与字段映射）
 
 ## 约定
 
