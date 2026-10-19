@@ -1,5 +1,5 @@
-﻿// WPR2 的轻量断言：直接 import 上游仓库里的 index.js（纯函数部分），不启动宿主
-import { mentionListOf, dmListOf, mcpToolList, normWindows } from '../index.js'
+// WPR2 的轻量断言：直接 import 上游仓库里的 index.js（纯函数部分），不启动宿主
+import { mentionListOf, dmListOf, mcpToolList, normWindows, normEveryDays } from '../index.js'
 
 let bad = 0
 const eq = (name, got, want) => {
@@ -35,5 +35,11 @@ eq('窗口归一化：补零', normWindows({ noon: { start: '9:5', end: '14:00' 
 eq('窗口归一化：非法丢掉', normWindows({ noon: { start: 'x', end: '14:00' } }), {})
 eq('窗口归一化：只给一半也丢', normWindows({ night: { start: '18:00' } }), {})
 eq('窗口归一化：钳到 23:59', normWindows({ night: { start: '99:99', end: '01:00' } }).night.start, '23:59')
+
+// ── 每几天跑一轮 ──
+eq('间隔：默认 1', normEveryDays(undefined), 1)
+eq('间隔：字符串也认', normEveryDays('3'), 3)
+eq('间隔：0 / 负数 / 非数字 ⇒ 回 1', [normEveryDays(0), normEveryDays(-2), normEveryDays('x')], [1, 1, 1])
+eq('间隔：上限 9', normEveryDays(99), 9)
 
 process.exit(bad ? 1 : 0)
