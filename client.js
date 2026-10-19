@@ -152,7 +152,7 @@ window.__ModuleLoader__.load({
       const [perDay, setPerDay] = React.useState(null)
       const [perRound, setPerRound] = React.useState(null)
       const [replyPer, setReplyPer] = React.useState(null)
-      const [dmUid, setDmUid] = React.useState(null)        // 私信收件人 UID（本地草稿）
+      const [dmUids, setDmUids] = React.useState(null)      // 私信收件人名单草稿（数组；null = 还没从服务端灌过）
       const [dmMode, setDmMode] = React.useState(null)      // 投递方式：off / only / both
       const [mentionNames, setMentionNames] = React.useState(null)   // 要 @ 谁的名单草稿（null = 还没从服务端灌过）
       const [login, setLogin] = React.useState(null)
@@ -181,7 +181,10 @@ window.__ModuleLoader__.load({
         if (cfg && mentionNames === null) setMentionNames((Array.isArray(cfg.mentionNames) && cfg.mentionNames.length)
           ? cfg.mentionNames.map((s) => String(s))
           : (cfg.mentionName ? [String(cfg.mentionName)] : []))
-        if (cfg && dmUid === null) setDmUid(cfg.dmUid ? String(cfg.dmUid) : '')
+        // ⭐ 私信名单草稿：以 dmUids 为准；老配置只有 dmUid 时把它塞进列表（显示即所见）
+        if (cfg && dmUids === null) setDmUids((Array.isArray(cfg.dmUids) && cfg.dmUids.length)
+          ? cfg.dmUids.map((u) => String(u))
+          : (Number(cfg.dmUid) > 0 ? [String(cfg.dmUid)] : []))
         if (cfg && dmMode === null) setDmMode(cfg.dmMode || 'off')
       }, [cfg])
 
@@ -368,6 +371,20 @@ window.__ModuleLoader__.load({
         commitMentions(next)     // 删掉一个也要立刻落盘 —— 那个输入框失焦事件已经不会再来了
       }
 
+      /* ⭐ 私信名单：同样是整份写回（只留正整数 UID） */
+      const commitDmUids = (list) =>
+        patch({ dmUids: list.map((u) => String(u ?? '').trim()).filter((u) => /^\d+$/.test(u) && Number(u) > 0) }, '私信收件人')
+
+      const onDmUidAt = (i, v) => setDmUids((a) => (a || []).map((s, j) => (j === i ? v : s)))
+
+      const onDmUidAdd = () => setDmUids((a) => [...(a || []), ''])
+
+      const onDmUidDrop = (i) => {
+        const next = (dmUids || []).filter((_, j) => j !== i)
+        setDmUids(next)
+        commitDmUids(next)
+      }
+
       if (!cfg) {
         return h('div', { 'data-bd-page': '' },
           h('div', { 'data-bd-note': '' }, fails >= 3
@@ -494,14 +511,18 @@ window.__ModuleLoader__.load({
             h('option', { value: 'only' }, '只私信 —— 一条公开评论都不发，最不打扰别人'),
             h('option', { value: 'both' }, '评论 + 私信 —— 两边都发')),
           (dmMode && dmMode !== 'off') ? h('div', { 'data-bd-sub': '' },
-            h('div', { 'data-bd-label': '' }, '私信发给谁（B站 UID，数字）'),
-            h('input', {
-              'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 0, value: dmUid ?? '',
-              placeholder: '对方的数字 UID；比如你自己的另一个号',
-              onChange: (e) => setDmUid(e.target.value),
-              onBlur: () => { const n = Math.max(0, Number(dmUid) || 0); setDmUid(n ? String(n) : ''); patch({ dmUid: n }, '私信收件人') },
-            }),
-            h('div', { 'data-bd-note': '' }, '私信内容 = 本轮每条的「标题 + 链接 + 一句话」，一轮合并成一条发（不受 150 字限制）'),
+            h('div', { 'data-bd-label': '' }, '私信发给谁（B站 UID，数字，可以填多个）'),
+            ...(dmUids || []).map((uid, i) => h('div', { 'data-bd-row': '', key: 'dm-' + i },
+              h('input', {
+                'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 0, value: uid,
+                placeholder: i === 0 ? '对方的数字 UID；比如你自己的另一个号' : '再加一个 UID',
+                onChange: (e) => onDmUidAt(i, e.target.value),
+                onBlur: () => commitDmUids(dmUids || []),
+              }),
+              h('button', { 'data-bd-btn': '', onClick: () => onDmUidDrop(i) }, '删'))),
+            h('button', { 'data-bd-btn': '', onClick: onDmUidAdd }, '＋ 加一个收件人'),
+            h('div', { 'data-bd-note': '' }, '私信内容 = 本轮每条的「标题 + 链接 + 一句话」，一轮合并成一条发（不受 150 字限制）；',
+              h('br'), '填多个收件人的话，每个人各发一条（内容相同）'),
             h('div', { 'data-bd-note': '' }, '⚠️ 建议先让这个号和收件人互关：B站 对「陌生人私信」会限流，还可能不弹提醒')) : null,
           h(ToggleRow, {
             label: '本地转写没字幕的视频',

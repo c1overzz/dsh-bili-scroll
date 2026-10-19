@@ -58,6 +58,8 @@ export const Config = !z ? undefined : z.object({
   dmMode: z.string().default('off').extra('volatile', true),
   /** ⭐ 私信发给谁的 UID（数字）。要在 dmMode 不是 off 时填 */
   dmUid: z.natural().default(0).extra('volatile', true),
+  /** ⭐ 私信发给谁的名单（UID 字符串数组）：非空就以它为准，`dmUid` 只当老配置的兜底 */
+  dmUids: z.array(z.string()).default([]).extra('volatile', true),
   /** 本地转写（没字幕的视频用 Whisper 转；默认关，要下模型） */
   transcribe: z.boolean().default(false).extra('volatile', true),
   /** 本地转写用哪个 Whisper 模型（tiny / base / small / medium） */
@@ -103,6 +105,19 @@ const pyEnv = (extra = {}) => ({
   ...extra,
 })
 
+/* ─── 修复②：MCP 工具白名单（issue #25 / #16）──────────────────────────────────── */
+
+/** 值班轮能看到哪些工具（纯函数，给 selfcheck 断言）。不在这里的工具，mcp_server.py 那头根本不注册。 */
+export const mcpToolList = ({ autoComment, replyToComments, dmMode, dmUid, dmUids } = {}) => {
+  const list = ['bili_search', 'bili_subtitle', 'bili_comments', 'bili_video_info']
+  if (autoComment || replyToComments) list.push('bili_reply')   // 只有真要发评论才给这只
+  // ⭐ 私信模式开着却没有 bili_send_message ⇒ 模型手里压根没这只工具，
+  //    表现成"私信功能装了、开关也开了，但从来没发出去过"（issue #25 / #16 的实证）
+  const hasUid = Number(dmUid) > 0 || (Array.isArray(dmUids) && dmUids.some((u) => Number(u) > 0))
+  if (String(dmMode || 'off') !== 'off' && hasUid) list.push('bili_send_message')
+  return list
+}
+
 /* ─── 功能①：评论里可以 @ 多个人 ────────────────────────────────────────────── */
 
 /**
@@ -115,6 +130,18 @@ export const mentionListOf = (cfg = {}) => {
   const list = (many.length ? many : [cfg.mentionName])
     .map((s) => String(s ?? '').trim())
     .filter(Boolean)
+  return [...new Set(list)].slice(0, 10)
+}
+
+/* ─── 功能②：私信可以发给多个人 ────────────────────────────────────────────── */
+
+/** 私信收件人名单（纯函数，给 selfcheck 断言）：`dmUids` 优先、`dmUid` 兜底；去重、最多 10 个 */
+export const dmListOf = (cfg = {}) => {
+  const many = (Array.isArray(cfg.dmUids) ? cfg.dmUids : [])
+    .map((u) => Number(u))
+    .filter((n) => Number.isFinite(n) && n > 0)
+  const one = Number(cfg.dmUid) || 0
+  const list = many.length ? many : (one > 0 ? [one] : [])
   return [...new Set(list)].slice(0, 10)
 }
 
@@ -211,7 +238,7 @@ export function apply(ctx, config) {
    */
   const DEFAULTS = {
     perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
-    dmMode: 'off', dmUid: 0,
+    dmMode: 'off', dmUid: 0, dmUids: [],
     keywords: [], commentPerRound: 1, mentionName: '', mentionNames: [], pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1,
   }
   const normalize = (src, base) => {
@@ -249,6 +276,9 @@ export function apply(ctx, config) {
     // ⭐ 名单类：去空、去重、截断（评论 @ 多个人时正文放不下；私信收件人 10 个也够了）
     if ('mentionNames' in p) p.mentionNames = [...new Set((Array.isArray(p.mentionNames) ? p.mentionNames : [])
       .map((s) => String(s ?? '').trim()).filter(Boolean))].slice(0, 10)
+    // ⭐ 私信名单：只留正整数 UID（老键 dmUid 不动，兼容用）
+    if ('dmUids' in p) p.dmUids = [...new Set((Array.isArray(p.dmUids) ? p.dmUids : [])
+      .map((u) => Number(u)).filter((n) => Number.isFinite(n) && n > 0))].slice(0, 10).map(String)
     return p
   }
 
@@ -578,6 +608,8 @@ export function apply(ctx, config) {
         autoComment: cfg.autoComment,
         dmMode: cfg.dmMode,
         dmUid: Number(cfg.dmUid) || 0,
+        dmUids: dmListOf(cfg),
+        mentionNames: mentionListOf(cfg),
         transcribe: cfg.transcribe,
         loggedIn: hasCredential(),
         home: stateDir,
@@ -638,7 +670,7 @@ export function apply(ctx, config) {
     name: 'bili_config',
     description: '读 / 改「刷B站」的设置。不给 `patch` 就是读；给了就改（只认 schema 里的字段）。\n'
       + '例：`{"perDay":5,"peakValley":true,"noon":true,"night":true,"autoComment":false,"transcribe":false,"keywords":["DeepSeek Harness"]}`；'
-      + '私信投递：`{"dmMode":"only","dmUid":12345678}`（dmMode = off / only / both）。',
+      + '私信投递：`{"dmMode":"only","dmUid":12345678}`（dmMode = off / only / both）；名单：`{"dmUids":["123","456"]}`、`{"mentionNames":["甲","乙"]}`。',
     parameters: { patch: { type: 'object', additionalProperties: true, description: '要改的字段（可省）' } },
     async execute(args) {
       let host = null
@@ -870,7 +902,8 @@ export function apply(ctx, config) {
     //    commentOn 是"这一轮到底能不能发公开评论"的唯一判据（工具层的闸用的是同一套逻辑）
     const mentions = mentionListOf(cfg)   // 要 @ 谁：mentionNames 优先，mentionName 兜底
     const commentOn = Boolean(cfg.autoComment && mentions.length && cfg.dmMode !== 'only')
-    const dmOn = Boolean(cfg.dmMode !== 'off' && Number(cfg.dmUid) > 0)
+    const dmTargets = dmListOf(cfg)       // 私信发给谁：dmUids 优先，dmUid 兜底
+    const dmOn = Boolean(cfg.dmMode !== 'off' && dmTargets.length)
     return `你是这个账号的 B站 助手。`
       + `下面是使用者的设定（如果有）—— **按它来**，别用你默认那套人格。`
       + ownerDoc
@@ -909,7 +942,10 @@ export function apply(ctx, config) {
           ? '关着的 —— 当前是「**只私信**」模式：**这一轮一条公开评论都不许发**，改走私信'
           : '关着的（只写报告，别发评论）')}。`
       + (dmOn
-        ? `⭐⭐ **私信投递**：用 bili_send_message 把这一轮的结果发到 UID **${Number(cfg.dmUid)}**。`
+        ? `⭐⭐ **私信投递**：用 bili_send_message 把这一轮的结果发到 UID **${dmTargets.join('、')}**。`
+          + (dmTargets.length > 1
+            ? `⚠️ 名单里有 ${dmTargets.length} 个收件人：**每个人各发一条**（内容相同），别只发给第一个。`
+            : '')
           + `内容**别照抄评论那套**：把本轮每条值得的写成 **标题 + 链接 + 一句话理由**`
           + `（私信是私人渠道、不占别人的地方，可以比评论长一点，但**别啰嗦**）。`
           + `🔴🔴 **但私信有长度上限 —— 实测 500 字符就顶了**：`
@@ -947,15 +983,9 @@ export function apply(ctx, config) {
    *    mcp_server.py 那头**不在白名单里的工具根本不注册** —— 连名字都不给它看见 ✓。
    *    要读全就手工改这个列表（或者直接跑 mcp_server.py，不设这个变量 = 全放）。
    */
-  const mcpWhitelist = () => {
-    const list = ['bili_search', 'bili_subtitle', 'bili_comments', 'bili_video_info']
-    if (cfg.autoComment || cfg.replyToComments) list.push('bili_reply')   // 只有真要发评论才给这只
-    // ⭐ 2026-10-19（issue #25 / #16 的实证，做法参考社区 PR #37）：私信开着却忘了给 bili_send_message ⇒
-    //   模型手里压根没有这只工具 ⇒ 表现成"开关也开了、这一轮也跑了，但从来没发出去过" ✗
-    //   ⇒ dmMode 不是 off、且填了收件人 UID 才放进去（关着就不给，白名单别松）
-    if (String(cfg.dmMode || 'off') !== 'off' && Number(cfg.dmUid) > 0) list.push('bili_send_message')
-    return list
-  }
+  // 白名单只有一处定义（顶层 mcpToolList），这里只是把当前配置喂给它
+  const mcpWhitelist = () => mcpToolList(cfg)
+
 
   const ensureOverlay = () => {
     const file = join(stateDir, 'headless-overlay.yml')
@@ -1538,7 +1568,7 @@ export function apply(ctx, config) {
       const body = await readBody(req)
       const patch = {}
       for (const k of ['perDay', 'peakValley', 'noon', 'night', 'autoComment', 'transcribe', 'asrModel',
-        'commentPerRound', 'mentionName', 'dmMode', 'dmUid',
+        'commentPerRound', 'mentionName', 'mentionNames', 'dmMode', 'dmUid', 'dmUids',
         'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound']) {
         if (k in body) patch[k] = body[k]
       }
