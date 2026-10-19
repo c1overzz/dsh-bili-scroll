@@ -137,6 +137,24 @@ export function apply(ctx, config) {
   const venvReadyNow = () => existsSync(venvPython()) && missingVenvDeps().length === 0
   const asrReadyNow = () => existsSync(asrPython()) && hasPkg(asrDir, 'faster_whisper')
   const cfgFile = join(stateDir, 'config.json')
+  /**
+   * 本地优先（2026-10-18，两个用户实证）：DSH 0.2.1 某些启动方式下 ctx.settings.update 会抛
+   *   profile reload requires the root Include entry（dsh-app-boot 的 reconcileProfilePatches）
+   *   ⇒ 写不进宿主 ⇒ 而 loadCfg 的规则是"宿主有值就以宿主为准" ⇒ 用户刚点的开关几秒后被压回原状，
+   *   表现成"开一个，另一个像被关掉"（其实是每个开关都在自己亮一下就被复位）。
+   * ⇒ 记一份"本地刚存、宿主没同步成功"的键，loadCfg 时这些键以本地为准；宿主同步成功就把它们删掉。
+   */
+  const overrideFile = join(stateDir, 'local-override.json')
+  const readOverride = () => {
+    try { const j = readJson(overrideFile, {}); return j && typeof j === 'object' ? j : {} } catch { return {} }
+  }
+  const markOverride = (keys, on) => {
+    try {
+      const cur = readOverride()
+      for (const k of keys) { if (on) cur[k] = Date.now(); else delete cur[k] }
+      writeFileSync(overrideFile, JSON.stringify(cur, null, 2), 'utf8')
+    } catch (e) { log('记 local-override 失败：' + (e && e.message ? e.message : e)) }
+  }
   const logFile = join(stateDir, 'duty.log')
   const outDir = join(stateDir, 'out')
   mkdirSync(outDir, { recursive: true })
@@ -240,8 +258,10 @@ export function apply(ctx, config) {
     //    ⇒ 画二维码 import 不到 qrcode ⇒ **永远不出码** ✗
     //    ⇒ 这个键不让宿主对账（它由插件自己算出来，不该被界面上的旧值压住）
     const HOST_WINS_EXCLUDED = new Set(['pythonPath'])
+    const ov = readOverride()   // 本地刚存、宿主没同步成功的键 ⇒ 以本地为准
     for (const k of Object.keys(DEFAULTS)) {
       if (HOST_WINS_EXCLUDED.has(k)) { out[k] = saved[k]; continue }
+      if (ov[k] !== undefined) { out[k] = saved[k]; continue }
       if (user[k] === undefined) out[k] = saved[k]
     }
     return clampPatch(out)
@@ -261,13 +281,25 @@ export function apply(ctx, config) {
         throw Object.assign(new Error('DSH 这边没有可写的设置表单（值只落在插件自己的 config.json 里）'), { noForm: true })
       }
       await ctx.settings.update(row.ns, patch, row.revision)
-      // A subsequent request must not merge against the pre-save form snapshot.
-      settingsRow = { at: 0, row: null }
+      // ⭐ READBACK（2026-10-18）：update() 不报错 ≠ 值真的生效 ✗
+      //   三四位用户装了 0.1.9 后开关照样弹回，而界面**没有**出现"没同步"提示
+      //   ⇒ 说明 host.ok 判成了成功、值却没落进生效层 ⇒ 必须**回读用户层**再确认一遍 ✓
+      //   fresh=true 顺带刷新 settingsRow 缓存 ⇒ 后续请求不会拿保存前的表单快照去合并
+      const after = settingsDesc(true)
+      const user = after?.user || {}
+      const bad = Object.keys(patch).filter((k) => {
+        const want = patch[k]
+        const got = user[k]
+        if (Array.isArray(want)) return JSON.stringify(want) !== JSON.stringify(got)
+        if (want !== null && typeof want === "object") return true   // 配置里没有嵌套对象，出现就按没写进去处理
+        return String(got) !== String(want)
+      })
+      if (bad.length) throw Object.assign(new Error("写入没生效（读回来还是旧值）：" + bad.join(", ")), { stale: true })
       return row.ns
     }
     try { return { ok: true, ns: await attempt(false) } }
     catch (e) {
-      if (!e?.noForm) {   // revision 过期（刚有别人改过）⇒ 重取一次再写
+      if (!e?.noForm) {   // revision 过期 / 回读不一致 ⇒ 重取一次再写
         try { return { ok: true, ns: await attempt(true), retried: true } } catch (e2) { e = e2 }
       }
       log(`写 DSH 设置失败：${e?.message ?? e}`)
@@ -283,6 +315,15 @@ export function apply(ctx, config) {
     const clean = clampPatch(patch)
     saveCfg(clean)
     const host = await saveCfgHost(clean)
+    // 宿主写成功 ⇒ 恢复对账；失败 ⇒ 记成"本地优先"，别让界面把它们压回去
+    // ⭐ 无条件本地优先（2026-10-18 第二次修）：
+    //   三四位用户装了 0.1.9、界面没有"没同步"提示、开关照样弹回
+    //   ⇒ 往 DSH 写这一步既没报错、回读也看不出差别，但**生效值仍是旧的**
+    //   （多半是 profile 层压过了 user 层）✗
+    //   ⇒ 不再指望 DSH 那边：只要是从**插件面板**保存的键，读配置时一律以插件自己那份为准 ✓
+    //   ⚠️ 代价：同名的项若在 DSH 原生设置页改，以插件面板为准（我们的设置页才是"正式的家"）。
+    markOverride(Object.keys(clean), true)
+    if (!host.ok) log('⚠️ 这几项没能同步到 DSH 原生设置，改为以插件自己的值为准：' + Object.keys(clean).join(', ') + '（' + host.error + '）')
     return { clean, host }
   }
 
@@ -1205,6 +1246,9 @@ export function apply(ctx, config) {
       loggedIn: hasCredential(),
       venvReady: venvReadyNow(),
       version: myVersion(),
+      // 2026-10-18：这几项"本地存了、但没能同步到 DSH 原生设置" ⇒ 设置页要告诉用户
+      // （DSH 0.2.1 某些启动方式会拒写：profile reload requires the root Include entry）
+      notSynced: Object.keys(readOverride()),
       installFailed: !installing && !venvReadyNow() && (() => { try { return readFileSync(installLogFile, 'utf8').length > 0 } catch { return false } })(),
       installing,
       // ── 本地转写那一套的状态（设置页要显示进度）──

@@ -365,6 +365,15 @@ window.__ModuleLoader__.load({
           runNote ? h('div', { 'data-bd-msg': '', 'data-good': runNote.tone === 'good' ? '' : undefined,
             'data-warn': runNote.tone === 'warn' ? '' : undefined }, runNote.t) : null,
 
+        /* ── 设置没同步到 DSH 那边时，明说出来（别再假装保存成功）──
+           2026-10-18：DSH 0.2.1 某些启动方式会拒写（profile reload requires the root Include entry），
+           以前的表现是"开关亮一下又被压回原状"，用户以为是自己手滑。 */
+        (Array.isArray(st.notSynced) && st.notSynced.length)
+          ? h('div', { 'data-bd-msg': '', 'data-warn': '' },
+              `提示：有 ${st.notSynced.length} 项没能同步到 DSH 原生设置（${st.notSynced.join('、')}）。`
+              + '插件会以这里的设置为准，功能照常；只是 DSH 自带的那页看不到这些值。')
+          : null,
+
         /* ── 定时 ── */
         h('div', { 'data-bd-sec': '' },
           h('div', { 'data-bd-h': '' }, '什么时候自己跑'),
