@@ -150,6 +150,7 @@ window.__ModuleLoader__.load({
       // ⚠️ 输入框必须绑"本地草稿"：页面每 5 秒轮询 /status，服务端那份会把 config 盖掉
       //    ⇒ 直接绑 cfg 的话，用户打字打到一半就被冲没了 ✗（2026-10-14 陌生人验收时抓到）
       const [perDay, setPerDay] = React.useState(null)
+      const [everyDays, setEveryDays] = React.useState(null)
       const [perRound, setPerRound] = React.useState(null)
       const [replyPer, setReplyPer] = React.useState(null)
       const [replyKws, setReplyKws] = React.useState(null)   // 楼中楼识别词草稿（一行一个）
@@ -176,6 +177,7 @@ window.__ModuleLoader__.load({
         if (cfg && ws === null) setWs(cfg.workspace || '')
         if (cfg && rl === null) setRl(cfg.reportLevel || 'full')
         if (cfg && perDay === null) setPerDay(String(cfg.perDay ?? 5))
+        if (cfg && everyDays === null) setEveryDays(String(cfg.everyDays ?? 1))
         if (cfg && perRound === null) setPerRound(String(cfg.commentPerRound ?? 1))
         if (cfg && replyPer === null) setReplyPer(String(cfg.replyPerRound ?? 1))
         if (cfg && replyKws === null) setReplyKws((Array.isArray(cfg.replyKeywords) ? cfg.replyKeywords : []).join('\n'))
@@ -476,6 +478,16 @@ window.__ModuleLoader__.load({
               onChange: (e) => setPerDay(e.target.value),
               onBlur: () => { const n = Math.max(0, Math.min(Number(perDay) || 0, 50)); setPerDay(String(n)); patch({ perDay: n }, '每天挑几条') },
             })),
+          h('div', { 'data-bd-row': '' },
+            h('div', { 'data-bd-grow': '' },
+              h('div', { 'data-bd-label': '' }, '每几天自动跑一轮'),
+              h('div', { 'data-bd-note': '' }, '填 1 = 每个谷时都跑；填 3 = 隔三天跑一次（只拦自动跑，手动按钮随时能跑）')),
+            h('input', {
+              'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 1, max: 9,
+              value: everyDays ?? '',
+              onChange: (e) => setEveryDays(e.target.value),
+              onBlur: () => { const n = Math.max(1, Math.min(Number(everyDays) || 1, 9)); setEveryDays(String(n)); patch({ everyDays: n }, '每几天跑一轮') },
+            })),
           st.lastRunAt ? h('div', { 'data-bd-note': '' }, `上次跑：${new Date(st.lastRunAt).toLocaleString('zh-CN')}`) : null),
 
         /* ── 发言与转写 ── */
@@ -517,14 +529,14 @@ window.__ModuleLoader__.load({
           sw('autoComment') ? h('div', { 'data-bd-sub': '' },
             h('div', { 'data-bd-row': '' },
               h('div', { 'data-bd-grow': '' },
-                h('div', { 'data-bd-label': '' }, '每轮最多发几条评论'),
-                h('div', { 'data-bd-note': '' }, '每条评论里 @ 一次下面那个人；填 0 = 这一轮不发评论')),
+                h('div', { 'data-bd-label': '' }, '每轮互动次数'),
+                h('div', { 'data-bd-note': '' }, '一个数同时压住三处：这一轮挑几条视频、发几条评论、私信里带几条；填 0 = 这一轮不发评论')),
               h('input', {
                 'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 0, max: 20,
                 value: perRound ?? '',
                 onChange: (e) => setPerRound(e.target.value),
                 // ⭐ 0 是合法值（= 这一轮不发评论）；范围与 index.js 的 clampPatch 一致（0–20）
-                onBlur: () => { const n = Math.max(0, Math.min(Number(perRound) || 0, 20)); setPerRound(String(n)); patch({ commentPerRound: n }, '每轮几条评论') },
+                onBlur: () => { const n = Math.max(0, Math.min(Number(perRound) || 0, 20)); setPerRound(String(n)); patch({ commentPerRound: n }, '每轮互动次数') },
               })),
             h('div', { 'data-bd-label': '' }, '要 @ 谁（B站 昵称，可以填多个）'),
             ...(mentionNames || []).map((name, i) => h('div', { 'data-bd-row': '', key: 'mention-' + i },

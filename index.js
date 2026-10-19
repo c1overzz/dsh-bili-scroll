@@ -90,6 +90,7 @@ export const inject = ['webServer', 'tools', 'settings']
 export const Config = !z ? undefined : z.object({
   /** 定量刷：每天最多挑几条 */
   perDay: z.natural().default(5).extra('volatile', true),
+  everyDays: z.natural().default(1).extra('volatile', true),
   /** 峰谷自动刷（总开关） */
   peakValley: z.boolean().default(false).extra('volatile', true),
   /** 峰谷子开关：中午 / 晚上 */
@@ -202,6 +203,9 @@ export const normWindows = (w = {}) => {
 /* ─── 功能②：私信可以发给多个人 ────────────────────────────────────────────── */
 
 /** 私信收件人名单（纯函数，给 selfcheck 断言）：`dmUids` 优先、`dmUid` 兜底；去重、最多 10 个 */
+// 「每几天跑一轮」的间隔：夹到 1-9，非法值回 1
+export const normEveryDays = (n) => Math.max(1, Math.min(Number(n) || 1, 9))
+
 export const dmListOf = (cfg = {}) => {
   const many = (Array.isArray(cfg.dmUids) ? cfg.dmUids : [])
     .map((u) => Number(u))
@@ -311,7 +315,7 @@ export function apply(ctx, config) {
    *     ② **定时器回调里绝不让异常外冒**（见 tick）—— 未捕获异常会杀掉整个宿主进程。
    */
   const DEFAULTS = {
-    perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
+    perDay: 5, everyDays: 1, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
     dmMode: 'off', dmUid: 0, dmUids: [],
     keywords: [], commentPerRound: 1, mentionName: '', mentionNames: [], pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, replyKeywords: [], windows: {},
   }
@@ -343,6 +347,7 @@ export function apply(ctx, config) {
   const clampPatch = (patch) => {
     const p = { ...patch }
     if ('perDay' in p) p.perDay = Math.max(0, Math.min(Number(p.perDay) || 0, 50))
+    if ('everyDays' in p) p.everyDays = normEveryDays(p.everyDays)
     if ('reportLevel' in p) p.reportLevel = ['full', 'brief', 'off'].includes(String(p.reportLevel)) ? String(p.reportLevel) : 'full'
     if ('replyToComments' in p) p.replyToComments = Boolean(p.replyToComments)
     if ('replyPerRound' in p) p.replyPerRound = Math.max(1, Math.min(Number(p.replyPerRound) || 1, 10))
@@ -975,6 +980,9 @@ export function apply(ctx, config) {
     const quota = Math.max(0, Number(cfg.perDay) || 0)
     const already = countPickedToday()
     const left = Math.max(0, quota - already)
+    // ⭐ 2026-10-19：commentPerRound 升级成「每轮互动次数」—— 一个数同时压住「这一轮挑几条视频 / 发几条评论 / 私信里带几条」
+    const interactN = Math.max(0, Math.min(Number(cfg.commentPerRound ?? 1) || 0, 20))
+    const roundPick = Math.min(left, interactN)
     // ⭐ 投递方式（2026-10-17 加）：dmMode = off（只评论）· only（只私信）· both（都发）
     //    commentOn 是"这一轮到底能不能发公开评论"的唯一判据（工具层的闸用的是同一套逻辑）
     const mentions = mentionListOf(cfg)   // 要 @ 谁：mentionNames 优先，mentionName 兜底
@@ -996,7 +1004,7 @@ export function apply(ctx, config) {
       + (cfg.reportLevel === 'off' ? '' : `⚠️ 今天那份报告里可能已经有上一轮写的东西 —— 有就**追加到末尾**，别覆盖（配额按全天算）。`)
       + (cfg.reportLevel === 'off' ? '' : '⭐ 报告里**每挑中一条**，第一行写成 `### BV号`（例：`### BV1xxxxxxx`）—— 宿主**就数这些标题行**算今天挑了几条：漏写当成没挑中，给只是提到 / 跳过的视频加上标题则当成挑中。')
       + (already > 0
-        ? `今天已经挑过 ${already} 条了 ⇒ **这一轮最多再挑 ${left} 条**（「每天最多 ${quota} 条」是全天总量，不是每轮）；`
+        ? `今天已经挑过 ${already} 条了 ⇒ **这一轮最多再挑 ${roundPick} 条**（「每天最多 ${quota} 条」是全天总量，不是每轮）；`
         : `今天最多挑 ${quota} 条；`)
       + `关键词${kws.length ? `用这些：${kws.join('、')}` : '用章程里的默认那几组'}。`
       + `本地转写：${cfg.transcribe
@@ -1011,7 +1019,7 @@ export function apply(ctx, config) {
       + ` —— 一行一条：日期 · BV 号 · 标题 · UP · 一句话结论 · 链接（跳过的那条在后面注明理由）；`
       + `这是**给以后检索用**的（报告是给人看的，归档是给"回头翻"用的），别省略、也别只写挑中的。`
       + `自动评论并 @ ${mentions.length ? mentions.join('、') : '（还没填要 @ 谁）'} 是${commentOn
-        ? `开着的（每轮最多 ${cfg.commentPerRound} 条评论，每条在正文里纯文本只 @ 名单里的**一个人**，按 ${mentions.join(' → ')} 轮流，别一条里 @ 一串，150 字内）`
+        ? `开着的（每轮互动次数 ${interactN}（这一轮挑几条视频、发几条评论、私信里带几条都按它），评论每条在正文里纯文本只 @ 名单里的**一个人**，按 ${mentions.join(' → ')} 轮流，别一条里 @ 一串，150 字内）`
         : (cfg.dmMode === 'only'
           ? '关着的 —— 当前是「**只私信**」模式：**这一轮一条公开评论都不许发**，改走私信'
           : '关着的（只写报告，别发评论）')}。`
@@ -1245,6 +1253,16 @@ export function apply(ctx, config) {
       const today = dayKey(now)
       // ⭐ 闸门看的是「今天已经**挑到几条**」（从今天的报告里数出来），不是「跑了几轮」
       if (countPickedToday(now) >= Number(cfg.perDay || 0)) return
+      // ⭐ 「每 N 天跑一轮」（2026-10-19 加）：只拦**自动**跑；手动按钮不受限，也不写 lastRunAt
+      const everyDays = normEveryDays(cfg.everyDays)
+      if (everyDays > 1) {
+        const lastIso = String(st.lastRunAt || '')
+        const lastDay = lastIso ? dayKey(new Date(lastIso)) : ''
+        if (lastDay) {
+          const diff = Math.round((Date.parse(today + 'T00:00:00Z') - Date.parse(lastDay + 'T00:00:00Z')) / 86400000)
+          if (diff >= 0 && diff < everyDays) return
+        }
+      }
       // ⭐ 「不写日报」那档没有报告可数 ⇒ 数不出条数就保守一点：一天只跑一轮
       if (String(cfg.reportLevel || 'full') === 'off' && roundsToday(now) >= 1) return
       for (const k of ['noon', 'night']) {
@@ -1626,7 +1644,7 @@ export function apply(ctx, config) {
     if (req.method === 'POST' && path === '/api/bili-duty/config') {
       const body = await readBody(req)
       const patch = {}
-      for (const k of ['perDay', 'peakValley', 'noon', 'night', 'autoComment', 'transcribe', 'asrModel',
+      for (const k of ['perDay', 'everyDays', 'peakValley', 'noon', 'night', 'autoComment', 'transcribe', 'asrModel',
         'commentPerRound', 'mentionName', 'mentionNames', 'dmMode', 'dmUid', 'dmUids',
         'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound',
         'replyKeywords', 'windows']) {
