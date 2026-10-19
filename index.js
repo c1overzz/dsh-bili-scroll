@@ -133,6 +133,8 @@ export const Config = !z ? undefined : z.object({
   replyToComments: z.boolean().default(false).extra('volatile', true),
   /** 每轮最多回几条 */
   replyPerRound: z.number().default(1).extra('volatile', true),
+  /** ⭐ 楼中楼识别词（可选）：非空时只回留言里带这些词的；空 = 不看内容（谁直接回它就回谁） */
+  replyKeywords: z.array(z.string()).default([]).extra('volatile', true),
 })
 
 /**
@@ -290,7 +292,7 @@ export function apply(ctx, config) {
   const DEFAULTS = {
     perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
     dmMode: 'off', dmUid: 0, dmUids: [],
-    keywords: [], commentPerRound: 1, mentionName: '', mentionNames: [], pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1,
+    keywords: [], commentPerRound: 1, mentionName: '', mentionNames: [], pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, replyKeywords: [],
   }
   const normalize = (src, base) => {
     const out = { ...base }
@@ -330,6 +332,9 @@ export function apply(ctx, config) {
     // ⭐ 私信名单：只留正整数 UID（老键 dmUid 不动，兼容用）
     if ('dmUids' in p) p.dmUids = [...new Set((Array.isArray(p.dmUids) ? p.dmUids : [])
       .map((u) => Number(u)).filter((n) => Number.isFinite(n) && n > 0))].slice(0, 10).map(String)
+    // ⭐ 楼中楼识别词：去空、去重、最多 20 个
+    if ('replyKeywords' in p) p.replyKeywords = [...new Set((Array.isArray(p.replyKeywords) ? p.replyKeywords : [])
+      .map((s) => String(s ?? '').trim()).filter(Boolean))].slice(0, 20)
     return p
   }
 
@@ -972,6 +977,9 @@ export function apply(ctx, config) {
         : '')
       + (cfg.replyToComments
         ? `回复评论：开着（每轮最多回 ${Number(cfg.replyPerRound) || 1} 条）—— 只回「直接回复到你那条评论下面的人」，回完记进报告；找不到你那条评论就跳过，别硬找。`
+          + ((Array.isArray(cfg.replyKeywords) ? cfg.replyKeywords : []).length
+            ? `识别词：${cfg.replyKeywords.join('、')} —— **只有留言里带这些词的人才回**；一个都没带就这一轮谁都不回（别硬凑）。`
+            : `没设识别词 ⇒ 凡是直接回在你那条评论下面的人都回（仍受上面的条数上限）。`)
         : `回复评论：关着（一个字都不要回任何人 —— 有人回复你那条评论也不要理）。`)
       + `最后用一句话汇报你挑到了什么。现在几点了自己看一眼系统时间。`
   }
@@ -1559,7 +1567,8 @@ export function apply(ctx, config) {
       const patch = {}
       for (const k of ['perDay', 'peakValley', 'noon', 'night', 'autoComment', 'transcribe', 'asrModel',
         'commentPerRound', 'mentionName', 'mentionNames', 'dmMode', 'dmUid', 'dmUids',
-        'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound']) {
+        'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound',
+        'replyKeywords']) {
         if (k in body) patch[k] = body[k]
       }
       // ⭐ 范围钳制 + 两份都写（config.json / DSH 原生设置页），统一走 persistCfg —— 见文件上方

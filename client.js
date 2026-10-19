@@ -148,6 +148,7 @@ window.__ModuleLoader__.load({
       const [perDay, setPerDay] = React.useState(null)
       const [perRound, setPerRound] = React.useState(null)
       const [replyPer, setReplyPer] = React.useState(null)
+      const [replyKws, setReplyKws] = React.useState(null)   // 楼中楼识别词草稿（一行一个）
       const [dmUids, setDmUids] = React.useState(null)      // 私信收件人名单草稿（数组；null = 还没从服务端灌过）
       const [dmMode, setDmMode] = React.useState(null)      // 投递方式：off / only / both
       const [mentionNames, setMentionNames] = React.useState(null)   // 要 @ 谁的名单草稿（null = 还没从服务端灌过）
@@ -173,6 +174,7 @@ window.__ModuleLoader__.load({
         if (cfg && perDay === null) setPerDay(String(cfg.perDay ?? 5))
         if (cfg && perRound === null) setPerRound(String(cfg.commentPerRound ?? 1))
         if (cfg && replyPer === null) setReplyPer(String(cfg.replyPerRound ?? 1))
+        if (cfg && replyKws === null) setReplyKws((Array.isArray(cfg.replyKeywords) ? cfg.replyKeywords : []).join('\n'))
         // ⭐ 名单草稿：以 mentionNames 为准；老配置只有 mentionName 时把它塞进列表里（显示即所见）
         if (cfg && mentionNames === null) setMentionNames((Array.isArray(cfg.mentionNames) && cfg.mentionNames.length)
           ? cfg.mentionNames.map((s) => String(s))
@@ -460,7 +462,17 @@ window.__ModuleLoader__.load({
                 value: replyPer ?? '',
                 onChange: (e) => setReplyPer(e.target.value),
                 onBlur: () => { const n = Math.max(1, Math.min(Number(replyPer) || 1, 10)); setReplyPer(String(n)); patch({ replyPerRound: n }, '每轮几条回复') },
-              }))) : null,
+              })),
+            h('div', { 'data-bd-label': '' }, '识别词（可选，一行一个）'),
+            h('textarea', {
+              'data-bd-input': '', rows: 3, value: replyKws ?? '',
+              placeholder: '比如 插件 / 好用 / 怎么装 —— 只有留言里带这些词的人才回；留空 = 谁直接回你都回',
+              onChange: (e) => setReplyKws(e.target.value),
+            }),
+            h('button', {
+              'data-bd-btn': '',
+              onClick: () => patch({ replyKeywords: String(replyKws || '').split('\n').map((s) => s.trim()).filter(Boolean) }, '识别词'),
+            }, '保存识别词')) : null,
           h(ToggleRow, {
             label: '自动评论并 @ 你',
             note: '默认关；开了之后它会在挑中的视频下面留评论，并 @ 你填的那个人',
