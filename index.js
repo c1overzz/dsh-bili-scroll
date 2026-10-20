@@ -86,6 +86,8 @@ export const Config = !z ? undefined : z.object({
   replyToComments: z.boolean().default(false).extra('volatile', true),
   /** 每轮最多回几条 */
   replyPerRound: z.number().default(1).extra('volatile', true),
+  /** 自动收藏：0 = 不收藏；>0 = 目标收藏夹 fid（设置页下拉选择）。动作在宿主侧完成，模型拿不到这只手 */
+  favFolderId: z.number().default(0).extra('volatile', true),
 })
 
 /**
@@ -195,7 +197,7 @@ export function apply(ctx, config) {
   const DEFAULTS = {
     perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
     dmMode: 'off', dmUid: 0,
-    keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1,
+    keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, favFolderId: 0,
   }
   const normalize = (src, base) => {
     const out = { ...base }
@@ -229,6 +231,7 @@ export function apply(ctx, config) {
     if ('replyToComments' in p) p.replyToComments = Boolean(p.replyToComments)
     if ('replyPerRound' in p) p.replyPerRound = Math.max(1, Math.min(Number(p.replyPerRound) || 1, 10))
     if ('commentPerRound' in p) p.commentPerRound = Math.max(0, Math.min(Number(p.commentPerRound) || 0, 20))
+    if ('favFolderId' in p) p.favFolderId = Math.max(0, Math.floor(Number(p.favFolderId) || 0))
     return p
   }
 
@@ -1018,6 +1021,62 @@ export function apply(ctx, config) {
     } finally { verifying = false }
   }
 
+  /* ─────────────── 自动收藏（宿主侧完成，模型拿不到） ─────────────── */
+  const favOps = (args) => new Promise((resolve) => {
+    try {
+      const py = String(cfg.pythonPath || 'python')
+      const child = spawn(py, [join(stateDir, 'favops.py'), ...args], {
+        cwd: stateDir, env: pyEnv(), stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+      })
+      let outTxt = '', errTxt = ''
+      const t = setTimeout(() => { try { child.kill() } catch { /* 已退出 */ } resolve({ ok: false, error: 'favops 超时（30s）' }) }, 30_000)
+      child.stdout?.on('data', (c) => { outTxt += c })
+      child.stderr?.on('data', (c) => { errTxt += c })
+      child.on('error', (e) => { clearTimeout(t); resolve({ ok: false, error: String(e?.message ?? e) }) })
+      child.on('exit', () => {
+        clearTimeout(t)
+        try { resolve(JSON.parse(String(outTxt).trim().split('\n').pop() || '{}')) }
+        catch { resolve({ ok: false, error: (errTxt || outTxt || 'favops 无输出').slice(-300) }) }
+      })
+    } catch (e) { resolve({ ok: false, error: String(e?.message ?? e) }) }
+  })
+  const pickIdsFromReport = (file) => {
+    try {
+      const text = readFileSync(file, 'utf8').replace(/```[\s\S]*?```/g, '')
+      return [...new Set([...text.matchAll(/^#{2,3}[ \t]*(BV[0-9A-Za-z]{10})/gm)].map((m) => m[1]))]
+    } catch { return [] }
+  }
+  let favBusy = false
+  const favToday = async (why = 'manual') => {
+    if (favBusy) return { ok: false, error: '上一次收藏还没跑完，等它完事' }
+    favBusy = true
+    try {
+      refreshCfg()
+      const fid = Math.max(0, Math.floor(Number(cfg.favFolderId) || 0))
+      if (fid <= 0) return { ok: false, error: '还没选收藏夹（设置页「自动收藏到」选一个）' }
+      if (!hasCredential()) return { ok: false, error: '还没扫码登录' }
+      const script = join(stateDir, 'favops.py')
+      if (!existsSync(script)) return { ok: false, error: 'favops.py 不在（重启一次 dsh 会自动铺好）' }
+      const report = join(outDir, `${dayKey()}.md`)
+      const ids = pickIdsFromReport(report)
+      if (!ids.length) return { ok: false, error: '今天的报告里还没有挑中的视频' }
+      const done = [], fail = []
+      for (const bvid of ids) {
+        const r = await favOps(['add', bvid, String(fid)])
+        if (r?.ok) done.push(bvid); else fail.push(`${bvid}: ${r?.error ?? '未知'}`)
+        await new Promise((s) => setTimeout(s, 500))   // 防限流：逐条间隔半秒
+      }
+      try {
+        appendFileSync(report, `\n- 收藏（${why}）：成功 ${done.length} 条${fail.length ? `，失败 ${fail.length} 条（${fail.join('；')}）` : ''} → 收藏夹 fid ${fid}\n`, 'utf8')
+      } catch { /* 报告写不进去就算了，duty.log 里有 */ }
+      log(`自动收藏（${why}）：成功 ${done.length} / ${ids.length}${fail.length ? '，失败：' + fail.join('；') : ''}`)
+      return { ok: fail.length === 0, added: done.length, total: ids.length, failures: fail, folderId: fid }
+    } catch (e) {
+      log(`自动收藏出错：${e?.message ?? e}`)
+      return { ok: false, error: String(e?.message ?? e) }
+    } finally { favBusy = false }
+  }
+
   /**
    * ⭐ 保底：那一轮**没写出报告**时，宿主自己补一份"占位报告"。
    * 起因（2026-10-16 用户实测反馈）：有一轮卡在"转写返回空 ⇒ 以为 ASR 坏了"上反复重试，
@@ -1111,6 +1170,14 @@ export function apply(ctx, config) {
         const picked = countPickedToday()   // 报告是事实来源、state 只是兜底（跟闸门同一个算法）
         if (picked > prev) { bumpState({ picked }); log(`今天挑到 ${picked} 条（上限 ${Number(cfg.perDay) || 0} 条）`) }
       } catch (e) { log(`数挑了几条时出错（不影响这一轮）：${e?.message ?? e}`) }
+      // ⭐ 自动收藏：把今天报告里挑中的视频存进使用者选的收藏夹（宿主侧完成，模型拿不到这只手）。
+      //    延 5 秒再动：让报告落盘、也避开和占位报告/复核抢时序。
+      try {
+        if (Math.max(0, Math.floor(Number(cfg.favFolderId) || 0)) > 0) {
+          const favTimer = setTimeout(() => { Promise.resolve(favToday('round')).catch((e) => log('自动收藏异常：' + (e?.message ?? e))) }, 5_000)
+          favTimer.unref?.()
+        }
+      } catch { /* 收藏失败不影响这一轮 */ }
       // ⭐ 发完评论之后**过一会儿再核一次**（2026-10-16 加的「评论发出后复核」）：
       //    接口回"发送成功"≠ 公开可见（新号/风控会进审核）；而"不公开"时连 @ 通知都不会推 ⇒
       //    插件会以为发了、下一轮不再发 ⇒ 一条都没到人。等 90 秒再查，避免把"还在审核"误判成"没发出去"。
@@ -1518,7 +1585,7 @@ export function apply(ctx, config) {
       const patch = {}
       for (const k of ['perDay', 'peakValley', 'noon', 'night', 'autoComment', 'transcribe', 'asrModel',
         'commentPerRound', 'mentionName', 'dmMode', 'dmUid',
-        'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound']) {
+        'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound', 'favFolderId']) {
         if (k in body) patch[k] = body[k]
       }
       // ⭐ 范围钳制 + 两份都写（config.json / DSH 原生设置页），统一走 persistCfg —— 见文件上方
@@ -1532,6 +1599,17 @@ export function apply(ctx, config) {
 
     if (req.method === 'POST' && path === '/api/bili-duty/run') {
       return sendJson(res, 200, { ok: true, ...runDuty('manual') })
+    }
+
+    // ⭐ 收藏夹列表（设置页下拉用）—— 从使用者账号实时读，只读
+    if (req.method === 'GET' && path === '/api/bili-duty/fav-folders') {
+      if (!hasCredential()) return sendJson(res, 200, { ok: false, error: '还没扫码登录' })
+      return sendJson(res, 200, await favOps(['folders']))
+    }
+
+    // ⭐ 手动补收藏：把今天报告里挑中的视频补存进选定收藏夹
+    if (req.method === 'POST' && path === '/api/bili-duty/fav-today') {
+      return sendJson(res, 200, await favToday('manual'))
     }
 
     // 建 venv + 装依赖（**不等它**：几分钟的活，进度写 install.log）

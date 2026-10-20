@@ -154,6 +154,8 @@ window.__ModuleLoader__.load({
       const [replyPer, setReplyPer] = React.useState(null)
       const [dmUid, setDmUid] = React.useState(null)        // 私信收件人 UID（本地草稿）
       const [dmMode, setDmMode] = React.useState(null)      // 投递方式：off / only / both
+      const [favFolders, setFavFolders] = React.useState(null)   // 收藏夹列表（下拉用，null = 还没读）
+      const [favId, setFavId] = React.useState(null)             // 选中的收藏夹 fid（存字符串）
       const [mention, setMention] = React.useState(null)
       const [login, setLogin] = React.useState(null)
       const [runNote, setRunNote] = React.useState(null)
@@ -180,7 +182,13 @@ window.__ModuleLoader__.load({
         if (cfg && mention === null) setMention(cfg.mentionName || '')
         if (cfg && dmUid === null) setDmUid(cfg.dmUid ? String(cfg.dmUid) : '')
         if (cfg && dmMode === null) setDmMode(cfg.dmMode || 'off')
+        if (cfg && favId === null) setFavId(String(cfg.favFolderId ?? 0))
       }, [cfg])
+      React.useEffect(() => {
+        if (favFolders !== null) return
+        jget('/fav-folders').then((r) => { if (alive.current) setFavFolders(r && r.ok ? (r.folders || []) : []) })
+          .catch(() => { if (alive.current) setFavFolders([]) })
+      }, [favFolders])
 
       const win = { ...DEFAULT_WINDOWS, ...(st?.windows || {}) }
 
@@ -222,6 +230,15 @@ window.__ModuleLoader__.load({
           if (!n) say(r.text || '没有需要复核的记录', 'good')
           else say(`复核完 ${n} 条：公开可见 ${vis} 条，其余「没查到」（可能还在审核 —— 看不到不等于没发出去）。结果也追加到今天的报告末尾了。`, vis ? 'good' : 'warn')
           if (r.report) setReport(null)
+        } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
+      }
+
+      const onFavToday = async () => {
+        setBusy('fav')
+        try {
+          const r = await jpost('/fav-today', {})
+          if (!r || r.ok === false) say('收藏没做成：' + ((r && r.error) || '未知原因'), 'warn')
+          else say(`收藏好了：${r.added}/${r.total} 条已存入${r.failures && r.failures.length ? '；失败 ' + r.failures.length + ' 条' : ''}`, 'good')
         } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
       }
 
@@ -528,6 +545,19 @@ window.__ModuleLoader__.load({
             h('option', { value: 'full' }, '完整 —— 每条：标题 / UP / 为什么值得（默认）'),
             h('option', { value: 'brief' }, '薄 —— 每条一两行，只留值不值得 + 链接'),
             h('option', { value: 'off' }, '不写 —— 只发评论，不生成日报文件')),
+          h('div', { 'data-bd-label': '' }, '自动收藏到（挑中的视频存进你的收藏夹）'),
+          h('select', {
+            'data-bd-input': '', value: favId ?? '0',
+            onChange: (e) => { setFavId(e.target.value); patch({ favFolderId: Math.max(0, Number(e.target.value) || 0) }, '自动收藏') },
+          },
+            h('option', { value: '0' }, '不收藏（默认）'),
+            (favFolders || []).map((f) => h('option', { key: String(f.id), value: String(f.id) }, `${f.title}（${f.count} 条）`))),
+          h('div', { 'data-bd-row': '' },
+            h('button', { 'data-bd-btn': '', disabled: busy === 'fav', onClick: onFavToday }, '补收藏今天的'),
+            h('div', { 'data-bd-note': '' },
+              favFolders === null ? '收藏夹列表读取中…'
+                : (favFolders.length ? '每轮结束后，自动把挑中的视频存进上面选的收藏夹'
+                  : '读不到收藏夹列表 —— 先「扫码登录」，或稍后重开设置页'))),
           h('div', { 'data-bd-row': '' },
             h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: Boolean(busy), onClick: onSaveText }, '保存'),
             msg ? h('div', { 'data-bd-msg': '', 'data-good': msgTone === 'good' ? '' : undefined, 'data-warn': msgTone === 'warn' ? '' : undefined }, msg) : null)),
