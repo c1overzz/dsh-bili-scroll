@@ -46,6 +46,12 @@ window.__ModuleLoader__.load({
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body || {}),
     }))
+    const jdel = async (p, body) => asJson(await fetch(API + p, {
+      method: 'DELETE',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body || {}),
+    }))
 
     const CSS = `
 [data-bd-page]{display:flex;flex-direction:column;gap:18px;padding:2px 2px 8px;max-width:640px;}
@@ -150,11 +156,16 @@ window.__ModuleLoader__.load({
       // ⚠️ 输入框必须绑"本地草稿"：页面每 5 秒轮询 /status，服务端那份会把 config 盖掉
       //    ⇒ 直接绑 cfg 的话，用户打字打到一半就被冲没了 ✗（2026-10-14 陌生人验收时抓到）
       const [perDay, setPerDay] = React.useState(null)
+      const [everyDays, setEveryDays] = React.useState(null)
       const [perRound, setPerRound] = React.useState(null)
       const [replyPer, setReplyPer] = React.useState(null)
-      const [dmUid, setDmUid] = React.useState(null)        // 私信收件人 UID（本地草稿）
-      const [dmMode, setDmMode] = React.useState(null)      // 投递方式：off / only / both
-      const [mention, setMention] = React.useState(null)
+      const [replyKws, setReplyKws] = React.useState(null)   // 楼中楼识别词草稿（一行一个）
+      const [personaName, setPersonaName] = React.useState(null)   // 当前人格名草稿
+      const [personaText, setPersonaText] = React.useState(null)   // 人格正文草稿（直接粘贴 md）
+      const [personaForce, setPersonaForce] = React.useState(false) // 上次被"短太多"拦下 ⇒ 再点一次就是确认覆盖
+      const [dmUids, setDmUids] = React.useState(null)      // 私信收件人名单草稿（数组；null = 还没从服务端灌过）
+      const [autoDm, setAutoDm] = React.useState(null)      // 投递方式：off / only / both
+      const [mentionNames, setMentionNames] = React.useState(null)   // 要 @ 谁的名单草稿（null = 还没从服务端灌过）
       const [login, setLogin] = React.useState(null)
       const [runNote, setRunNote] = React.useState(null)
       const [report, setReport] = React.useState(null)        // 非 null = 报告已展开   // 顶部那行状态（跑一轮/装依赖的反馈原来在最底下，看不见）
@@ -171,18 +182,40 @@ window.__ModuleLoader__.load({
 
       const cfg = st?.config
       React.useEffect(() => {
-        if (cfg && kws === null) setKws((cfg.keywords || []).join('\n'))
+        if (cfg && kws === null) {
+          const list = (Array.isArray(cfg.keywords) ? cfg.keywords : []).map((s) => String(s))
+          setKws(list.length ? list : [''])          // 空配置也给一个空框，用户直接填，不用先点「添加」
+        }
         if (cfg && ws === null) setWs(cfg.workspace || '')
         if (cfg && rl === null) setRl(cfg.reportLevel || 'full')
         if (cfg && perDay === null) setPerDay(String(cfg.perDay ?? 5))
+        if (cfg && everyDays === null) setEveryDays(String(cfg.everyDays ?? 1))
         if (cfg && perRound === null) setPerRound(String(cfg.commentPerRound ?? 1))
         if (cfg && replyPer === null) setReplyPer(String(cfg.replyPerRound ?? 1))
-        if (cfg && mention === null) setMention(cfg.mentionName || '')
-        if (cfg && dmUid === null) setDmUid(cfg.dmUid ? String(cfg.dmUid) : '')
-        if (cfg && dmMode === null) setDmMode(cfg.dmMode || 'off')
+        if (cfg && replyKws === null) setReplyKws((Array.isArray(cfg.replyKeywords) ? cfg.replyKeywords : []).join('\n'))
+        // ⭐ 名单草稿：以 mentionNames 为准；老配置只有 mentionName 时把它塞进列表里（显示即所见）
+        if (cfg && mentionNames === null) setMentionNames((Array.isArray(cfg.mentionNames) && cfg.mentionNames.length)
+          ? cfg.mentionNames.map((s) => String(s))
+          : (cfg.mentionName ? [String(cfg.mentionName)] : []))
+        // ⭐ 私信名单草稿：以 dmUids 为准；老配置只有 dmUid 时把它塞进列表（显示即所见）
+        if (cfg && dmUids === null) setDmUids((Array.isArray(cfg.dmUids) && cfg.dmUids.length)
+          ? cfg.dmUids.map((u) => String(u))
+          : (Number(cfg.dmUid) > 0 ? [String(cfg.dmUid)] : []))
+        if (cfg && autoDm === null) setAutoDm(Boolean(cfg.autoDm ?? (cfg.dmMode && cfg.dmMode !== 'off')))
+        // ⭐ 人格：名字从配置里来，正文从 /personas 读一次（之后就是本地草稿，别被轮询冲掉）
+        if (cfg && personaName === null) {
+          setPersonaName(cfg.personaName || '')
+          jget('/personas').then((r) => {
+            if (alive.current && personaText === null) setPersonaText(String(r?.text || ''))
+          }).catch(() => { if (alive.current && personaText === null) setPersonaText('') })
+        }
       }, [cfg])
 
       const win = { ...DEFAULT_WINDOWS, ...(st?.windows || {}) }
+      const mentionCount = (mentionNames || []).map((s) => String(s || '').trim()).filter(Boolean).length
+      const dmCount = (dmUids || []).map((u) => String(u || '').trim()).filter(Boolean).length
+      const commentsOnNow = Boolean(cfg?.autoComment && mentionCount)
+      const dmOnNow = Boolean((autoDm ?? cfg?.autoDm) && dmCount)
 
       const say = (text, tone) => {
         setMsg(text); setMsgTone(tone || '')
@@ -201,13 +234,25 @@ window.__ModuleLoader__.load({
         finally { setBusy('') }
       }
 
+      /* ⭐ 改谷时窗口的起止时间：两份窗口整份传（服务端只认整份 windows），填坏了还原 */
+      const onWinTime = (k, which, e) => {
+        const v = String(e.target.value || '').trim()
+        if (!/^\d{1,2}:\d{2}$/.test(v)) { e.target.value = win[k][which]; return }
+        const next = {}
+        for (const kk of ['noon', 'night']) next[kk] = { start: win[kk].start, end: win[kk].end }
+        next[k][which] = v
+        patch({ windows: next }, '时段')
+      }
+
       const onShowReport = async () => {
         if (report !== null) { setReport(null); return }       // 再点一次收起
         setBusy('report')
         try {
           const r = await jget('/report')
-          setReport(r && r.exists ? (r.text || '（报告是空的）') : '今天还没有报告 —— 跑一轮之后就有了')
-        } catch (e) { setReport('读不到报告：' + String(e?.message ?? e)) } finally { setBusy('') }
+          setReport(r && r.exists
+            ? { text: r.text || '（报告是空的）', summary: r.summary || '', parsed: r.parsed || null }
+            : { text: '今天还没有报告 —— 跑一轮之后就有了', summary: '', parsed: null })
+        } catch (e) { setReport({ text: '读不到报告：' + String(e?.message ?? e), summary: '', parsed: null }) } finally { setBusy('') }
       }
 
       // ⭐ 复核评论：接口回"发送成功"≠ 公开可见（新号/风控会进审核，那时候连 @ 都不会推）
@@ -346,9 +391,94 @@ window.__ModuleLoader__.load({
         finally { setBusy('') }
       }
 
-      const onSaveText = async () => {
-        const list = String(kws || '').split('\n').map((s) => s.trim()).filter(Boolean)
-        await patch({ keywords: list, workspace: String(ws || '').trim() }, '关键词与工作区')
+      /* ⭐ 人格：粘贴保存（不再是"填 .md 路径导入"那一套） */
+      const reloadPersona = async () => {
+        try {
+          const r = await jget('/personas')
+          if (r && r.ok) { setPersonaText(String(r.text || '')); setPersonaName(String(r.current || '')) }
+        } catch { /* 读不到就保留草稿 */ }
+      }
+
+      const onSavePersona = async () => {
+        const name = String(personaName || '').trim()
+        if (!name) { say('先给这份人格起个名字（比如 本鱼），再点保存', 'warn'); return }
+        setBusy('persona')
+        try {
+          const r = await jpost('/personas', { name, text: String(personaText ?? ''), confirm: personaForce })
+          if (r && r.ok) {
+            setPersonaForce(false)
+            setPersonaName(String(r.current || name))
+            say(`人格「${name}」已保存 —— 下一轮就按它说话`, 'good')
+            reloadPersona()
+          } else if (r && r.needConfirm) {
+            setPersonaForce(true)
+            say(String(r.error || '这份比原来短太多 —— 确认要覆盖就再点一次「保存」'), 'warn')
+          } else say(String(r?.error || '没存成'), 'warn')
+        } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
+      }
+
+      const onPickPersona = async (name) => {
+        setPersonaName(name)
+        try { await patch({ personaName: name }, '人格') } catch { /* patch 已经 say 过 */ }
+        reloadPersona()
+      }
+
+      const onDropPersona = async (name) => {
+        setBusy('persona')
+        try {
+          const r = await jdel('/personas', { name })
+          if (r && r.ok) {
+            say(`已删除人格「${name}」`, 'good')
+            setPersonaText('')
+            setPersonaName(String(r.current || ''))
+          } else say(String(r?.error || '没删成'), 'warn')
+        } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
+      }
+
+      /* ⭐ 关键词：一个词一个输入框（原来是整块 textarea，一行一个，改一个词要全量重写） */
+      const commitKws = (list) =>
+        patch({ keywords: list.map((s) => String(s ?? '').trim()).filter(Boolean) }, '关键词')
+
+      const onKwAt = (i, v) => setKws((a) => (a || []).map((s, j) => (j === i ? v : s)))
+
+      const onKwAdd = () => setKws((a) => [...(a || []), ''])
+
+      const onKwDrop = (i) => {
+        const next = (kws || []).filter((_, j) => j !== i)
+        setKws(next.length ? next : [''])
+        commitKws(next)     // 删掉一个要立刻落盘 —— 那个输入框的失焦事件不会再来
+      }
+
+      const onSaveWs = async () => {
+        await patch({ workspace: String(ws || '').trim() }, '工作区')
+      }
+
+      /* ⭐ 要 @ 谁：名单草稿在本地，失焦 / 增删时整份写回去（不能一条条 patch，会互相覆盖） */
+      const commitMentions = (list) =>
+        patch({ mentionNames: list.map((s) => String(s ?? '').trim()).filter(Boolean) }, '要 @ 谁')
+
+      const onMentionAt = (i, v) => setMentionNames((a) => (a || []).map((s, j) => (j === i ? v : s)))
+
+      const onMentionAdd = () => setMentionNames((a) => [...(a || []), ''])
+
+      const onMentionDrop = (i) => {
+        const next = (mentionNames || []).filter((_, j) => j !== i)
+        setMentionNames(next)
+        commitMentions(next)     // 删掉一个也要立刻落盘 —— 那个输入框失焦事件已经不会再来了
+      }
+
+      /* ⭐ 私信名单：同样是整份写回（只留正整数 UID） */
+      const commitDmUids = (list) =>
+        patch({ dmUids: list.map((u) => String(u ?? '').trim()).filter((u) => /^\d+$/.test(u) && Number(u) > 0) }, '私信收件人')
+
+      const onDmUidAt = (i, v) => setDmUids((a) => (a || []).map((s, j) => (j === i ? v : s)))
+
+      const onDmUidAdd = () => setDmUids((a) => [...(a || []), ''])
+
+      const onDmUidDrop = (i) => {
+        const next = (dmUids || []).filter((_, j) => j !== i)
+        setDmUids(next)
+        commitDmUids(next)
       }
 
       if (!cfg) {
@@ -368,11 +498,13 @@ window.__ModuleLoader__.load({
         /* ── 今天 ── */
         h('div', { 'data-bd-row': '' },
           h('span', { 'data-bd-badge': '' }, `今天已挑 ${st.pickedToday ?? st.ranToday ?? 0} / ${cfg.perDay} 条`),
+          st.running ? h('span', { 'data-bd-badge': '' }, `正在跑 ${Math.max(1, Math.round(Number(st.runningMs || 0) / 60000))} 分钟`) : null,
           h('span', { 'data-bd-badge': '' }, '环境' + (st.venvReady ? '已就绪' : (st.installing ? '正在装' : '未装'))),
           h('span', { 'data-bd-badge': '' }, st.loggedIn ? 'B站已登录' : 'B站未登录'),
             h('span', { 'data-bd-badge': '' }, 'v' + (st.version || '?')),
           h('div', { 'data-bd-grow': '' }),
-          h('button', { 'data-bd-btn': '', disabled: busy === 'run', onClick: onRun }, '现在跑一轮')),
+          h('button', { 'data-bd-btn': '', disabled: busy === 'run' || Boolean(st.running), onClick: onRun },
+            st.running ? '正在跑…' : '现在跑一轮')),
           runNote ? h('div', { 'data-bd-msg': '', 'data-good': runNote.tone === 'good' ? '' : undefined,
             'data-warn': runNote.tone === 'warn' ? '' : undefined }, runNote.t) : null,
 
@@ -390,99 +522,141 @@ window.__ModuleLoader__.load({
           h('div', { 'data-bd-h': '' }, '什么时候自己跑'),
           h(ToggleRow, {
             label: '峰谷时段自动刷',
-            note: '只在谷时跑 —— 工作日 12:00–14:00 与 18:00 之后（整个周末也算谷时）；关了就只能手动跑',
+            note: '只在谷时跑 —— 默认工作日 12:00–14:00 与 18:00–09:00（整个周末也算谷时）；关了就只能手动跑',
             on: sw('peakValley'),
             onChange: (v) => patch({ peakValley: v }, '峰谷时段自动刷'),
           }),
           sw('peakValley') ? h('div', { 'data-bd-sub': '' },
-            ...['noon', 'night'].map((k) => h(ToggleRow, {
-              key: k,
-              label: win[k].label,
-              note: `${win[k].start} – ${win[k].end}`,
-              on: sw(k),
-              onChange: (v) => patch({ [k]: v }, win[k].label),
-            }))) : null),
+            ...['noon', 'night'].map((k) => h('div', { key: k },
+              h(ToggleRow, {
+                label: win[k].label,
+                note: `${win[k].start} – ${win[k].end}（可以改）`,
+                on: sw(k),
+                onChange: (v) => patch({ [k]: v }, win[k].label),
+              }),
+              // ⭐ 起止时间就地改：只认 HH:MM，填坏了还原
+              h('div', { 'data-bd-row': '', style: { paddingLeft: '12px' } },
+                h('span', { 'data-bd-note': '' }, '从'),
+                h('input', {
+                  'data-bd-input': '', style: { flex: '0 0 84px', textAlign: 'center' }, defaultValue: win[k].start,
+                  placeholder: 'HH:MM',
+                  onBlur: (e) => onWinTime(k, 'start', e),
+                }),
+                h('span', { 'data-bd-note': '' }, '到'),
+                h('input', {
+                  'data-bd-input': '', style: { flex: '0 0 84px', textAlign: 'center' }, defaultValue: win[k].end,
+                  placeholder: 'HH:MM',
+                  onBlur: (e) => onWinTime(k, 'end', e),
+                }))))) : null),
 
-        /* ── 一轮挑几条 ── */
+        /* ── 每天跑多少 ── */
         h('div', { 'data-bd-sec': '' },
-          h('div', { 'data-bd-h': '' }, '一轮挑几条'),
-          h('div', { 'data-bd-row': '' },
-            h('div', { 'data-bd-grow': '' },
-              h('div', { 'data-bd-label': '' }, '每天最多挑几条'),
-              h('div', { 'data-bd-note': '' }, '填 0 = 不自动刷（还是能手动跑）')),
+          h('div', { 'data-bd-h': '' }, '每天跑多少'),
+          h('div', { 'data-bd-row': '', style: { flexWrap: 'wrap', gap: '6px' } },
+            h('span', { 'data-bd-note': '' }, '每天最多挑'),
             h('input', {
               'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 0, max: 50,
+              style: { flex: '0 0 84px', textAlign: 'center' },
               value: perDay ?? '',
               onChange: (e) => setPerDay(e.target.value),
               onBlur: () => { const n = Math.max(0, Math.min(Number(perDay) || 0, 50)); setPerDay(String(n)); patch({ perDay: n }, '每天挑几条') },
-            })),
-          st.lastRunAt ? h('div', { 'data-bd-note': '' }, `上次跑：${new Date(st.lastRunAt).toLocaleString('zh-CN')}`) : null),
+            }),
+            h('span', { 'data-bd-note': '' }, '条；每'),
+            h('input', {
+              'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 1, max: 9,
+              style: { flex: '0 0 84px', textAlign: 'center' },
+              value: everyDays ?? '',
+              onChange: (e) => setEveryDays(e.target.value),
+              onBlur: () => { const n = Math.max(1, Math.min(Number(everyDays) || 1, 9)); setEveryDays(String(n)); patch({ everyDays: n }, '每几天跑一轮') },
+            }),
+            h('span', { 'data-bd-note': '' }, '天自动跑一轮，每轮互动'),
+            h('input', {
+              'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 0, max: 20,
+              style: { flex: '0 0 84px', textAlign: 'center' },
+              value: perRound ?? '',
+              onChange: (e) => setPerRound(e.target.value),
+              onBlur: () => { const n = Math.max(0, Math.min(Number(perRound) || 0, 20)); setPerRound(String(n)); patch({ commentPerRound: n }, '每轮互动次数') },
+            }),
+            h('span', { 'data-bd-note': '' }, '条')),
+          h('div', { 'data-bd-note': '' },
+            '「每轮互动」一个数同时压住三处：这一轮挑几条视频、发几条评论、私信里带几条；填 0 = 这一轮不发评论/私信。'
+            + ' 「每天最多挑」是全天总量；「每几天」只拦自动跑，手动按钮随时能跑。'),
+          st.lastRunAt ? h('div', { 'data-bd-note': '' }, `上次跑：${new Date(st.lastRunAt).toLocaleString('zh-CN')}`) : null,
+          st.lastRound ? h('div', { 'data-bd-note': '' },
+            `上一轮：${new Date(st.lastRound.at).toLocaleString('zh-CN')} · `
+            + (st.lastRound.ok ? '正常结束' : (st.lastRound.error || `退出码 ${st.lastRound.code ?? '?'}`))
+            + (st.lastRound.ms ? `（${Math.max(1, Math.round(st.lastRound.ms / 1000))} 秒）` : '')) : null),
 
         /* ── 发言与转写 ── */
         h('div', { 'data-bd-sec': '' },
           h('div', { 'data-bd-h': '' }, '它会不会替你说话'),
           h(ToggleRow, {
-            label: '回复评论（只回楼中楼）',
-            note: '默认关；开了之后它只回「直接回复到你那条评论下面的人」，不参与讨论',
-            on: sw('replyToComments'),
-            onChange: (v) => patch({ replyToComments: v }, '回复评论'),
-          }),
-          sw('replyToComments') ? h('div', { 'data-bd-sub': '' },
-            h('div', { 'data-bd-row': '' },
-              h('div', { 'data-bd-grow': '' },
-                h('div', { 'data-bd-label': '' }, '每轮最多回几条'),
-                h('div', { 'data-bd-note': '' }, '只回直接回在你那条评论下面的人')),
-              h('input', {
-                'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 1, max: 10,
-                value: replyPer ?? '',
-                onChange: (e) => setReplyPer(e.target.value),
-                onBlur: () => { const n = Math.max(1, Math.min(Number(replyPer) || 1, 10)); setReplyPer(String(n)); patch({ replyPerRound: n }, '每轮几条回复') },
-              }))) : null,
-          h(ToggleRow, {
-            label: '自动评论并 @ 你',
-            note: '默认关；开了之后它会在挑中的视频下面留评论，并 @ 你填的那个人',
+            label: '自动公开评论',
+            note: '默认关；开了之后它会在挑中的视频下面留评论，并把「要 @ 谁」名单里的人全 @ 上',
             on: sw('autoComment'),
-            onChange: (v) => patch({ autoComment: v }, '自动评论'),
+            onChange: (v) => patch({ autoComment: v }, '自动公开评论'),
           }),
           sw('autoComment') ? h('div', { 'data-bd-sub': '' },
-            h('div', { 'data-bd-row': '' },
-              h('div', { 'data-bd-grow': '' },
-                h('div', { 'data-bd-label': '' }, '每轮最多发几条评论'),
-                h('div', { 'data-bd-note': '' }, '每条评论里 @ 一次下面那个人；填 0 = 这一轮不发评论')),
+            h('div', { 'data-bd-label': '' }, '要 @ 谁（B站 昵称，可以填多个）'),
+            ...(mentionNames || []).map((name, i) => h('div', { 'data-bd-row': '', key: 'mention-' + i },
               h('input', {
-                'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 0, max: 20,
-                value: perRound ?? '',
-                onChange: (e) => setPerRound(e.target.value),
-                // ⭐ 0 是合法值（= 这一轮不发评论）；范围与 index.js 的 clampPatch 一致（0–20）
-                onBlur: () => { const n = Math.max(0, Math.min(Number(perRound) || 0, 20)); setPerRound(String(n)); patch({ commentPerRound: n }, '每轮几条评论') },
-              })),
-            h('div', { 'data-bd-label': '' }, '要 @ 谁（B站 昵称）'),
-            h('input', {
-              'data-bd-input': '', value: mention ?? '',
-              placeholder: '填你要 @ 的那个人的 B站 昵称；留空 = 只写报告、不发评论',
-              onChange: (e) => setMention(e.target.value),
-              onBlur: () => { const v = String(mention || '').trim(); setMention(v); patch({ mentionName: v }, '要 @ 谁') },
+                'data-bd-input': '', value: name,
+                placeholder: i === 0 ? '填你要 @ 的人的 B站 昵称；留空 = 只写报告、不发公开评论' : '再加一个要 @ 的人',
+                onChange: (e) => onMentionAt(i, e.target.value),
+                onBlur: () => commitMentions(mentionNames || []),
+              }),
+              h('button', { 'data-bd-btn': '', onClick: () => onMentionDrop(i) }, '删'))),
+            h('button', { 'data-bd-btn': '', onClick: onMentionAdd }, '＋ 加一个要 @ 的人'),
+            h('div', { 'data-bd-note': '' }, '名单空着的话这一轮就不发公开评论 —— 评论存在的意义就是 @ 那一下；',
+              h('br'), '填多个的话，每条评论把他们**全部** @ 上（每个名字前加 @、中间用空格隔开）'),
+            h(ToggleRow, {
+              label: '回复楼中楼（只回直接回你的人）',
+              note: '默认关；开了之后它只回「直接回复到你那条评论下面的人」，不参与讨论',
+              on: sw('replyToComments'),
+              onChange: (v) => patch({ replyToComments: v }, '回复评论'),
             }),
-            h('div', { 'data-bd-note': '' }, '留空的话它就不发评论了 —— 因为评论存在的意义就是 @ 那一下')) : null,
-          h('div', { 'data-bd-label': '' }, '投递方式（评论 还是 私信）'),
-          h('select', {
-            'data-bd-input': '', value: dmMode ?? 'off',
-            onChange: (e) => { setDmMode(e.target.value); patch({ dmMode: e.target.value }, '投递方式') },
-          },
-            h('option', { value: 'off' }, '只发评论 —— 在视频下面 @ 你（默认）'),
-            h('option', { value: 'only' }, '只私信 —— 一条公开评论都不发，最不打扰别人'),
-            h('option', { value: 'both' }, '评论 + 私信 —— 两边都发')),
-          (dmMode && dmMode !== 'off') ? h('div', { 'data-bd-sub': '' },
-            h('div', { 'data-bd-label': '' }, '私信发给谁（B站 UID，数字）'),
-            h('input', {
-              'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 0, value: dmUid ?? '',
-              placeholder: '对方的数字 UID；比如你自己的另一个号',
-              onChange: (e) => setDmUid(e.target.value),
-              onBlur: () => { const n = Math.max(0, Number(dmUid) || 0); setDmUid(n ? String(n) : ''); patch({ dmUid: n }, '私信收件人') },
-            }),
-            h('div', { 'data-bd-note': '' }, '私信内容 = 本轮每条的「标题 + 链接 + 一句话」，一轮合并成一条发（不受 150 字限制）'),
-            h('div', { 'data-bd-note': '' }, '⚠️ 建议先让这个号和收件人互关：B站 对「陌生人私信」会限流，还可能不弹提醒')) : null,
+            sw('replyToComments') ? h('div', { 'data-bd-sub': '' },
+              h('div', { 'data-bd-row': '' },
+                h('div', { 'data-bd-grow': '' },
+                  h('div', { 'data-bd-label': '' }, '每轮最多回几条'),
+                  h('div', { 'data-bd-note': '' }, '只回直接回在你那条评论下面的人')),
+                h('input', {
+                  'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 1, max: 10,
+                  value: replyPer ?? '',
+                  onChange: (e) => setReplyPer(e.target.value),
+                  onBlur: () => { const n = Math.max(1, Math.min(Number(replyPer) || 1, 10)); setReplyPer(String(n)); patch({ replyPerRound: n }, '每轮几条回复') },
+                })),
+              h('div', { 'data-bd-label': '' }, '识别词（可选，一行一个）'),
+              h('textarea', {
+                'data-bd-input': '', rows: 3, value: replyKws ?? '',
+                placeholder: '比如 插件 / 好用 / 怎么装 —— 只有留言里带这些词的人才回；留空 = 谁直接回你都回',
+                onChange: (e) => setReplyKws(e.target.value),
+              }),
+              h('button', {
+                'data-bd-btn': '',
+                onClick: () => patch({ replyKeywords: String(replyKws || '').split('\n').map((s) => s.trim()).filter(Boolean) }, '识别词'),
+              }, '保存识别词')) : null) : null,
           h(ToggleRow, {
+            label: '私信',
+            note: '默认关；开了之后，每条评论的正文会另发一条私信给下面填的 UID（末尾带视频链接）',
+            on: Boolean(autoDm),
+            onChange: (v) => { setAutoDm(v); patch({ autoDm: v }, '私信') },
+          }),
+          autoDm ? h('div', { 'data-bd-sub': '' },
+            h('div', { 'data-bd-label': '' }, '私信发给谁（B站 UID，数字，可以填多个）'),
+            ...(dmUids || []).map((uid, i) => h('div', { 'data-bd-row': '', key: 'dm-' + i },
+              h('input', {
+                'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 0, value: uid,
+                placeholder: i === 0 ? '对方的数字 UID；比如你自己的另一个号' : '再加一个 UID',
+                onChange: (e) => onDmUidAt(i, e.target.value),
+                onBlur: () => commitDmUids(dmUids || []),
+              }),
+              h('button', { 'data-bd-btn': '', onClick: () => onDmUidDrop(i) }, '删'))),
+            h('button', { 'data-bd-btn': '', onClick: onDmUidAdd }, '＋ 加一个收件人'),
+            h('div', { 'data-bd-note': '' }, '每条评论对应每个收件人各发一条；正文 = 那条评论去掉全部 @人名，末尾另起一行补视频链接（不受 150 字限制）；',
+              h('br'), '公开评论关着时，那句话就直接当私信正文发'),
+            h('div', { 'data-bd-note': '' }, '⚠️ 建议先让这个号和收件人互关：B站 对「陌生人私信」会限流，还可能不弹提醒')) : null,
+﻿          h(ToggleRow, {
             label: '本地转写没字幕的视频',
             note: '默认关；开了以后，没字幕的视频会在本机转写一遍（不花 API 钱）',
             on: sw('transcribe'),
@@ -501,15 +675,61 @@ window.__ModuleLoader__.load({
               '（模型默认 small，几百 MB，走国内镜像；装一次就够了）'),
             st.asrTail ? h('div', null,
               h('div', { 'data-bd-note': '' }, st.asrInstalling ? '正在装转写依赖（进度）：' : '转写依赖的日志（末尾）—— 只有「没字幕的视频」用得到它：'),
-              h('pre', { 'data-bd-pre': '' }, st.asrTail)) : null) : null),
+              h('pre', { 'data-bd-pre': '' }, st.asrTail)) : null) : null,
+          h('div', { 'data-bd-note': '', style: { marginTop: '8px' } },
+            '这一轮：' + (commentsOnNow && dmOnNow
+              ? `评论 ${mentionCount} 人 · 私信 ${dmCount} 人`
+              : commentsOnNow ? `只发公开评论（@ ${mentionCount} 人）`
+                : dmOnNow ? '只发私信（公开评论关着）'
+                  : '只写报告，不发评论 / 私信'))),
+
+        /* ── 人格 ── */
+        h('div', { 'data-bd-sec': '' },
+          h('div', { 'data-bd-h': '' }, '人格（它按这份设定说话）'),
+          h('div', { 'data-bd-note': '' },
+            '把人格卡的内容直接粘进来就行 —— 存好之后下一轮就按它说话；', h('br'),
+            '留空 = 不用人格，按中性说话（会读工作区的 AGENTS.md，但人格卡优先）。'),
+          h('textarea', {
+            'data-bd-input': '', rows: 12, value: personaText ?? '',
+            placeholder: '把人格卡的 md 内容粘进来……',
+            onChange: (e) => { setPersonaText(e.target.value); setPersonaForce(false) },
+          }),
+          h('div', { 'data-bd-row': '' },
+            h('input', {
+              'data-bd-input': '', style: { flex: '0 0 240px' }, value: personaName ?? '',
+              placeholder: '人格名字（比如 本鱼）',
+              onChange: (e) => setPersonaName(e.target.value),
+            }),
+            h('button', {
+              'data-bd-btn': '', 'data-primary': '', disabled: busy === 'persona', onClick: onSavePersona,
+            }, personaForce ? '确认覆盖' : '保存这份人格'),
+            h('span', { 'data-bd-note': '' }, String(String(personaText ?? '').length) + ' 字')),
+          (st.personas || []).length
+            ? h('div', { 'data-bd-row': '', style: { flexWrap: 'wrap', gap: '8px' } },
+                h('span', { 'data-bd-note': '' }, '已存的：'),
+                ...(st.personas || []).map((p) => h('span', { key: 'persona-' + p.name, 'data-bd-row': '', style: { gap: '6px' } },
+                  h('button', {
+                    'data-bd-btn': '',
+                    'data-primary': String(cfg.personaName || '') === p.name ? '' : undefined,
+                    onClick: () => onPickPersona(p.name),
+                  }, p.name + '（' + p.chars + ' 字）'),
+                  h('button', { 'data-bd-btn': '', disabled: busy === 'persona', onClick: () => onDropPersona(p.name) }, '删'))))
+            : null),
 
         /* ── 关注什么 / 在哪儿刷 ── */
+
         h('div', { 'data-bd-sec': '' },
           h('div', { 'data-bd-h': '' }, '关注什么'),
-          h('textarea', {
-            'data-bd-input': '', rows: 5, placeholder: '一行一个关键词；留空用内置那几组',
-            value: kws ?? '', onChange: (e) => setKws(e.target.value),
-          }),
+          h('div', { 'data-bd-label': '' }, '关键词（一个词一个框；留空用内置那几组）'),
+          ...(kws || []).map((kw, i) => h('div', { 'data-bd-row': '', key: 'kw-' + i },
+            h('input', {
+              'data-bd-input': '', value: kw,
+              placeholder: i === 0 ? '比如 抽象 / 整活 / 猫meme' : '再加一个关键词',
+              onChange: (e) => onKwAt(i, e.target.value),
+              onBlur: () => commitKws(kws || []),
+            }),
+            h('button', { 'data-bd-btn': '', onClick: () => onKwDrop(i) }, '删'))),
+          h('button', { 'data-bd-btn': '', onClick: onKwAdd }, '＋ 加一个关键词'),
           h('div', { 'data-bd-label': '' }, '工作区（它按这里的 AGENTS.md 认设定）'),
           h('input', {
             'data-bd-input': '', value: ws ?? '',
@@ -529,7 +749,7 @@ window.__ModuleLoader__.load({
             h('option', { value: 'brief' }, '薄 —— 每条一两行，只留值不值得 + 链接'),
             h('option', { value: 'off' }, '不写 —— 只发评论，不生成日报文件')),
           h('div', { 'data-bd-row': '' },
-            h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: Boolean(busy), onClick: onSaveText }, '保存'),
+            h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: Boolean(busy), onClick: onSaveWs }, '保存工作区'),
             msg ? h('div', { 'data-bd-msg': '', 'data-good': msgTone === 'good' ? '' : undefined, 'data-warn': msgTone === 'warn' ? '' : undefined }, msg) : null)),
 
         /* ── 环境与账号 ── */
@@ -571,7 +791,14 @@ window.__ModuleLoader__.load({
             h('button', { 'data-bd-btn': '', disabled: busy === 'verify', onClick: onVerify },
               '复核评论'),
             h('button', { 'data-bd-btn': '', onClick: () => copyText(st.report) }, '复制报告路径')),
-          report !== null ? h('pre', { 'data-bd-pre': '' }, report) : null),
+          report !== null ? h('div', { 'data-bd-sec': '' },
+            report.summary ? h('div', { 'data-bd-note': '' }, '今天汇总：' + report.summary) : null,
+            (report.parsed && Array.isArray(report.parsed.picked) && report.parsed.picked.length)
+              ? h('div', { 'data-bd-kv': '' },
+                report.parsed.picked.map((p, i) => h('div', { 'data-bd-note': '', key: 'pk' + i },
+                  `${i + 1}. ${p.bv}${p.title ? ' · ' + p.title : ''}${p.rpid ? '（评论 ' + p.rpid + '）' : ''}`)))
+              : null,
+            h('pre', { 'data-bd-pre': '' }, report.text)) : null),
       )
     }
 
