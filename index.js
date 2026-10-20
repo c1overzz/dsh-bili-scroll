@@ -940,6 +940,30 @@ export function apply(ctx, config) {
     for (const id of ['credentials', 'authorization', 'deepseek-account']) {
       yml.push('- id: ' + id, '  disabled: false', '')
     }
+    // ⭐⭐ 2026-10-20（DSH 0.2.1-rc.2 桌面版实测）：**光开这三个服务还不够** ——
+    //    上面三个打开后仍然报
+    //      `dsh: MISSING_CREDENTIAL: llm-deepseek: no API key for provider route "deepseek-official"`
+    //    因为 headless 的 `agent-default-model` 默认解析到 `deepseek-official`（**要 API key**），
+    //    而"账号登录"的机器没有 key；桌面版 profile 是靠自己那层 patch（provider: deepseek-account）
+    //    把路由指过去的，**一次性任务没有那一层** ⇒ 这一轮还没发请求就死了。
+    //    ⭐ 修法：overlay 里补一条 agent-default-model，**优先跟随用户在桌面里选的模型**
+    //      （`ctx.get('agentDefaultModel').currentSelection()`），拿不到就不写 —— 保持原行为，
+    //      不影响用 DEEPSEEK_API_KEY 的部署。
+    //    ⚠️ 不加这条时，卡点在模型路由，不在能力层：MCP 子进程已经起来了，却一次工具都调不到。
+    let modelSel = null
+    try { modelSel = ctx.get('agentDefaultModel')?.currentSelection?.() ?? null } catch { /* 老版本没有这个服务 */ }
+    const selProvider = modelSel?.provider ?? modelSel?.providerId
+    const selModel = modelSel?.model ?? modelSel?.modelId
+    if (selProvider && selModel) {
+      yml.push(
+        '- id: agent-default-model',
+        '  config:',
+        '    provider: ' + String(selProvider),
+        '    model: ' + String(selModel),
+        ...(modelSel.reasoningEffort ? ['    reasoningEffort: ' + String(modelSel.reasoningEffort)] : []),
+        '',
+      )
+    }
     if (cfg.overlayMcp) {
       yml.push(
         '- insert:',
