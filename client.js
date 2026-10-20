@@ -117,25 +117,29 @@ window.__ModuleLoader__.load({
 
     function useStatus(intervalMs) {
       const [st, setSt] = React.useState(null)
+      // ⭐ 2026-10-19（用户报"没有开关这一项，只能让 ai 帮我开"）：读不到配置时界面只显示"读设置中…"，
+      //    用户会以为是开关坏了 ✗ ⇒ 数一下连续失败次数，交给界面把话说清楚（版本太旧 / 没重启 / 读不到）
+      const [fails, setFails] = React.useState(0)
       React.useEffect(() => {
         let alive = true
         const tick = async () => {
           try {
             const d = await jget('/status')
-            if (alive && d?.ok) setSt(d)
-          } catch { /* 网络抖动就下次再问 */ }
+            if (!alive) return
+            if (d && d.ok) { setSt(d); setFails(0) } else setFails((n) => n + 1)
+          } catch { if (alive) setFails((n) => n + 1) }
         }
         tick()
         const t = setInterval(tick, intervalMs || 5000)
         return () => { alive = false; clearInterval(t) }
       }, [intervalMs])
-      return [st, setSt]
+      return [st, setSt, fails]
     }
 
     /* ────────────── 设置页正文 ────────────── */
 
     function Panel() {
-      const [st, setSt] = useStatus(5000)
+      const [st, setSt, fails] = useStatus(5000)
       const [busy, setBusy] = React.useState('')
       const [msg, setMsg] = React.useState('')
       const [msgTone, setMsgTone] = React.useState('')
@@ -253,10 +257,11 @@ window.__ModuleLoader__.load({
         try {
           const r = await jget('/update')
           if (r && r.ok && r.latest) {
+            const from = r.source === 'github' ? '（npm 上还没发上去，这个版本来自 GitHub）' : ''
             if (r.hasNew) {
               setNewVer(r.latest)
-              say('有新版 v' + r.latest + '（你的是 v' + r.current + '）—— 点右边的「一键升级」，完了重启一次 dsh', 'warn')
-            } else say('已经是最新版 v' + r.current, 'good')
+              say('有新版 v' + r.latest + '（你的是 v' + r.current + '）' + from + ' —— 点右边的「一键升级」，完了重启一次 dsh', 'warn')
+            } else say('已经是最新版 v' + r.current + from, 'good')
           } else {
             say('查不到最新版（可能网络不通）—— 你现在的版本是 v' + ((r && r.current) || '?'))
           }
@@ -347,7 +352,13 @@ window.__ModuleLoader__.load({
       }
 
       if (!cfg) {
-        return h('div', { 'data-bd-page': '' }, h('div', { 'data-bd-note': '' }, '读设置中…'))
+        return h('div', { 'data-bd-page': '' },
+          h('div', { 'data-bd-note': '' }, fails >= 3
+            ? '读不到插件配置（已经试了 ' + fails + ' 次）。常见原因有三个：装的还是 0.1.11 / 0.1.12（那两版有 bug，会卡在这里）；刚装完没重启 dsh；或者插件加载失败。'
+            : '读设置中…'),
+          fails >= 6 ? h('div', { 'data-bd-note': '' },
+            '可以先试：升级到最新版（dsh plugin --profile web add github:c1overzz/dsh-bili-scroll）→ 重启 dsh；还不行就把 ' +
+            '%USERPROFILE%\\.dsh\\bili-duty\\duty.log 的最后几十行发给作者。') : null)
       }
 
       const sw = (k) => Boolean(cfg[k])
