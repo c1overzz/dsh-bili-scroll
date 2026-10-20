@@ -76,6 +76,10 @@ export const Config = !z ? undefined : z.object({
   dshBin: z.string().default('').extra('volatile', true),
   /** headless 那一轮用哪个 profile */
   headlessProfile: z.string().default('headless').extra('volatile', true),
+  /** ⭐ 值班轮用哪个 provider；**留空 = 不覆盖，用 headless profile 自己的默认** */
+  modelProvider: z.string().default('').extra('volatile', true),
+  /** ⭐ 值班轮用哪个模型（跟 provider 一起填才生效） */
+  model: z.string().default('').extra('volatile', true),
   /** 给那一轮叠一份插件自己的 patch（把 B站 MCP 挂上）—— 用户 profile 一个字都不用改 */
   overlayMcp: z.boolean().default(true).extra('volatile', true),
   /** 跑 headless 时的工作目录 */
@@ -196,6 +200,7 @@ export function apply(ctx, config) {
     perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
     dmMode: 'off', dmUid: 0,
     keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1,
+    modelProvider: '', model: '',
   }
   const normalize = (src, base) => {
     const out = { ...base }
@@ -229,6 +234,8 @@ export function apply(ctx, config) {
     if ('replyToComments' in p) p.replyToComments = Boolean(p.replyToComments)
     if ('replyPerRound' in p) p.replyPerRound = Math.max(1, Math.min(Number(p.replyPerRound) || 1, 10))
     if ('commentPerRound' in p) p.commentPerRound = Math.max(0, Math.min(Number(p.commentPerRound) || 0, 20))
+    if ('modelProvider' in p) p.modelProvider = String(p.modelProvider || '').trim().slice(0, 100)
+    if ('model' in p) p.model = String(p.model || '').trim().slice(0, 200)
     return p
   }
 
@@ -926,6 +933,102 @@ export function apply(ctx, config) {
    *    mcp_server.py 那头**不在白名单里的工具根本不注册** —— 连名字都不给它看见 ✓。
    *    要读全就手工改这个列表（或者直接跑 mcp_server.py，不设这个变量 = 全放）。
    */
+  /* ─────────────── 值班轮的模型选择 ───────────────
+   * 数据源：`dsh --profile web --dump-config` 输出的 YAML —— provider 都配在 web 那边，
+   * headless profile 看不见 ⇒ 选中哪个就把那个 provider 的定义连同 agent-default-model
+   * 一起写进值班 overlay（--patch 最后一层，赢过 profile 层）。
+   * dump 的形状是固定的（`- id: llm-pi-ai` 条目下的 providers 块），这里只做**定点解析**：
+   * 形状对不上就返回空 ⇒ 界面还能手填，只是下拉没有列表（绝不因此挡跑一轮）。
+   */
+  const modelsCacheFile = join(stateDir, 'models-cache.json')
+  let modelsCache = null
+  const readModelsCache = () => {
+    if (!modelsCache) modelsCache = readJson(modelsCacheFile, null)
+    return modelsCache && modelsCache.providers && typeof modelsCache.providers === 'object' ? modelsCache : null
+  }
+  const unquoteYaml = (s) => {
+    const t = String(s ?? '').trim()
+    if (t.length >= 2 && t[0] === "'" && t[t.length - 1] === "'") return t.slice(1, -1).replace(/''/g, "'")
+    if (t.length >= 2 && t[0] === '"' && t[t.length - 1] === '"') return t.slice(1, -1)
+    return t
+  }
+  const yamlScalar = (s) => {
+    const t = unquoteYaml(s)
+    return /^-?\d+(\.\d+)?$/.test(t) ? Number(t) : t
+  }
+  const extractPiAiProviders = (text) => {
+    const out = {}
+    try {
+      const lines = String(text || '').split(/\r?\n/)
+      const start = lines.findIndex((l) => /^- id: llm-pi-ai\s*$/.test(l))
+      if (start < 0) return out
+      let pLine = -1
+      for (let j = start + 1; j < lines.length; j++) {
+        if (/^- id: /.test(lines[j])) break
+        if (/^ {4}providers:\s*$/.test(lines[j])) { pLine = j; break }
+      }
+      if (pLine < 0) return out
+      let cur = null          // 当前 provider 名
+      let curModel = null     // 当前 model 对象
+      let curList = null      // 非 null = 正在收字符串数组（input）
+      for (let j = pLine + 1; j < lines.length; j++) {
+        const l = lines[j]
+        if (/^- id: /.test(l)) break      // 下一个条目 ⇒ providers 块结束
+        if (!l.trim()) continue
+        const indent = l.length - l.trimStart().length
+        if (indent <= 4) break            // 出了 providers 块
+        let m
+        if (indent === 6 && (m = /^ {6}([A-Za-z0-9_-]+):\s*(.*)$/.exec(l))) {
+          cur = m[1]; curModel = null; curList = null
+          out[cur] = { models: [] }
+          continue
+        }
+        if (!cur) continue
+        if (indent === 8 && /^ {8}models:\s*$/.test(l)) { curModel = null; curList = null; continue }
+        if (indent === 8 && (m = /^ {8}([A-Za-z0-9_]+):\s*(.*)$/.exec(l))) {
+          curList = null
+          if (m[2] !== '') out[cur][m[1]] = yamlScalar(m[2])
+          continue
+        }
+        if (indent === 10 && (m = /^ {10}- id:\s*(.*)$/.exec(l))) {
+          curModel = { id: unquoteYaml(m[1]) }
+          out[cur].models.push(curModel)
+          curList = null
+          continue
+        }
+        if (indent === 12 && curModel && /^ {12}input:\s*$/.test(l)) { curList = 'input'; curModel.input = []; continue }
+        if (indent === 12 && curModel && (m = /^ {12}([A-Za-z0-9_]+):\s*(.*)$/.exec(l))) {
+          curList = null
+          if (m[2] !== '') curModel[m[1]] = yamlScalar(m[2])
+          continue
+        }
+        if (curList && indent >= 14 && (m = /^ {14}- (.+)$/.exec(l))) { curModel[curList].push(unquoteYaml(m[1])); continue }
+      }
+    } catch { /* dump 形状变了就当没有 —— 不该因此挡住值班轮 */ }
+    return out
+  }
+  const refreshModels = async () => {
+    const dsh = resolveDsh()
+    const args = [...(dsh.args || []), '--profile', 'web', '--dump-config']
+    const text = await new Promise((resolve) => {
+      let child = null
+      let buf = ''
+      const timer = setTimeout(() => { try { child?.kill() } catch { /* 已经没了 */ } resolve('') }, 20_000)
+      const done = (v) => { try { clearTimeout(timer) } catch { /* 无所谓 */ } resolve(v) }
+      try {
+        child = spawn(dsh.command, args, { cwd: stateDir, shell: dsh.shell, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+      } catch { done(''); return }
+      child.stdout?.on('data', (c) => { try { buf += c } catch { /* 就当没收到 */ } })
+      child.on('error', () => done(''))
+      child.on('exit', (code) => done(code === 0 ? buf : ''))
+    })
+    const providers = extractPiAiProviders(text)
+    modelsCache = { at: Date.now(), providers }
+    try { writeJson(modelsCacheFile, modelsCache) } catch { /* 缓存写不了就只在内存里用 */ }
+    log(`模型列表已刷新：${Object.keys(providers).join('、') || '（没解析到 llm-pi-ai 的 providers 块）'}`)
+    return providers
+  }
+
   const mcpWhitelist = () => {
     const list = ['bili_search', 'bili_subtitle', 'bili_comments', 'bili_video_info']
     if (cfg.autoComment || cfg.replyToComments) list.push('bili_reply')   // 只有真要发评论才给这只
@@ -987,6 +1090,42 @@ export function apply(ctx, config) {
         `          BILI_MCP_TOOLS: '${mcpWhitelist().join(',')}'`,
         '',
       )
+    }
+    // ⭐ 模型覆盖：选了 provider/model 就写进 overlay —— patch 是最后一层，赢过 profile 层。
+    //    provider 定义从 web 的 dump-config 缓存里取；取不到就**不注入**（宁可走 profile 默认，
+    //    也不写一份残的定义让那一轮起不来）。
+    const mp = String(cfg.modelProvider || '').trim()
+    const mm = String(cfg.model || '').trim()
+    if (mp && mm) {
+      const def = readModelsCache()?.providers?.[mp]
+      if (def && def.baseURL) {
+        const slim = {
+          ...(def.displayName ? { displayName: def.displayName } : {}),
+          ...(def.apiKeyEnv ? { apiKeyEnv: def.apiKeyEnv } : {}),
+          api: def.api || 'openai-completions',
+          baseURL: def.baseURL,
+          models: (def.models || []).map((m) => ({
+            id: m.id,
+            ...(m.name ? { name: m.name } : {}),
+            ...(m.contextWindow ? { contextWindow: m.contextWindow } : {}),
+            ...(m.input ? { input: m.input } : {}),
+          })),
+        }
+        yml.push(
+          '- id: llm-pi-ai',
+          '  config:',
+          '    providers:',
+          `      ${mp}: ${JSON.stringify(slim)}`,
+          '',
+          '- id: agent-default-model',
+          '  config:',
+          `    provider: '${mp.replace(/'/g, "''")}'`,
+          `    model: '${mm.replace(/'/g, "''")}'`,
+          '',
+        )
+      } else {
+        log(`值班模型覆盖没生效（provider=${mp}）：模型列表缓存里没有它的定义 —— 打开设置页点一次「刷新模型列表」再跑`)
+      }
     }
     try { writeFileSync(file, yml.join('\n'), 'utf8'); return file } catch (e) { log(`写 overlay 失败：${e?.message ?? e}`); return null }
   }
@@ -1518,7 +1657,8 @@ export function apply(ctx, config) {
       const patch = {}
       for (const k of ['perDay', 'peakValley', 'noon', 'night', 'autoComment', 'transcribe', 'asrModel',
         'commentPerRound', 'mentionName', 'dmMode', 'dmUid',
-        'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound']) {
+        'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound',
+        'modelProvider', 'model']) {
         if (k in body) patch[k] = body[k]
       }
       // ⭐ 范围钳制 + 两份都写（config.json / DSH 原生设置页），统一走 persistCfg —— 见文件上方
@@ -1526,6 +1666,10 @@ export function apply(ctx, config) {
       if ('dmMode' in patch) patch.dmMode = ['off', 'only', 'both'].includes(String(patch.dmMode)) ? String(patch.dmMode) : 'off'
       if ('dmUid' in patch) patch.dmUid = Math.max(0, Math.min(Number(patch.dmUid) || 0, Number.MAX_SAFE_INTEGER))
       const { clean, host } = await persistCfg(patch)
+      // ⭐ 存了模型覆盖、但缓存里还没有这个 provider 的定义 ⇒ 顺手读一次 dump-config（失败不挡保存）
+      if (clean.modelProvider && clean.model && !readModelsCache()?.providers?.[clean.modelProvider]) {
+        try { await refreshModels() } catch { /* 刷新失败就用现有缓存，最多这一轮不覆盖模型 */ }
+      }
       log(`设置已更新：${JSON.stringify(clean)}（DSH 那边${host.ok ? '已同步' : '没写成：' + host.error}）`)
       return sendJson(res, 200, { ok: true, config: cfg, host })
     }
@@ -1667,6 +1811,20 @@ export function apply(ctx, config) {
         return sendJson(res, 200, { ok: true, state: 'ok', file })
       }
       return sendJson(res, 200, { ok: r.state !== 'unknown', state: r.state, code: r.code, message: r.message })
+    }
+
+    // ── 值班轮模型选择：列出 web 侧配好的 provider/模型（缓存优先；refresh=1 强制重读） ──
+    if (req.method === 'GET' && path === '/api/bili-duty/models') {
+      let c = readModelsCache()
+      if (url.searchParams.get('refresh') === '1' || !c) {
+        try { await refreshModels(); c = readModelsCache() } catch { /* 刷新失败就吐缓存里那份 */ }
+      }
+      const providers = Object.entries(c?.providers || {}).map(([id, p]) => ({
+        id,
+        displayName: p.displayName || id,
+        models: (p.models || []).map((m) => ({ id: m.id, name: m.name || m.id })),
+      }))
+      return sendJson(res, 200, { ok: true, providers, at: c?.at || 0 })
     }
 
     return sendJson(res, 404, { ok: false, error: `unknown ${req.method} ${path}` })
