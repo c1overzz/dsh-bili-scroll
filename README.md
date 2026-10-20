@@ -13,6 +13,8 @@
 > 跑一次 `dsh plugin --profile web add dsh-bili-scroll` 升级就好（那一版建 Python 环境时缺一个参数，
 > 依赖装不上、二维码也画不出来，重装多少次都一样）。
 
+> 🎬 演示视频：**https://www.bilibili.com/video/BV1d8pU6xEZX/**　·　💬 交流群（QQ）：**1128547307**
+>
 > DSH 插件：**每天替你刷一轮 B站** —— 它自己搜、**读字幕原文**判断、把值得的写成报告，特别值得的会留一条评论 **@ 你**。
 > **你收到的每一条 @，都是它先筛过一遍的。**
 
@@ -150,3 +152,18 @@ dsh plugin --profile web add github:c1overzz/dsh-bili-scroll   # 备选：直接
 ## 许可证
 
 MIT（内置的 `vendor/bilibili-mcp/` 另见该目录下的 LICENSE）
+
+## 交流与反馈
+
+- **遇到问题先去群里问一句** —— 安装、报错、设置这些，群里大多有人踩过；比自己从头试快得多。
+  - **QQ 交流群：1128547307**
+- **确实像 bug 的**（能复现、有报错原文），欢迎开 [Issue](https://github.com/c1overzz/dsh-bili-scroll/issues/new)：
+  请带上 **dsh 版本 / 插件版本（设置页顶部徽章）/ 系统（web 还是桌面版）/ 报错原文或 `duty.log` 最后几十行**。
+  有这个我基本一轮就能定位；只说"装不上"，通常要来回问三四次。
+- **想改进它**：欢迎 PR。⚠️ 但请**一件事一个 PR**（不要一个 PR 塞五个功能），
+  这样我能独立合并、出问题也好回滚。
+- **二次分发 / 二创**：本仓库是 **MIT**，允许改、允许再发、允许商用，**保留 `LICENSE` 里的版权行和 MIT 正文**即可；
+  提一句"基于 dsh-bili-scroll 改的"就更好了。第三方代码与署名见 [NOTICE.md](NOTICE.md)。
+- **演示视频**：<https://www.bilibili.com/video/BV1d8pU6xEZX/>
+
+*反馈请不要去打扰素材作者（上善 / ZipZipPipe 等），他们只管角色形象，不管这个插件。*

@@ -1,6 +1,6 @@
 {
   "name": "dsh-bili-scroll",
-  "version": "0.1.11",
+  "version": "0.1.18",
   "description": "DSH 插件：每天替你刷一轮 B站 —— 读字幕挑出值得的、写一份日报，值得的就 @ 你",
   "keywords": [
     "dsh",
@@ -31,7 +31,9 @@
     "README.md",
     "AGENTS.md",
     "selfcheck.mjs",
-    "LICENSE"
+    "LICENSE",
+    "NOTICE.md",
+    "CONTRIBUTORS.md"
   ],
   "engines": {
     "dsh": ">=0.1.7-rc.1",

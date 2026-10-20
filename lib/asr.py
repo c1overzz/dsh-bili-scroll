@@ -65,6 +65,9 @@ def fetch_audio(url: str, tmp: str, tag: str) -> str:
         # ⭐ nopart：不写 .part 再改名，直接落最终文件。
         #    沙箱里"新建文件 + 改名"会被拒，而这条能绕开（2026-10-14 值班那一轮自己试出来的）
         'nopart': True,
+      # [2026-10-20 · 参考社区 PR #23] 进度条默认打到 stdout ⇒ 调用方"stdout 非空=成功"恒真 ✗
+      #   我们是读文件走的，把进度关掉，别污染输出
+      'noprogress': True,
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
