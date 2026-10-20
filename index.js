@@ -47,6 +47,7 @@ export const inject = ['webServer', 'tools', 'settings']
 export const Config = !z ? undefined : z.object({
   /** 定量刷：每天最多挑几条 */
   perDay: z.natural().default(5).extra('volatile', true),
+  everyDays: z.natural().default(1).extra('volatile', true),
   /** 峰谷自动刷（总开关） */
   peakValley: z.boolean().default(false).extra('volatile', true),
   /** 峰谷子开关：中午 / 晚上 */
@@ -54,10 +55,14 @@ export const Config = !z ? undefined : z.object({
   night: z.boolean().default(true).extra('volatile', true),
   /** 自动评论 @ 使用者（默认关 —— 会拿用户的号说话，必须他自己开） */
   autoComment: z.boolean().default(false).extra('volatile', true),
-  /** ⭐ 私信投递：off=只发评论（现状）· only=只私信（完全不公开评论）· both=评论 + 私信 */
-  dmMode: z.string().default('off').extra('volatile', true),
+  /** ⭐ 私信开关（2026-10-20 起）：开 = 每条评论的正文另发一条私信给下面名单里的人；名单空 = 不发 */
+  autoDm: z.boolean().default(false).extra('volatile', true),
+  /** ⚠️ 老键（已废弃）：off / only / both。只在读老配置时由 clampPatch 迁移一次，之后不再写 */
+  dmMode: z.string().default('').extra('volatile', true),
   /** ⭐ 私信发给谁的 UID（数字）。要在 dmMode 不是 off 时填 */
   dmUid: z.natural().default(0).extra('volatile', true),
+  /** ⭐ 私信发给谁的名单（UID 字符串数组）：非空就以它为准，`dmUid` 只当老配置的兜底 */
+  dmUids: z.array(z.string()).default([]).extra('volatile', true),
   /** 本地转写（没字幕的视频用 Whisper 转；默认关，要下模型） */
   transcribe: z.boolean().default(false).extra('volatile', true),
   /** 本地转写用哪个 Whisper 模型（tiny / base / small / medium） */
@@ -68,6 +73,8 @@ export const Config = !z ? undefined : z.object({
   commentPerRound: z.natural().default(1).extra('volatile', true),
   /** ⭐ 要 @ 谁（B站 昵称）；**留空 = 不发评论** —— 评论存在的意义就是 @ 那一下 */
   mentionName: z.string().default('').extra('volatile', true),
+  /** ⭐ 要 @ 谁的名单（可以有多个）：非空就以它为准，`mentionName` 只当老配置的兜底 */
+  mentionNames: z.array(z.string()).default([]).extra('volatile', true),
   /** 关注关键词（空了用章程里默认那几组） */
   keywords: z.array(z.string()).default([]).extra('volatile', true),
   /** Python：指向 venv 里的那个最好 */
@@ -86,6 +93,13 @@ export const Config = !z ? undefined : z.object({
   replyToComments: z.boolean().default(false).extra('volatile', true),
   /** 每轮最多回几条 */
   replyPerRound: z.number().default(1).extra('volatile', true),
+  /** ⭐ 楼中楼识别词（可选）：非空时只回留言里带这些词的；空 = 不看内容（谁直接回它就回谁） */
+  replyKeywords: z.array(z.string()).default([]).extra('volatile', true),
+  /** ⭐ 谷时窗口覆盖（可选）：只改 start/end，label 沿用 lib/state.mjs 默认；空 = 12:00–14:00 / 18:00–09:00
+   *  ⚠️ 用 z.any()：schemastery 的对象没有 .optional()，形状由 clampPatch 兜（写/读两头都钳） */
+  windows: z.any().default({}).extra('volatile', true),
+  /** ⭐ 当前用哪份人格卡（personas/<名字>.md）；空 = 不用人格，按中性说话 */
+  personaName: z.string().default('').extra('volatile', true),
 })
 
 /**
@@ -100,6 +114,135 @@ const pyEnv = (extra = {}) => ({
   PYTHONIOENCODING: 'utf-8',
   ...extra,
 })
+
+/* ─── 修复②：MCP 工具白名单（issue #25 / #16）──────────────────────────────────── */
+
+/** 值班轮能看到哪些工具（纯函数，给 selfcheck 断言）。不在这里的工具，mcp_server.py 那头根本不注册。 */
+export const mcpToolList = ({ autoComment, replyToComments, autoDm, dmMode, dmUid, dmUids } = {}) => {
+  const list = ['bili_search', 'bili_subtitle', 'bili_comments', 'bili_video_info']
+  if (autoComment || replyToComments) list.push('bili_reply')   // 只有真要发评论才给这只
+  // ⭐ 私信模式开着却没有 bili_send_message ⇒ 模型手里压根没这只工具，
+  //    表现成"私信功能装了、开关也开了，但从来没发出去过"（issue #25 / #16 的实证）
+  const hasUid = Number(dmUid) > 0 || (Array.isArray(dmUids) && dmUids.some((u) => Number(u) > 0))
+  // 新开关 autoDm 优先；没给就退回老键 dmMode（off = 关）—— selfcheck / 老调用方都能用
+  const dmOn = autoDm === undefined ? String(dmMode || 'off') !== 'off' : Boolean(autoDm)
+  if (dmOn && hasUid) list.push('bili_send_message')
+  return list
+}
+
+/* ─── 投递开关：公开评论 / 私信（2026-10-20 拆开）──────────────────────────── */
+
+/**
+ * 把配置里的投递字段归一成 { autoComment, autoDm }（纯函数，给 selfcheck / wpr2-test 断言）：
+ *   · 老键 dmMode：off ⇒ 只关私信；only ⇒ 关公开评论 + 开私信；both ⇒ 开私信（并丢掉这个键，不再写回）
+ *   · 显式传的 autoComment / autoDm **最后生效**（新键优先，老配置零回归）
+ */
+export const migrateDelivery = (p = {}) => {
+  const out = {}
+  if ('dmMode' in p && p.dmMode !== undefined) {
+    const m = String(p.dmMode || '').trim().toLowerCase()
+    if (m === 'only') { out.autoComment = false; out.autoDm = true }
+    else if (m === 'both') out.autoDm = true
+    else if (m === 'off') out.autoDm = false
+  }
+  if ('autoComment' in p) out.autoComment = Boolean(p.autoComment)
+  if ('autoDm' in p) out.autoDm = Boolean(p.autoDm)
+  return out
+}
+
+/* ─── 功能①：评论里可以 @ 多个人 ────────────────────────────────────────────── */
+
+/**
+ * 要 @ 谁的名单（纯函数，给 selfcheck 断言）：
+ *   新键 `mentionNames` 非空就以它为准；否则退回老键 `mentionName` —— 老配置零回归 ✓
+ *   去空、去重、最多 10 个（评论正文有 150 字上限，名单再长也 @ 不下）
+ */
+export const mentionListOf = (cfg = {}) => {
+  const many = Array.isArray(cfg.mentionNames) ? cfg.mentionNames : []
+  const list = (many.length ? many : [cfg.mentionName])
+    .map((s) => String(s ?? '').trim())
+    .filter(Boolean)
+  return [...new Set(list)].slice(0, 10)
+}
+
+/* ─── 功能④：谷时窗口可以自己改（原来写死在 lib/state.mjs）────────────────── */
+
+/** 归一化窗口覆盖（纯函数，给 selfcheck 断言）：只认 `HH:MM`，不合法/缺一半的那档直接丢 ⇒ 回落到默认 */
+export const normWindows = (w = {}) => {
+  const hhmm = (v) => {
+    const m = /^(\d{1,2}):(\d{1,2})$/.exec(String(v ?? '').trim())
+    if (!m) return ''
+    return `${String(Math.min(23, Number(m[1]))).padStart(2, '0')}:${String(Math.min(59, Number(m[2]))).padStart(2, '0')}`
+  }
+  const out = {}
+  for (const k of ['noon', 'night']) {
+    const start = hhmm(w?.[k]?.start)
+    const end = hhmm(w?.[k]?.end)
+    if (start && end) out[k] = { start, end }
+  }
+  return out
+}
+
+/* ─── 功能②：私信可以发给多个人 ────────────────────────────────────────────── */
+
+/** 私信收件人名单（纯函数，给 selfcheck 断言）：`dmUids` 优先、`dmUid` 兜底；去重、最多 10 个 */
+// 「每几天跑一轮」的间隔：夹到 1-9，非法值回 1
+export const normEveryDays = (n) => Math.max(1, Math.min(Number(n) || 1, 9))
+
+export const dmListOf = (cfg = {}) => {
+  const many = (Array.isArray(cfg.dmUids) ? cfg.dmUids : [])
+    .map((u) => Number(u))
+    .filter((n) => Number.isFinite(n) && n > 0)
+  const one = Number(cfg.dmUid) || 0
+  const list = many.length ? many : (one > 0 ? [one] : [])
+  return [...new Set(list)].slice(0, 10)
+}
+
+/* ─── 功能⑤：人格卡（把 md 内容粘进来，存成文件；按名字选一份）──────────────── */
+
+/** 人格名字 → 安全的文件名：去掉路径分隔符 / 控制字符 / 开头的点；空名字返回 '' */
+export const personaFileName = (name) => String(name ?? '')
+  .trim()
+  .replace(/[\\/:*?"<>|\u0000-\u001b]/g, '')
+  .replace(/^\.+/, '')
+  .slice(0, 40)
+  .trim()
+
+/** 人格目录：<家目录>/personas/*.md（跟 config.json 分开放，用户可以直接翻/备份） */
+export const personaDirOf = (stateDir) => join(String(stateDir || ''), 'personas')
+
+/** 列出人格（纯函数，给 selfcheck 断言）：只认 *.md，按名字排 */
+export const listPersonas = (stateDir) => {
+  const dir = personaDirOf(stateDir)
+  try {
+    if (!existsSync(dir)) return []
+    return readdirSync(dir)
+      .filter((f) => /\.md$/i.test(f) && !/^\./.test(f))
+      .map((f) => {
+        let chars = 0
+        try { chars = readFileSync(join(dir, f), 'utf8').length } catch { /* 读不到就当 0 */ }
+        return { name: f.replace(/\.md$/i, ''), chars }
+      })
+      .sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'))
+  } catch { return [] }
+}
+
+/** 读一份人格；没有就返回 ''（纯函数，给 selfcheck 断言） */
+export const readPersona = (stateDir, name) => {
+  const f = personaFileName(name)
+  if (!f) return ''
+  try {
+    const p = join(personaDirOf(stateDir), f + '.md')
+    return existsSync(p) ? readFileSync(p, 'utf8') : ''
+  } catch { return '' }
+}
+
+/** 覆盖已有的人格时拦一下：新的比旧的短一大截（< 60%）⇒ 要用户再点一次确认 */
+export const personaShrink = (oldText, newText) => {
+  const o = String(oldText ?? '').length
+  const n = String(newText ?? '').length
+  return o >= 200 && n < Math.floor(o * 0.6)
+}
 
 export function apply(ctx, config) {
   const pluginDir = dirname(fileURLToPath(import.meta.url))
@@ -193,9 +336,9 @@ export function apply(ctx, config) {
    *     ② **定时器回调里绝不让异常外冒**（见 tick）—— 未捕获异常会杀掉整个宿主进程。
    */
   const DEFAULTS = {
-    perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
-    dmMode: 'off', dmUid: 0,
-    keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1,
+    perDay: 5, everyDays: 1, peakValley: false, noon: true, night: true, autoComment: false, autoDm: false, transcribe: false, asrModel: 'small',
+    dmMode: '', dmUid: 0, dmUids: [],
+    keywords: [], commentPerRound: 1, mentionName: '', mentionNames: [], pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, replyKeywords: [], windows: {}, personaName: '',
   }
   const normalize = (src, base) => {
     const out = { ...base }
@@ -225,10 +368,26 @@ export function apply(ctx, config) {
   const clampPatch = (patch) => {
     const p = { ...patch }
     if ('perDay' in p) p.perDay = Math.max(0, Math.min(Number(p.perDay) || 0, 50))
+    if ('everyDays' in p) p.everyDays = normEveryDays(p.everyDays)
     if ('reportLevel' in p) p.reportLevel = ['full', 'brief', 'off'].includes(String(p.reportLevel)) ? String(p.reportLevel) : 'full'
     if ('replyToComments' in p) p.replyToComments = Boolean(p.replyToComments)
     if ('replyPerRound' in p) p.replyPerRound = Math.max(1, Math.min(Number(p.replyPerRound) || 1, 10))
     if ('commentPerRound' in p) p.commentPerRound = Math.max(0, Math.min(Number(p.commentPerRound) || 0, 20))
+    // ⭐ 2026-10-20：投递方式拆成两个独立开关（autoComment / autoDm），老键 dmMode 只在读到时迁移一次
+    if ('dmMode' in p || 'autoComment' in p || 'autoDm' in p) Object.assign(p, migrateDelivery(p))
+    // ⭐ 名单类：去空、去重、截断（评论 @ 多个人时正文放不下；私信收件人 10 个也够了）
+    if ('mentionNames' in p) p.mentionNames = [...new Set((Array.isArray(p.mentionNames) ? p.mentionNames : [])
+      .map((s) => String(s ?? '').trim()).filter(Boolean))].slice(0, 10)
+    // ⭐ 私信名单：只留正整数 UID（老键 dmUid 不动，兼容用）
+    if ('dmUids' in p) p.dmUids = [...new Set((Array.isArray(p.dmUids) ? p.dmUids : [])
+      .map((u) => Number(u)).filter((n) => Number.isFinite(n) && n > 0))].slice(0, 10).map(String)
+    // ⭐ 楼中楼识别词：去空、去重、最多 20 个
+    if ('replyKeywords' in p) p.replyKeywords = [...new Set((Array.isArray(p.replyKeywords) ? p.replyKeywords : [])
+      .map((s) => String(s ?? '').trim()).filter(Boolean))].slice(0, 20)
+    // ⭐ 谷时窗口：只认 HH:MM；不合法的那一档直接丢（宁可回默认，也别让定时器按坏时间跑）
+    if ('windows' in p) p.windows = normWindows(p.windows)
+    // ⭐ 人格名：只存清洗过的名字（空 = 不用人格）；文件本身由 /personas 接口写
+    if ('personaName' in p) p.personaName = personaFileName(p.personaName)
     return p
   }
 
@@ -328,6 +487,8 @@ export function apply(ctx, config) {
   const cfg = loadCfg()
   // ⭐ 配置是"随时可能被设置页就地改掉"的东西 ⇒ 每个入口用之前重算一遍（cfg 这个对象要一直指向同一份）
   const refreshCfg = () => { Object.assign(cfg, loadCfg()) }
+  // ⭐ 谷时窗口 = lib/state.mjs 的默认值 + 用户在设置页覆盖的 start/end（只覆盖时间，label 沿用默认）
+  const effWindows = () => Object.fromEntries(Object.entries(WINDOWS).map(([k, w]) => [k, { ...w, ...(cfg.windows?.[k] || {}) }]))
   const saveCfg = (patch) => {
     Object.assign(cfg, normalize(patch, cfg))
     // ⭐ 记下"这些键由插件面板说了算"（0.1.11：loadCfg 拿它决定谁赢）
@@ -514,15 +675,13 @@ export function apply(ctx, config) {
       force: { type: 'boolean', description: '本人当场让你发的，传 true 越过"自动评论关着"的闸' },
     },
     async execute(args) {
-      // dmMode==='only' 时本轮根本不该发公开评论 —— 在工具层也一并挡掉（除非当场 force）
-      const commentOn = Boolean(cfg.autoComment && cfg.mentionName && cfg.dmMode !== 'only')
+      // 公开评论没开（或 @ 名单空着）时，工具层也一并挡掉（除非当场 force）
+      const commentOn = Boolean(cfg.autoComment && mentionListOf(cfg).length)
       if (!commentOn && !args.force) {
         return {
           ok: false,
           blocked: true,
-          hint: cfg.dmMode === 'only'
-            ? '现在是「只私信」模式（dmMode=only）—— 规定不发公开评论，改成用 bili_send_message 私信。确实要发时传 force: true。'
-            : '要发评论得同时满足两条：设置里开着「自动评论并 @ 你」、并且填了「要 @ 谁」。或者本人当场让你发时传 force: true。',
+          hint: '要发评论得同时满足两条：设置里开着「自动公开评论」、并且「要 @ 谁」名单里至少有一个名字。或者本人当场让你发时传 force: true。',
         }
       }
       return call('bili_reply', {
@@ -549,15 +708,19 @@ export function apply(ctx, config) {
         perDay: cfg.perDay,
         // ⭐ 2026-10-19：这一轮会用哪个 dsh（空 = 没找到 ⇒ 那一轮根本跑不起来）
         dshCli: dshCliCached(),
-        windows: Object.fromEntries(Object.entries(WINDOWS).map(([k, w]) => [k, {
+        windows: Object.fromEntries(Object.entries(effWindows()).map(([k, w]) => [k, {
           label: w.label, start: w.start, end: w.end,
           switchOn: Boolean(cfg[k]),
           opening: inWindow(now, w),
         }])),
         peakValley: cfg.peakValley,
         autoComment: cfg.autoComment,
-        dmMode: cfg.dmMode,
+        autoDm: Boolean(cfg.autoDm),
+        commentsOn: Boolean(cfg.autoComment && mentionListOf(cfg).length),
+        dmOn: Boolean(cfg.autoDm && dmListOf(cfg).length),
         dmUid: Number(cfg.dmUid) || 0,
+        dmUids: dmListOf(cfg),
+        mentionNames: mentionListOf(cfg),
         transcribe: cfg.transcribe,
         loggedIn: hasCredential(),
         home: stateDir,
@@ -618,7 +781,7 @@ export function apply(ctx, config) {
     name: 'bili_config',
     description: '读 / 改「刷B站」的设置。不给 `patch` 就是读；给了就改（只认 schema 里的字段）。\n'
       + '例：`{"perDay":5,"peakValley":true,"noon":true,"night":true,"autoComment":false,"transcribe":false,"keywords":["DeepSeek Harness"]}`；'
-      + '私信投递：`{"dmMode":"only","dmUid":12345678}`（dmMode = off / only / both）。',
+      + '投递开关：`{"autoComment":true}`（公开评论）、`{"autoDm":true,"dmUid":12345678}`（私信；老键 dmMode 只在读老配置时迁移）；名单：`{"dmUids":["123","456"]}`、`{"mentionNames":["甲","乙"]}`。',
     parameters: { patch: { type: 'object', additionalProperties: true, description: '要改的字段（可省）' } },
     async execute(args) {
       let host = null
@@ -626,7 +789,7 @@ export function apply(ctx, config) {
         // ⭐ 设置页显式设过的键以宿主为准 ⇒ 必须跟着写一份，否则"改了没反应"（钳范围也在这里）
         host = (await persistCfg(args.patch)).host
       }
-      return { ok: true, config: cfg, windows: WINDOWS, home: stateDir, venvReady: venvReadyNow(), host }
+      return { ok: true, config: cfg, windows: effWindows(), home: stateDir, venvReady: venvReadyNow(), host }
     },
   })
 
@@ -846,16 +1009,30 @@ export function apply(ctx, config) {
     const quota = Math.max(0, Number(cfg.perDay) || 0)
     const already = countPickedToday()
     const left = Math.max(0, quota - already)
-    // ⭐ 投递方式（2026-10-17 加）：dmMode = off（只评论）· only（只私信）· both（都发）
-    //    commentOn 是"这一轮到底能不能发公开评论"的唯一判据（工具层的闸用的是同一套逻辑）
-    const commentOn = Boolean(cfg.autoComment && cfg.mentionName && cfg.dmMode !== 'only')
-    const dmOn = Boolean(cfg.dmMode !== 'off' && Number(cfg.dmUid) > 0)
+    // ⭐ 2026-10-19：commentPerRound 升级成「每轮互动次数」—— 一个数同时压住「这一轮挑几条视频 / 发几条评论 / 私信里带几条」
+    const interactN = Math.max(0, Math.min(Number(cfg.commentPerRound ?? 1) || 0, 20))
+    const roundPick = Math.min(left, interactN)
+    // ⭐ 2026-10-20：投递拆成两个独立开关 —— 「公开评论」(autoComment) 与「私信」(autoDm)，不再有 only/both
+    const mentions = mentionListOf(cfg)   // 要 @ 谁：mentionNames 优先，mentionName 兜底
+    const commentsOn = Boolean(cfg.autoComment && mentions.length)
+    const dmTargets = dmListOf(cfg)       // 私信发给谁：dmUids 优先，dmUid 兜底
+    const dmOn = Boolean(cfg.autoDm && dmTargets.length)
+    // ⭐ 人格卡（2026-10-19 加）：用户把 md 内容粘进设置页，存成 <家目录>/personas/<名字>.md
+    //    这里把正文原样喂进去 —— 它比工作区的 AGENTS.md 更贴身（AGENTS.md 是"规矩"，人格卡是"说话方式"）
+    const personaName = String(cfg.personaName || '').trim()
+    const personaText = personaName ? readPersona(stateDir, personaName) : ''
+    const personaBlock = personaText
+      ? '\n\n===== 使用者的人格卡「' + personaName + '」（他的说话方式与口味 —— **按这个说**，优先于下面其余设定）=====\n'
+        + personaText.slice(0, 8000)
+        + '\n===== 人格卡结束 =====\n'
+      : ''
     return `你是这个账号的 B站 助手。`
       + `下面是使用者的设定（如果有）—— **按它来**，别用你默认那套人格。`
       + ownerDoc
       + (ownerDoc
         ? ''
         : '⭐ 这一轮**没有**拿到使用者的设定（他没填「工作区」，或那个目录里没有 `AGENTS.md`）⇒ **按中性说话**：别扮演任何人、也别自己编一套设定 ✓。')
+      + personaBlock
       + (charterText
           ? '下面是**值班章程**（里面的「<家目录>」已经替换成真实绝对路径了）—— 严格按它执行：\n\n'
             + charterText + '\n\n按上面的章程刷一轮 B站，'
@@ -868,7 +1045,7 @@ export function apply(ctx, config) {
       + (cfg.reportLevel === 'off' ? '' : `⚠️ 今天那份报告里可能已经有上一轮写的东西 —— 有就**追加到末尾**，别覆盖（配额按全天算）。`)
       + (cfg.reportLevel === 'off' ? '' : '⭐ 报告里**每挑中一条**，第一行写成 `### BV号`（例：`### BV1xxxxxxx`）—— 宿主**就数这些标题行**算今天挑了几条：漏写当成没挑中，给只是提到 / 跳过的视频加上标题则当成挑中。')
       + (already > 0
-        ? `今天已经挑过 ${already} 条了 ⇒ **这一轮最多再挑 ${left} 条**（「每天最多 ${quota} 条」是全天总量，不是每轮）；`
+        ? `今天已经挑过 ${already} 条了 ⇒ **这一轮最多再挑 ${roundPick} 条**（「每天最多 ${quota} 条」是全天总量，不是每轮）；`
         : `今天最多挑 ${quota} 条；`)
       + `关键词${kws.length ? `用这些：${kws.join('、')}` : '用章程里的默认那几组'}。`
       + `本地转写：${cfg.transcribe
@@ -882,31 +1059,29 @@ export function apply(ctx, config) {
       + `⭐ 另外把这一轮**看过的每一条视频（挑中的和跳过的都算）**追加进归档：${join(digestDir, `${dayKey().slice(0, 7)}.md`)}`
       + ` —— 一行一条：日期 · BV 号 · 标题 · UP · 一句话结论 · 链接（跳过的那条在后面注明理由）；`
       + `这是**给以后检索用**的（报告是给人看的，归档是给"回头翻"用的），别省略、也别只写挑中的。`
-      + `自动评论并 @ ${cfg.mentionName || '（还没填要 @ 谁）'} 是${commentOn
-        ? `开着的（每轮最多 ${cfg.commentPerRound} 条评论，每条在正文里纯文本 @ ${cfg.mentionName}，150 字内）`
-        : (cfg.dmMode === 'only'
-          ? '关着的 —— 当前是「**只私信**」模式：**这一轮一条公开评论都不许发**，改走私信'
-          : '关着的（只写报告，别发评论）')}。`
+      + `这一轮投递：${commentsOn && dmOn ? '公开评论 + 私信（两样都发）' : commentsOn ? '只发公开评论' : dmOn ? '只发私信（公开评论关着，一条公开评论都不发）' : '都不发（只写报告）'}。`
+      + (commentsOn
+        ? `⭐ **公开评论**：每条挑中的视频，正文里纯文本 @ 名单里的**全部 ${mentions.length} 个人**（${mentions.join(' ')}，每个名字前加 @、中间空格隔开），150 字内；正文别出现 token、autoComment 这类内部词（一律说成人话）；发完**必须**在报告里写一行「已发 N 条公开评论（@ 名单）」，并在下面逐条写「- BV号 rpid 数字」—— 漏写算这一轮不合格。`
+        : `⚠️ 这一轮**不发公开评论**（开关关着，或 @ 名单是空的）—— 正文那句话只留给私信用。`)
       + (dmOn
-        ? `⭐⭐ **私信投递**：用 bili_send_message 把这一轮的结果发到 UID **${Number(cfg.dmUid)}**。`
-          + `内容**别照抄评论那套**：把本轮每条值得的写成 **标题 + 链接 + 一句话理由**`
-          + `（私信是私人渠道、不占别人的地方，可以比评论长一点，但**别啰嗦**）。`
-          + `🔴🔴 **但私信有长度上限 —— 实测 500 字符就顶了**：`
-          + `490 字那条能发出去、再长就被接口拒（报 **code 21007**）✗。`
-          + `所以**一条私信务必控制在 500 字以内、最多塞 4~5 条** —— 宁可少放一条，也别整条被拒；`
-          + `⚠️ **被拒了就精简一次重发**（删理由、砍条目），**别原样无脑重试** ✗。`
+        ? `⭐⭐ **私信**：用 bili_send_message 私信 UID **${dmTargets.join('、')}**。`
+          + `🔴 **一条评论 → 每个收件人各发一条私信**，这一轮挑 ${interactN} 条评论就发 ${interactN} × ${dmTargets.length} 条，**别合并成一条**；`
+          + (commentsOn
+            ? `🔴 **私信正文 = 那条评论的正文去掉所有「@人名」**（其余一字不改）：评论里 @ 了几个就删几个；`
+            : `🔴 公开评论没开 ⇒ **私信正文就是那句本来要发的评论正文**（去掉所有 @人名 之后的样子，本来没 @ 就原样用）；`)
+          + `🔴 **末尾另起一行补视频链接**（就是这条评论对应的视频，别搞错）：https://www.bilibili.com/video/BV号；`
+          + `⚠️ 删掉 @ 后若只剩空，就别发这条私信，报告里记一句跳过。`
           + `🔴🔴 **私信是写给「人」看的，必须是干净的人话** —— **不许出现任何设置名 / 内部术语 / 台账口径** ✗：`
-          + `dmMode、only、aiReply、判据、白名单、prompt、token、复核 这类词，**一个都不许出现在私信正文里**；`
-          + `**更不许写「公开评论一条没发 / 楼中楼跳过」这种内部机制说明** ✗`
-          + `（那是在跟使用者念操作手册，可读性极差）。他关心的只有：**这次挑了哪几条、为什么值得**。`
-          + `（想交代"没别的了"就用一句人话，比如「今天没什么新的了」；`
-          + `⚠️ **不要**把「无字幕跳过 N 条」这种统计口径搬进私信 —— 那是**报告**里写的，不是私信里写的。）`
-          + `⚠️ 私信里**不用 @ 任何人**；⚠️ **一轮只发一条私信**（多条合并成一条）；`
-          + `⚠️ 私信里**不要**写"本鱼 / 本鲸 / 主人 / 人家"那套；⚠️ 发完把"已私信"记进报告（**报告里**可以写口径）。`
-          + (cfg.dmMode === 'both' ? `⚠️ 现在是 **both**：公开评论照发（走下面那一整套规矩），私信**另外**再发一条。` : '')
+          + `autoComment、autoDm、only、both、判据、白名单、prompt、token、复核 这类词，**一个都不许出现在私信正文里**；`
+          + `**更不许写「公开评论一条没发 / 楼中楼跳过」这种内部机制说明** ✗。`
+          + `⚠️ 私信里**不用 @ 任何人**；⚠️ 私信里**不要**写"本鱼 / 本鲸 / 主人 / 人家"那套；`
+          + `⚠️ 发完把「已私信 ${dmTargets.length} 人 × N 条」记进报告，并逐条写一行「- 发给 UID xxx：BV号」；报告里可以写口径。`
         : '')
-      + (cfg.replyToComments
+      + (commentsOn && cfg.replyToComments
         ? `回复评论：开着（每轮最多回 ${Number(cfg.replyPerRound) || 1} 条）—— 只回「直接回复到你那条评论下面的人」，回完记进报告；找不到你那条评论就跳过，别硬找。`
+          + ((Array.isArray(cfg.replyKeywords) ? cfg.replyKeywords : []).length
+            ? `识别词：${cfg.replyKeywords.join('、')} —— **只有留言里带这些词的人才回**；一个都没带就这一轮谁都不回（别硬凑）。`
+            : `没设识别词 ⇒ 凡是直接回在你那条评论下面的人都回（仍受上面的条数上限）。`)
         : `回复评论：关着（一个字都不要回任何人 —— 有人回复你那条评论也不要理）。`)
       + `最后用一句话汇报你挑到了什么。现在几点了自己看一眼系统时间。`
   }
@@ -926,15 +1101,9 @@ export function apply(ctx, config) {
    *    mcp_server.py 那头**不在白名单里的工具根本不注册** —— 连名字都不给它看见 ✓。
    *    要读全就手工改这个列表（或者直接跑 mcp_server.py，不设这个变量 = 全放）。
    */
-  const mcpWhitelist = () => {
-    const list = ['bili_search', 'bili_subtitle', 'bili_comments', 'bili_video_info']
-    if (cfg.autoComment || cfg.replyToComments) list.push('bili_reply')   // 只有真要发评论才给这只
-    // ⭐ 2026-10-19（issue #25 / #16 的实证，做法参考社区 PR #37）：私信开着却忘了给 bili_send_message ⇒
-    //   模型手里压根没有这只工具 ⇒ 表现成"开关也开了、这一轮也跑了，但从来没发出去过" ✗
-    //   ⇒ dmMode 不是 off、且填了收件人 UID 才放进去（关着就不给，白名单别松）
-    if (String(cfg.dmMode || 'off') !== 'off' && Number(cfg.dmUid) > 0) list.push('bili_send_message')
-    return list
-  }
+  // 白名单只有一处定义（顶层 mcpToolList），这里只是把当前配置喂给它
+  const mcpWhitelist = () => mcpToolList(cfg)
+
 
   const ensureOverlay = () => {
     const file = join(stateDir, 'headless-overlay.yml')
@@ -1140,11 +1309,21 @@ export function apply(ctx, config) {
       const today = dayKey(now)
       // ⭐ 闸门看的是「今天已经**挑到几条**」（从今天的报告里数出来），不是「跑了几轮」
       if (countPickedToday(now) >= Number(cfg.perDay || 0)) return
+      // ⭐ 「每 N 天跑一轮」（2026-10-19 加）：只拦**自动**跑；手动按钮不受限，也不写 lastRunAt
+      const everyDays = normEveryDays(cfg.everyDays)
+      if (everyDays > 1) {
+        const lastIso = String(st.lastRunAt || '')
+        const lastDay = lastIso ? dayKey(new Date(lastIso)) : ''
+        if (lastDay) {
+          const diff = Math.round((Date.parse(today + 'T00:00:00Z') - Date.parse(lastDay + 'T00:00:00Z')) / 86400000)
+          if (diff >= 0 && diff < everyDays) return
+        }
+      }
       // ⭐ 「不写日报」那档没有报告可数 ⇒ 数不出条数就保守一点：一天只跑一轮
       if (String(cfg.reportLevel || 'full') === 'off' && roundsToday(now) >= 1) return
       for (const k of ['noon', 'night']) {
         if (!cfg[k]) continue
-        if (!inWindow(now, WINDOWS[k])) continue
+        if (!inWindow(now, effWindows()[k])) continue
         const key = `${today}:${k}`
         if (st.windows?.[key]) continue
         bumpState({ windows: { ...(st.windows || {}), [key]: true }, count: roundsToday(now) + 1, lastRunAt: now.toISOString(), lastWhy: k })
@@ -1473,7 +1652,8 @@ export function apply(ctx, config) {
       ok: true,
       home: stateDir,
       config: cfg,
-      windows: WINDOWS,
+      windows: effWindows(),
+      personas: listPersonas(stateDir),
       today,
       ranToday: st.day === today ? Number(st.count || 0) : 0,   // 今天跑了几轮
       pickedToday: countPickedToday(),                          // 今天挑到几条（从报告里数）
@@ -1510,15 +1690,64 @@ export function apply(ctx, config) {
     if (req.method === 'GET' && path === '/api/bili-duty/status') return sendJson(res, 200, status())
 
     if (req.method === 'GET' && path === '/api/bili-duty/config') {
-      return sendJson(res, 200, { ok: true, config: cfg, windows: WINDOWS, home: stateDir })
+      return sendJson(res, 200, { ok: true, config: cfg, windows: effWindows(), home: stateDir })
+    }
+
+    /* ── 人格卡：列 / 读 / 存 / 删（粘贴保存，不走"填文件路径"那套）── */
+    if (req.method === 'GET' && path === '/api/bili-duty/personas') {
+      return sendJson(res, 200, {
+        ok: true,
+        dir: personaDirOf(stateDir),
+        current: String(cfg.personaName || ''),
+        list: listPersonas(stateDir),
+        text: readPersona(stateDir, cfg.personaName),
+      })
+    }
+
+    if (req.method === 'POST' && path === '/api/bili-duty/personas') {
+      const body = await readBody(req)
+      const name = personaFileName(body?.name)
+      const text = String(body?.text ?? '')
+      if (!name) return sendJson(res, 400, { ok: false, error: '先给这份人格起个名字（比如 本鱼），再点保存' })
+      if (!text.trim()) return sendJson(res, 400, { ok: false, error: '人格内容是空的' })
+      const old = readPersona(stateDir, name)
+      // ⭐ 覆盖时拦一道：新内容比旧的短一大截 ⇒ 先问一句再写（「手滑全选删掉」是真实事故）
+      // ⚠️ 用 200 回（不是 409）：设置页的 asJson 遇非 2xx 直接抛错，用户就看不到「再点一次确认」这句了
+      if (!body?.confirm && personaShrink(old, text)) {
+        return sendJson(res, 200, {
+          ok: false, needConfirm: true,
+          error: `这份比原来短太多（${old.length} → ${text.length} 字）。确认要覆盖就再点一次「保存」`,
+        })
+      }
+      const dir = personaDirOf(stateDir)
+      mkdirSync(dir, { recursive: true })
+      const file = join(dir, name + '.md')
+      // 旧版本留一份 .bak（跟 config.json 一个规矩：别让改坏就找不回来）
+      if (old) { try { writeFileSync(file + '.bak', old, 'utf8') } catch { /* 留不住就算了 */ } }
+      writeFileSync(file, text, 'utf8')
+      await persistCfg({ personaName: name })
+      log(`人格已保存：${name}（${text.length} 字）`)
+      return sendJson(res, 200, { ok: true, current: name, list: listPersonas(stateDir) })
+    }
+
+    if (req.method === 'DELETE' && path === '/api/bili-duty/personas') {
+      const body = await readBody(req)
+      const name = personaFileName(body?.name)
+      if (!name) return sendJson(res, 400, { ok: false, error: '要删哪一份？没给名字' })
+      const file = join(personaDirOf(stateDir), name + '.md')
+      try { if (existsSync(file)) rmSync(file) } catch (e) { return sendJson(res, 200, { ok: false, error: String(e?.message ?? e) }) }
+      if (String(cfg.personaName || '') === name) await persistCfg({ personaName: '' })
+      log(`人格已删除：${name}`)
+      return sendJson(res, 200, { ok: true, current: String(cfg.personaName === name ? '' : cfg.personaName || ''), list: listPersonas(stateDir) })
     }
 
     if (req.method === 'POST' && path === '/api/bili-duty/config') {
       const body = await readBody(req)
       const patch = {}
-      for (const k of ['perDay', 'peakValley', 'noon', 'night', 'autoComment', 'transcribe', 'asrModel',
-        'commentPerRound', 'mentionName', 'dmMode', 'dmUid',
-        'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound']) {
+      for (const k of ['perDay', 'everyDays', 'peakValley', 'noon', 'night', 'autoComment', 'transcribe', 'asrModel',
+        'commentPerRound', 'mentionName', 'mentionNames', 'autoDm', 'dmMode', 'dmUid', 'dmUids',
+        'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound',
+        'replyKeywords', 'windows', 'personaName']) {
         if (k in body) patch[k] = body[k]
       }
       // ⭐ 范围钳制 + 两份都写（config.json / DSH 原生设置页），统一走 persistCfg —— 见文件上方
