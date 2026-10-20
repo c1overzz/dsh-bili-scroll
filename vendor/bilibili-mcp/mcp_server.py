@@ -35,6 +35,25 @@ from bilibili_api.login_v2 import QrCodeLogin, QrCodeLoginEvents
 
 CRED_FILE = Path(__file__).parent / "bili_credential.json"
 
+# ⭐ 本机补丁（2026-10-18）：给评论打「服务端算出来的身份标签」。
+#    mid 是 B 站返回的字段，不是评论正文里写的字 —— 正文冒充不了。
+#    只有 OWNER_UID 的发言有「改偏好」的权威；其他人照样可以回，但角色是观众。
+OWNER_UID = 299380769
+BOT_UID = 3690986257516836
+
+
+def _role_of(mid) -> str:
+    try:
+        m = int(mid)
+    except (TypeError, ValueError):
+        return "未知"
+    if m == OWNER_UID:
+        return "主人"
+    if m == BOT_UID:
+        return "本号"
+    return "观众"
+
+
 mcp = FastMCP("bilibili-mcp")
 
 # ⭐ 工具白名单（2026-10-17 审查里的 H3）：宿主通过 overlay 的 env 下发 BILI_MCP_TOOLS（逗号分隔）。
@@ -262,7 +281,7 @@ async def bili_check_credential() -> str:
 # ========== Tool 1: 搜索视频 ==========
 
 @tool()
-async def bili_search(keyword: str, num: int = 10, order: str = "totalrank") -> str:
+async def bili_search(keyword: str, num: int = 10, order: str = "totalrank", page: int = 1) -> str:
     """
     搜索B站视频
 
@@ -270,6 +289,7 @@ async def bili_search(keyword: str, num: int = 10, order: str = "totalrank") -> 
         keyword: 搜索关键词，如"AI Agent"、"大模型教程"
         num: 返回视频数量，默认10，最大50
         order: 排序方式 totalrank=综合 click=播放量 pubdate=最新 dm=弹幕
+        page: 第几页（默认 1；B站一页约 20 条，想翻更早的候选就传 2、3…）
     
     Returns:
         JSON格式的视频列表，包含标题、BV号、播放量、评论数、UP主等
@@ -285,7 +305,7 @@ async def bili_search(keyword: str, num: int = 10, order: str = "totalrank") -> 
     result = await search.search_by_type(
         keyword=keyword,
         search_type=search.SearchObjectType.VIDEO,
-        page=1,
+        page=max(1, int(page or 1)),
         order_type=order_enum,
     )
 
@@ -302,9 +322,14 @@ async def bili_search(keyword: str, num: int = 10, order: str = "totalrank") -> 
             "danmaku": item.get("video_review", 0),
             "duration": item.get("duration", ""),
             "description": item.get("description", "")[:200],
+            # ⚠️ 2026-10-18：以前不返回发布时间，「近 7 天优先」只能靠猜 —— 补上这个字段，
+            #    模型才能真的按时效判断（B站搜索接口给的是 unix 秒）。
+            "pubdate": item.get("pubdate", 0),
+            # 搜索结果自带的 tag 串（逗号分隔，部分关键词才有）；有它就能在卡片层先粗筛朋友向
+            "tag": item.get("tag", ""),
         })
 
-    return json.dumps({"keyword": keyword, "count": len(videos), "videos": videos}, ensure_ascii=False)
+    return json.dumps({"keyword": keyword, "page": page, "count": len(videos), "videos": videos}, ensure_ascii=False)
 
 
 # ========== Tool 2: 获取评论 ==========
@@ -348,6 +373,8 @@ async def bili_comments(bvid: str, num: int = 30) -> str:
                 c = {
                     "rpid": r.get("rpid", 0),
                     "user": member.get("uname", ""),
+                    "uid": member.get("mid", 0),
+                    "role": _role_of(member.get("mid")),
                     "content": content.get("message", ""),
                     "like": r.get("like", 0),
                     "reply_count": r.get("rcount", 0),
@@ -358,6 +385,8 @@ async def bili_comments(bvid: str, num: int = 30) -> str:
                 for sub in (r.get("replies") or [])[:2]:
                     sub_replies.append({
                         "user": sub.get("member", {}).get("uname", ""),
+                        "uid": sub.get("member", {}).get("mid", 0),
+                        "role": _role_of(sub.get("member", {}).get("mid")),
                         "content": sub.get("content", {}).get("message", ""),
                         "like": sub.get("like", 0),
                     })
@@ -485,6 +514,17 @@ async def bili_video_info(bvid: str) -> str:
     v = video.Video(bvid=bvid, credential=cred)
     info = await v.get_info()
     stat = info.get("stat", {})
+    # ⚠️ /x/web-interface/view **不返回 tag 字段** ⇒ 以前 "tags" 永远是空列表，
+    #    「朋友的 tags 命中标签」这条路等于永远走不通（2026-10-18 实测：智人TV 一条都没发出去）。
+    #    正确做法是单独问 /x/tag/archive/tags（bilibili_api 的 get_tags）。
+    tags = []
+    try:
+        for t in (await v.get_tags()) or []:
+            name = t.get("tag_name") if isinstance(t, dict) else None
+            if name:
+                tags.append(name)
+    except Exception:
+        tags = [t.get("tag_name") for t in info.get("tag", []) if t.get("tag_name")]
 
     return json.dumps({
         "bvid": info.get("bvid"),
@@ -494,7 +534,7 @@ async def bili_video_info(bvid: str) -> str:
         "author": info.get("owner", {}).get("name"),
         "duration": info.get("duration"),
         "pages": len(info.get("pages", [])),
-        "tags": [t.get("tag_name") for t in info.get("tag", []) if t.get("tag_name")],
+        "tags": tags,
         "stat": {
             "view": stat.get("view", 0),
             "danmaku": stat.get("danmaku", 0),
@@ -561,6 +601,88 @@ async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0) -> str:
                 if isinstance(val, (int, str)) and str(val).strip() and str(val) != "0":
                     out[key] = val
         return json.dumps(out, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+
+
+# ========== Tool 6.5: 删除本号自己的评论（本机新增） ==========
+
+@tool()
+async def bili_delete_comment(bvid: str, rpid: int) -> str:
+    """
+    删除**本号自己发的一条**评论（不可逆）
+
+    只能删自己发的；别人的删不了，B 站会直接拒绝。
+    只在主人（role=主人）明确要求删除时调用，且 rpid 必须来自判重表里本号发过的那条。
+
+    Args:
+        bvid: 视频BV号
+        rpid: 要删除的评论ID
+    """
+
+    cred = get_cred()
+    v = video.Video(bvid=bvid, credential=cred)
+    info = await v.get_info()
+    aid = info["aid"]
+    try:
+        cmt = comment.Comment(
+            oid=aid,
+            type_=comment.CommentResourceType.VIDEO,
+            rpid=int(rpid),
+            credential=cred,
+        )
+        await cmt.delete()
+        return json.dumps(
+            {"success": True, "message": "已删除", "rpid": int(rpid), "bvid": bvid},
+            ensure_ascii=False,
+        )
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+
+
+# ========== Tool 6.6: 查某条评论下的楼中楼（本机新增，给「被回复时自动跑」用） ==========
+
+@tool()
+async def bili_replies(bvid: str, rpid: int, num: int = 20) -> str:
+    """
+    获取某条评论下的子回复（楼中楼），每条带 uid / role
+
+    Args:
+        bvid: 视频BV号
+        rpid: 父评论（也就是本号发的那条）的评论ID
+        num: 最多返回几条，默认 20（上限 20）
+    """
+
+    cred = get_cred()
+    v = video.Video(bvid=bvid, credential=cred)
+    info = await v.get_info()
+    aid = info["aid"]
+    try:
+        cmt = comment.Comment(
+            oid=aid,
+            type_=comment.CommentResourceType.VIDEO,
+            rpid=int(rpid),
+            credential=cred,
+        )
+        r = await cmt.get_sub_comments(page_index=1, page_size=max(1, min(int(num), 20)))
+        out = []
+        for x in (r.get("replies") or []):
+            m = x.get("member", {}) or {}
+            c = x.get("content", {}) or {}
+            out.append({
+                "rpid": x.get("rpid", 0),
+                "user": m.get("uname", ""),
+                "uid": m.get("mid", 0),
+                "role": _role_of(m.get("mid")),
+                "content": c.get("message", ""),
+                "ctime": x.get("ctime", 0),
+                "root": x.get("root", 0),
+                "parent": x.get("parent", 0),
+            })
+        return json.dumps(
+            {"bvid": bvid, "root": int(rpid), "count": len(out), "replies": out},
+            ensure_ascii=False,
+        )
     except Exception as e:
         return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
 
