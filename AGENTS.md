@@ -1,6 +1,7 @@
 # 给 AI 助手看的（本仓库 = 一个 DSH 插件）
 
 `dsh-bili-scroll`（中文名「**刷B站**」）：每天替用户刷一轮 B 站 —— 搜、**读字幕原文**判断、写一份日报，特别值得的会发一条评论 **@ 用户**。
+用户也可以在评论区 **@ 插件登录的那个号**：插件会在他跑一轮时顺带查通知，先看视频、再在他那条评论下面回一句（`lib/mentions.mjs`）。
 
 ## 帮用户安装时，按这个顺序
 
@@ -44,7 +45,7 @@
 
 - `index.js` —— host 半端：11 个工具 + 谷时定时器 + HTTP 接口 + 配置（`config.json` 与 DSH 原生设置页**逐字段对账**：见 `loadCfg` / `saveCfgHost`）+ 值班轮的工具白名单（`mcpWhitelist` → `BILI_MCP_TOOLS`）
 - `client.js` —— 浏览器半端：设置页（注册在 `settings.section`）
-- `lib/` —— 状态目录与家目录 / 极小的 MCP stdio 客户端 / 扫码登录 / **`hostdeps.mjs`（从宿主树取 `@deepseek-ai/*`，拿不到就退到自己依赖 / 本地等价实现）** / **`verify.mjs`（评论发出后复核）**
+- `lib/` —— 状态目录与家目录 / 极小的 MCP stdio 客户端 / 扫码登录 / **`hostdeps.mjs`（从宿主树取 `@deepseek-ai/*`，拿不到就退到自己依赖 / 本地等价实现）** / **`verify.mjs`（评论发出后复核）** / **`mentions.mjs`（@ 通知：拉取 / 按 UID 过滤 / 去重 / 短链解析 / 账本）** / **`taste.mjs`（口味账：把使用者 @ 过的视频记成 UP 主 + 标签，下一轮挑选时同类优先）**
 - `prompts/duty.md` —— 一轮要做的事（判定口径 + 红线，**用户可以改**）；升级规矩见 `lib/state.mjs` 的 `ensureCharter`（用户改过 ⇒ 保留他那份、新版落 `duty.md.new`）
 - `vendor/bilibili-mcp/` —— 内置的 Python MCP（MIT，AGI_Ananas）
 - `selfcheck.mjs` + `tools/` —— 本地预检：`node selfcheck.mjs`（**现在不用解析钩子了**；`tools/register.mjs` 那条还留着当备份）
@@ -52,4 +53,4 @@
 ## 约定
 
 - 配置与运行数据都在用户的 `$DSH_HOME/bili-duty/`，**不写进插件包目录**
-- 谷时窗口按 DeepSeek 官方口径：工作日 9–12 / 14–18 是高峰，其余（含周末）都是谷时
+- 谷时窗口按 DeepSeek 官方口径：工作日 9–12 / 14–18 是高峰，其余（含周末）都是谷时；窗口记账键按**窗口开始那天**算（跨零点），当天挑满也会在 12:00 / 18:00 / 00:00 查 @（真有 @ 才起"只回 @"的小轮）

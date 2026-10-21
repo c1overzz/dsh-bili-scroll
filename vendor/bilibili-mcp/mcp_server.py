@@ -516,7 +516,7 @@ async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0) -> str:
 
     Args:
         bvid: 视频BV号
-        text: 评论/回复的文本内容
+        text: 评论/回复的文本内容（可直接写 B站 表情代码如 [doge]，或颜文字如 (｡･ω･｡)，前端会正常显示）
         rpid: 要回复的目标评论ID（0表示发表新评论）
         root: 楼层根评论ID（回复一级评论时不用填，回复楼中楼时填根评论ID）
     

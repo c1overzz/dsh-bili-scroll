@@ -15,6 +15,8 @@ asr.py —— 把一条 B站 视频（或本地音视频文件）转成文字。
   ② **音频不落盘到别处**：yt-dlp 下到临时目录，转写完就随系统清理
 """
 import argparse
+import glob
+import json
 import os
 import re
 import sys
@@ -54,9 +56,49 @@ def to_url(target: str) -> str:
     return t
 
 
+def cookie_file(tmp: str):
+    """把插件的登录凭证（扫码登录写的 bili_credential.json）转成 yt-dlp 认的 Netscape cookie 文件。
+
+    ⭐ 2026-10-21：匿名取流时，一部分视频的 playurl 会返回空格式表 —— yt-dlp 报
+       `No video formats found!`，同一支视频带上登录态就能取到（实测 BV1XCnK6fETs）。
+       插件本来就有这份凭证，顺手用上，别的视频不受影响。
+    """
+    try:
+        with open(os.path.join(_HOME, 'bili_credential.json'), 'r', encoding='utf-8') as f:
+            cred = json.load(f)
+    except Exception:
+        return None
+    rows = [
+        ('SESSDATA', cred.get('sessdata')),
+        ('bili_jct', cred.get('bili_jct')),
+        ('buvid3', cred.get('buvid3')),
+        ('DedeUserID', cred.get('dedeuserid')),
+    ]
+    if not rows[0][1]:
+        return None
+    path = os.path.join(tmp, 'bili-cookies.txt')
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write('# Netscape HTTP Cookie File\n')
+            for name, value in rows:
+                value = str(value or '').strip()
+                if value:
+                    f.write('\t'.join(['.bilibili.com', 'TRUE', '/', 'FALSE', '0', name, value]) + '\n')
+    except Exception:
+        return None
+    return path
+
+
 def fetch_audio(url: str, tmp: str, tag: str) -> str:
     """用 yt-dlp 把音频拉下来（B站 是 DASH 音视频分离，取 bestaudio 即可，不需要 ffmpeg 合并）"""
     from yt_dlp import YoutubeDL
+    # ⭐ 先把上一次中断留下的半截文件清掉：nopart 直接写最终文件名，
+    #    残留会让下一次续传报 HTTP 416 —— 之后这支视频就永远转不了（2026-10-21 实测）
+    for p in glob.glob(os.path.join(tmp, tag + '.*')):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
     opts = {
         'format': 'bestaudio/best',
         'outtmpl': os.path.join(tmp, tag + '.%(ext)s'),   # ⭐ 用 BV 号当文件名：固定名会和别的轮次撞车（踩过）
@@ -65,6 +107,11 @@ def fetch_audio(url: str, tmp: str, tag: str) -> str:
         # ⭐ nopart：不写 .part 再改名，直接落最终文件。
         #    沙箱里"新建文件 + 改名"会被拒，而这条能绕开（2026-10-14 值班那一轮自己试出来的）
         'nopart': True,
+        # ⭐ 配合上面的清理：既然直接写最终名，就别再续传了（续传 + 半截文件 = 416）
+        'continuedl': False,
+        'overwrites': True,
+        # ⭐ 带登录态取流：匿名时部分视频拿不到任何格式（见 cookie_file 的注释）
+        'cookiefile': cookie_file(tmp),
       # [2026-10-20 · 参考社区 PR #23] 进度条默认打到 stdout ⇒ 调用方"stdout 非空=成功"恒真 ✗
       #   我们是读文件走的，把进度关掉，别污染输出
       'noprogress': True,
@@ -101,7 +148,13 @@ def main() -> int:
     try:
         if src.lower().startswith('http') or src.upper().startswith('BV'):
             print('[asr] 先下音频…', file=sys.stderr)
-            src = fetch_audio(to_url(src), tmp, tag)
+            try:
+                src = fetch_audio(to_url(src), tmp, tag)
+            except Exception as e:
+                # ⭐ 取流失败 ≠ 没语音：调用方要能区分（报告口径见章程里的四档）
+                msg = str(e).splitlines()[0][:200] if str(e) else e.__class__.__name__
+                print('[asr] 取不到音频：' + msg, file=sys.stderr)
+                return 3
         if not os.path.exists(src):
             print('[asr] 找不到文件：' + src, file=sys.stderr)
             return 2
@@ -117,10 +170,9 @@ def main() -> int:
         )
         text = ''.join(seg.text for seg in segments).strip()
     finally:
-        # 临时音频不留在磁盘上
+        # 临时音频 / cookie 文件都不留在磁盘上
         try:
-            import glob
-            for f in glob.glob(os.path.join(tmp, tag + '.*')):
+            for f in glob.glob(os.path.join(tmp, tag + '.*')) + glob.glob(os.path.join(tmp, 'bili-cookies.txt')):
                 try:
                     os.remove(f)
                 except Exception:

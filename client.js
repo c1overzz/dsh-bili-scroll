@@ -157,6 +157,9 @@ window.__ModuleLoader__.load({
       const [dmUid, setDmUid] = React.useState(null)        // 私信收件人 UID（本地草稿）
       const [dmMode, setDmMode] = React.useState(null)      // 投递方式：off / only / both
       const [mention, setMention] = React.useState(null)
+      const [atOwner, setAtOwner] = React.useState(null)    // 「有人 @ 我」：你的 UID（本地草稿）
+      const [atPer, setAtPer] = React.useState(null)        // 每轮最多处理几条 @
+      const [atRecent, setAtRecent] = React.useState(null)  // 最近谁 @ 了她（null = 还没查）
       const [login, setLogin] = React.useState(null)
       const [runNote, setRunNote] = React.useState(null)
       const [report, setReport] = React.useState(null)        // 非 null = 报告已展开   // 顶部那行状态（跑一轮/装依赖的反馈原来在最底下，看不见）
@@ -183,6 +186,8 @@ window.__ModuleLoader__.load({
         if (cfg && dmUid === null) setDmUid(cfg.dmUid ? String(cfg.dmUid) : '')
         if (cfg && dmMode === null) setDmMode(cfg.dmMode || 'off')
         if (cfg && favId === null) setFavId(String(cfg.favFolderId ?? 0))
+        if (cfg && atOwner === null) setAtOwner(cfg.atOwnerUid ? String(cfg.atOwnerUid) : '')
+        if (cfg && atPer === null) setAtPer(String(cfg.atPerRound ?? 1))
       }, [cfg])
 
       // ⭐ 收藏夹列表：只读一次，读不到就空列表（别每 5 秒重拉）
@@ -233,6 +238,22 @@ window.__ModuleLoader__.load({
           else say(`复核完 ${n} 条：公开可见 ${vis} 条，其余「没查到」（可能还在审核 —— 看不到不等于没发出去）。结果也追加到今天的报告末尾了。`, vis ? 'good' : 'warn')
           if (r.report) setReport(null)
         } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
+      }
+
+      // ⭐ 「看看最近谁 @ 了她」：用来确认通知通不通、顺手把自己的 UID 填进去（只读，不会回任何人）
+      const onAtRecent = async () => {
+        setBusy('atRecent')
+        try {
+          const r = await jget('/at/recent')
+          setAtRecent(r || { ok: false, error: '空响应' })
+          if (r?.ok) {
+            const n = (r.items || []).length
+            say(n ? `最近有 ${n} 条 @ —— 找到你自己那条，点右边的「设为我的 UID」` : '最近没有 @ 通知（先在评论区 @ 她一次，等一两分钟再点）', n ? 'good' : '')
+          } else say('查不到 @：' + (r?.error || '未知原因'), 'warn')
+        } catch (e) {
+          setAtRecent({ ok: false, error: String(e?.message ?? e) })
+          say(String(e?.message ?? e), 'warn')
+        } finally { setBusy('') }
       }
 
       const copyText = async (text) => {
@@ -312,7 +333,13 @@ window.__ModuleLoader__.load({
         setBusy('run')
         try {
           const r = await jpost('/run', {})
-          say(r?.started ? '已经在后台跑一轮了，报告会写在 out/ 里' : '没起来，看 duty.log', r?.started ? 'good' : 'warn')
+          const at = r?.at
+          const atNote = at
+            ? (at.error ? `（@ 没查成：${at.error}）`
+              : (at.picked ? `（顺带处理 ${at.picked} 条 @）`
+                : (at.unread ? `（还有 ${at.unread} 条 @ 留给下一轮）` : '（没有新的 @）')))
+            : ''
+          say(r?.started ? `已经在后台跑一轮了${atNote}，报告会写在 out/ 里` : '没起来，看 duty.log', r?.started ? 'good' : 'warn')
         } catch (e) { say(String(e?.message ?? e), 'warn') }
         finally { setBusy('') }
       }
@@ -521,6 +548,73 @@ window.__ModuleLoader__.load({
             st.asrTail ? h('div', null,
               h('div', { 'data-bd-note': '' }, st.asrInstalling ? '正在装转写依赖（进度）：' : '转写依赖的日志（末尾）—— 只有「没字幕的视频」用得到它：'),
               h('pre', { 'data-bd-pre': '' }, st.asrTail)) : null) : null),
+
+        /* ── 有人 @ 她 ── */
+        h('div', { 'data-bd-sec': '' },
+          h('div', { 'data-bd-h': '' }, '有人 @ 她'),
+          h(ToggleRow, {
+            label: '在评论区 @ 她，她下一轮就回你',
+            note: '默认关；开了之后她每轮开头顺带查一次 @ —— 只认下面这个 UID，在你那条评论下面回一句（100 字以内）',
+            on: sw('atReply'),
+            onChange: (v) => patch({ atReply: v }, '@ 互动'),
+          }),
+          sw('atReply') ? h('div', { 'data-bd-sub': '' },
+            (!atOwner || Number(atOwner) <= 0)
+              ? h('div', { 'data-bd-msg': '', 'data-warn': '' }, '还没填你的 UID —— 现在等于没开。点下面「看看最近谁 @ 了她」，找到你自己那条，点「设为我的 UID」。')
+              : null,
+            h('div', { 'data-bd-row': '' },
+              h('div', { 'data-bd-grow': '' },
+                h('div', { 'data-bd-label': '' }, '你的 B站 UID（只认这个号）'),
+                h('div', { 'data-bd-note': '' }, '你自己号的数字 UID —— 别人 @ 她不算')),
+              h('input', {
+                'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 0,
+                value: atOwner ?? '',
+                placeholder: '点下面按钮可自动填',
+                onChange: (e) => setAtOwner(e.target.value),
+                onBlur: () => { const n = Math.max(0, Number(atOwner) || 0); setAtOwner(n ? String(n) : ''); patch({ atOwnerUid: n }, '你的 UID') },
+              })),
+            (st.at && st.at.botUid && Number(atOwner) === Number(st.at.botUid))
+              ? h('div', { 'data-bd-msg': '', 'data-warn': '' }, '⚠️ 这个 UID 就是她登录的那个号 —— 自己 @ 自己一般收不到通知，要填你自己的号。')
+              : null,
+            h('div', { 'data-bd-row': '' },
+              h('div', { 'data-bd-grow': '' },
+                h('div', { 'data-bd-label': '' }, '每轮最多处理几条 @'),
+                h('div', { 'data-bd-note': '' }, '0 = 不限（有几条处理几条）；填 1–50 限制本轮条数；处理不完的下一轮继续（同一条 @ 不会重复回）')),
+              h('input', {
+                'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 0, max: 50,
+                value: atPer ?? '',
+                onChange: (e) => setAtPer(e.target.value),
+                onBlur: () => {
+                  const blank = String(atPer ?? '').trim() === ''
+                  const raw = Number(atPer)
+                  const n = blank || !Number.isFinite(raw) ? 1 : Math.max(0, Math.min(Math.trunc(raw), 50))
+                  setAtPer(String(n)); patch({ atPerRound: n }, '每轮几条 @')
+                },
+              })),
+            h('div', { 'data-bd-row': '' },
+              h('button', { 'data-bd-btn': '', disabled: busy === 'atRecent', onClick: onAtRecent }, '看看最近谁 @ 了她'),
+              h('span', { 'data-bd-note': '' }, '只读：不会回任何人，也不动「已处理」的账')),
+            atRecent ? h('div', { 'data-bd-msg': '', 'data-warn': atRecent.ok === false ? '' : undefined },
+              atRecent.ok === false
+                ? ('查不到：' + (atRecent.error || '未知原因'))
+                : ((atRecent.items || []).length
+                  ? `最近 ${atRecent.items.length} 条 @（同名的人不少，认 UID 最准）`
+                  : '最近没有 @ 通知。先在评论区 @ 她一次，等一两分钟再点。')) : null,
+            atRecent && atRecent.ok && (atRecent.items || []).length
+              ? h('div', { 'data-bd-sub': '' }, ...(atRecent.items || []).slice(0, 10).map((m, i) => h('div', { 'data-bd-row': '', key: m.id || String(i) },
+                h('div', { 'data-bd-grow': '' },
+                  h('div', { 'data-bd-label': '' }, `${m.nickname || '（没昵称）'}（UID ${m.uid}）${m.isBot ? ' · 这是她自己' : ''}`),
+                  h('div', { 'data-bd-note': '' }, `${m.bvid || '（不是视频评论）'} · ${m.text || '（没有正文）'}`)),
+                m.isBot ? null : h('button', {
+                  'data-bd-btn': '', disabled: Boolean(busy),
+                  onClick: () => { setAtOwner(String(m.uid)); patch({ atOwnerUid: m.uid }, '你的 UID') },
+                }, '设为我的 UID'))))
+              : null,
+            h('div', { 'data-bd-note': '' }, '⏱ 她只在跑一轮时顺带查（定时窗口 / 「现在跑一轮」），不是实时秒回；回复也只是评论区的一句短话。'),
+            (st.at && st.at.since)
+              ? h('div', { 'data-bd-note': '' }, `只看 ${new Date(st.at.since * 1000).toLocaleString('zh-CN')} 之后的 @；已经处理过 ${st.at.handled ?? 0} 条。`)
+              : null
+          ) : null),
 
         /* ── 关注什么 / 在哪儿刷 ── */
         h('div', { 'data-bd-sec': '' },
