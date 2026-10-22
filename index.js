@@ -1013,7 +1013,7 @@ function reportMeta() {
           + (cfg.dmMode === 'both' ? `⚠️ 现在是 **both**：公开评论照发（走下面那一整套规矩），私信**另外**再发一条。` : '')
         : '')
       + (cfg.replyToComments
-        ? `回复评论：开着（每轮最多回 ${Number(cfg.replyPerRound) || 1} 条）—— 只回「直接回复到你那条评论下面的人」，回完记进报告；找不到你那条评论就跳过，别硬找。`
+        ? `回复评论：开着（每轮最多回 ${Number(cfg.replyPerRound) || 1} 条）—— 回两类人：①「直接回复到你那条评论下面的人」（先看 bili_received_replies）；② @ 到你或者在通知里提到你的人（看 bili_received_at_and_likes 的 at 部分）。列表里没有就跳过，别硬找；回完记进报告。`
         : `回复评论：关着（一个字都不要回任何人 —— 有人回复你那条评论也不要理）。`)
       + `最后用一句话汇报你挑到了什么。现在几点了自己看一眼系统时间。`
   }
@@ -1040,6 +1040,9 @@ function reportMeta() {
     //   模型手里压根没有这只工具 ⇒ 表现成"开关也开了、这一轮也跑了，但从来没发出去过" ✗
     //   ⇒ dmMode 不是 off、且填了收件人 UID 才放进去（关着就不给，白名单别松）
   if (String(cfg.dmMode || 'off') !== 'off' || cfg.dmWatch) list.push('bili_send_message')   // 2026-10-21：UID 可能靠昵称查，别再拿 dmUid>0 当条件
+    // 2026-10-22: 回复范围扩到「所有直接回复到它评论下的人」+「@ 它的人」
+    //   ⇒ 这两只通知工具本来就在 mcp_server.py 里，但白名单不下发的话模型根本看不见 ⇒ 必须放行。
+    if (cfg.autoComment || cfg.replyToComments) list.push('bili_received_replies', 'bili_received_at_and_likes')
     return list
   }
 
