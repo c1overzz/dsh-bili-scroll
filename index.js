@@ -1925,9 +1925,7 @@ function reportMeta() {
     if (req.method === 'POST' && path === '/api/bili-duty/config') {
       const body = await readBody(req)
       const patch = {}
-      for (const k of ['perDay', 'peakValley', 'noon', 'night', 'autoComment', 'transcribe', 'asrModel',
-        'commentPerRound', 'mentionName', 'dmMode', 'dmUid',
-        'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound']) {
+      for (const k of Object.keys(DEFAULTS)) {
         if (k in body) patch[k] = body[k]
       }
       // ⭐ 范围钳制 + 两份都写（config.json / DSH 原生设置页），统一走 persistCfg —— 见文件上方
