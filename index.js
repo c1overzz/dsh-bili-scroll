@@ -72,6 +72,18 @@ export const Config = !z ? undefined : z.object({
   mentionName: z.string().default('').extra('volatile', true),
   /** 关注关键词（空了用章程里默认那几组） */
   keywords: z.array(z.string()).default([]).extra('volatile', true),
+  /** ⭐ 搜索排序：totalrank=综合（默认）/ pubdate=最新 / click=播放 / dm=弹幕；范围钳制见 clampPatch */
+  searchOrder: z.string().default('totalrank').extra('volatile', true),
+  /** ⭐ 只看最近几天（0 = 不过滤，默认）；换算成 time_start/time_end 交给 B站 服务端筛 */
+  searchDays: z.natural().default(0).extra('volatile', true),
+  /** 每次搜多少条（1–50，默认 10 = 老行为） */
+  searchNum: z.natural().default(10).extra('volatile', true),
+  /** ⭐ 播放量下限（0 = 不设门槛）；不合格的搜索结果**不进返回**，模型看不到 */
+  minPlay: z.natural().default(0).extra('volatile', true),
+  /** 评论数下限（0 = 不设） */
+  minReview: z.natural().default(0).extra('volatile', true),
+  /** 弹幕数下限（0 = 不设） */
+  minDanmaku: z.natural().default(0).extra('volatile', true),
   /** Python：指向 venv 里的那个最好 */
   pythonPath: z.string().default('python').extra('volatile', true),
   /** dsh 的 bin.js（不填就试自动探测，再退化成 shell 里的 dsh） */
@@ -238,7 +250,7 @@ function reportMeta() {
     personaPrompt: '',
     perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
     dmMode: 'only', dmUid: 0,
-    keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, favFolderId: 0,
+    keywords: [], searchOrder: 'totalrank', searchDays: 0, searchNum: 10, minPlay: 0, minReview: 0, minDanmaku: 0, commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, favFolderId: 0,
   }
   const normalize = (src, base) => {
     const out = { ...base }
@@ -268,6 +280,10 @@ function reportMeta() {
   const clampPatch = (patch) => {
     const p = { ...patch }
     if ('perDay' in p) p.perDay = Math.max(0, Math.min(Number(p.perDay) || 0, 50))
+    if ('searchOrder' in p) p.searchOrder = ['totalrank', 'pubdate', 'click', 'dm'].includes(String(p.searchOrder)) ? String(p.searchOrder) : 'totalrank'
+    if ('searchDays' in p) p.searchDays = Math.max(0, Math.min(Math.floor(Number(p.searchDays) || 0), 365))
+    if ('searchNum' in p) p.searchNum = Math.max(1, Math.min(Math.floor(Number(p.searchNum) || 10), 50))
+    for (const k of ['minPlay', 'minReview', 'minDanmaku']) if (k in p) p[k] = Math.max(0, Math.min(Math.floor(Number(p[k]) || 0), 100000000))
     if ('reportLevel' in p) p.reportLevel = ['full', 'brief', 'off'].includes(String(p.reportLevel)) ? String(p.reportLevel) : 'full'
     if ('personaPrompt' in p) p.personaPrompt = String(p.personaPrompt || '').slice(0, 8000)
     if ('dmWatch' in p) p.dmWatch = Boolean(p.dmWatch)
@@ -535,19 +551,48 @@ function reportMeta() {
 
   tool({
     name: 'bili_search',
-    description: '搜 B站 视频（可排序）。返回标题 / BV号 / 播放量 / UP / 时长 等。\n'
-      + '⚠️ 刷一轮的用法：搜近 7 天的、按播放或最新都行，然后**读字幕原文**再判断（别看摘要下结论）。',
+    description: '搜 B站 视频（可排序、可按日期过滤、可按热度设门槛）。返回标题 / BV号 / 播放量 / UP / 时长 等。\n'
+      + '⚠️ 刷一轮的用法：先按设置里的「搜索方式」与「只看最近几天」搜，然后**读字幕原文**再判断（别看摘要下结论）。\n'
+      + '⚠️ 返回里**没有发布时间** ⇒ 要按时间筛只能靠 days 参数让 B站 自己筛（本地没法再筛）。\n'
+      + '⚠️ 播放量/评论数/弹幕数门槛由设置兜底：低于门槛的视频**根本不会出现在返回里**。',
     parameters: {
       keyword: { type: 'string', description: '搜索关键词' },
-      num: { type: 'number', description: '返回几条（默认 10，最大 50）' },
-      order: { type: 'string', description: 'totalrank=综合（默认）/ click=播放 / pubdate=最新 / dm=弹幕' },
+      num: { type: 'number', description: '返回几条（默认取设置里的「看多少条」，最大 50）' },
+      order: { type: 'string', description: 'totalrank=综合 / click=播放 / pubdate=最新 / dm=弹幕（不填用设置里的）' },
+      days: { type: 'number', description: '只看最近几天（0/不填 = 不过滤；不填时用设置里的值）' },
+      minPlay: { type: 'number', description: '播放量下限（0/不填 = 用设置里的门槛）' },
+      minReview: { type: 'number', description: '评论数下限（0/不填 = 用设置里的门槛）' },
+      minDanmaku: { type: 'number', description: '弹幕数下限（0/不填 = 用设置里的门槛）' },
     },
     async execute(args) {
-      return call('bili_search', {
-        keyword: String(args.keyword ?? ''),
-        num: Math.max(1, Math.min(Number(args.num) || 10, 50)),
-        order: String(args.order || 'totalrank'),
-      })
+      refreshCfg()
+      const order = ['totalrank', 'pubdate', 'click', 'dm'].includes(String(args.order))
+        ? String(args.order) : String(cfg.searchOrder || 'totalrank')
+      // ⚠️ days 与 order 一样：**显式传 0 表示"这一搜不要过滤"**，
+      //    不能写 `Number(args.days) || cfg.searchDays` —— 那样传 0 会被当成"没填"而回落成设置值。
+      const days = args.days === undefined || args.days === null
+        ? Math.max(0, Number(cfg.searchDays) || 0)
+        : Math.max(0, Number(args.days) || 0)
+      const num = Math.max(1, Math.min(Number(args.num) || Number(cfg.searchNum) || 10, 50))
+      const payload = { keyword: String(args.keyword ?? ''), num, order }
+      // 日期过滤交给 B站（`time_start`/`time_end`，格式 YYYY-MM-DD）。
+      // ⭐ 用 dayKey()（**本地日期**）：它内部走 getFullYear/getMonth/getDate，
+      //    不能用 toISOString() —— 那是 UTC，在东八区凌晨会算成"昨天"。
+      if (days > 0) {
+        const today = new Date()
+        payload.time_start = dayKey(new Date(today.getTime() - days * 86400000))
+        payload.time_end = dayKey(today)
+      }
+      // 热度门槛：不传/传 0 ⇒ 用设置里的值显式下发（别依赖 env 兜底，这里口径唯一）。
+      const th = (argKey, cfgKey) => {
+        const a = Number(args[argKey]) || 0
+        return Math.max(0, Math.floor(a > 0 ? a : (Number(cfg[cfgKey]) || 0)))
+      }
+      const minPlay = th('minPlay', 'minPlay'); const minReview = th('minReview', 'minReview'); const minDanmaku = th('minDanmaku', 'minDanmaku')
+      if (minPlay > 0) payload.min_play = minPlay
+      if (minReview > 0) payload.min_review = minReview
+      if (minDanmaku > 0) payload.min_danmaku = minDanmaku
+      return call('bili_search', payload)
     },
   })
 
@@ -1003,6 +1048,7 @@ function reportMeta() {
         ? `今天已经挑过 ${already} 条了 ⇒ **这一轮最多再挑 ${left} 条**（「每天最多 ${quota} 条」是全天总量，不是每轮）；`
         : `今天最多挑 ${quota} 条；`)
       + `关键词${kws.length ? `用这些：${kws.join('、')}` : '用章程里的默认那几组'}。`
+      + `搜索方式：按${cfg.searchOrder === 'click' ? '播放量' : cfg.searchOrder === 'pubdate' ? '最新发布' : cfg.searchOrder === 'dm' ? '弹幕数' : '综合'}排序、${Number(cfg.searchDays) > 0 ? `只看最近 ${cfg.searchDays} 天` : '不限日期'}、每次看 ${Number(cfg.searchNum) || 10} 条（bili_search 不传参就按这个走）。${Number(cfg.minPlay) > 0 || Number(cfg.minReview) > 0 || Number(cfg.minDanmaku) > 0 ? `热度门槛：${[Number(cfg.minPlay) > 0 ? `播放≥${cfg.minPlay}` : '', Number(cfg.minReview) > 0 ? `评论≥${cfg.minReview}` : '', Number(cfg.minDanmaku) > 0 ? `弹幕≥${cfg.minDanmaku}` : ''].filter(Boolean).join('、')}——不合格的不会出现在搜索结果里（工具层已拦），报告里**别写"结果太少"**，这是使用者设的策略。 ` : ''}`,
       + `本地转写：${cfg.transcribe
         ? (asrReadyNow()
           ? '开着，而且装好了（没字幕的视频用家里那份 asr.py 转，命令见章程）'
@@ -1118,6 +1164,10 @@ function reportMeta() {
         `          - '${posix(script)}'`,
         '        env:',
         `          BILI_MCP_TOOLS: '${mcpWhitelist().join(',')}'`,
+        // 热度门槛也写进 env：值班轮**不调参数也照样有门槛**（使用者设的是策略，不是模型的选择题）
+        ...(Number(cfg.minPlay) > 0 ? [`          BILI_MCP_MIN_PLAY: '${Math.floor(Number(cfg.minPlay))}'`] : []),
+        ...(Number(cfg.minReview) > 0 ? [`          BILI_MCP_MIN_REVIEW: '${Math.floor(Number(cfg.minReview))}'`] : []),
+        ...(Number(cfg.minDanmaku) > 0 ? [`          BILI_MCP_MIN_DANMAKU: '${Math.floor(Number(cfg.minDanmaku))}'`] : []),
         '',
       )
     }
@@ -2039,6 +2089,7 @@ function reportMeta() {
       const body = await readBody(req)
       const patch = {}
       for (const k of ['perDay', 'peakValley', 'noon', 'night', 'autoComment', 'transcribe', 'asrModel',
+        'searchOrder', 'searchDays', 'searchNum', 'minPlay', 'minReview', 'minDanmaku',
         'commentPerRound', 'mentionName', 'dmMode', 'dmUid',
         'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound', 'personaPrompt', 'dmWatch', 'dmWatchMinutes', 'dmReplyPerDay', 'dmOwnerUid']) {
         if (k in body) patch[k] = body[k]
