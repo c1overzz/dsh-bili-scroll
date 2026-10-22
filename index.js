@@ -28,7 +28,7 @@ import { join, dirname } from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { McpClient } from './lib/mcp.mjs'
-import { verifyRecent, appendVerifyToReport } from './lib/verify.mjs'
+import { verifyRecent, appendVerifyToReport, parseSeen } from './lib/verify.mjs'
 import { WINDOWS, stateDirOf, readJson, writeJson, ensureHomeFiles, ensureCharter, charterPath, inWindow, dayKey } from './lib/state.mjs'
 import { loginStart, loginPoll, saveCredential, renderQrPng } from './lib/login.mjs'
 import { resolveUid } from './lib/uid.mjs'
@@ -566,11 +566,30 @@ function reportMeta() {
     },
   })
 
+  /* ⭐ 2026-10-22（用户截图：「你怎么一个视频 @ 我两次」）：
+   *    23:20 那一轮被**同时跑了两遍**（两个手动轮撞在一起，两边读到的判重表都是旧版本），
+   *    各挑中同一条视频、各发了一条顶层评论（rpid …824257 / …884145）⇒ 同一视频下两条 @ ✗
+   *    章程里「同一个视频下不要留第二条评论」只是**口头约定**，代码里没有闸 ⇒ 现在补两道：
+   *    ① 判重表里这个 BV 已经有顶层评论 ⇒ 拒发（**force 也不越过**，只能先手工删判重表那行）；
+   *    ② 本进程刚刚在这个 BV 发成功过 ⇒ 拒发（挡住「以为没发出去、换个说法再发一次」）。
+   *    ⚠️ 只拦**顶层评论**（rpid=0）；回复别人的楼中楼不受影响 ✓
+   */
+  const commentedHere = new Map()   // bv → rpid（本进程发成功的）
+  const existingTopComment = (bv) => {
+    const hit = commentedHere.get(bv)
+    if (hit) return { rpid: hit, from: '这一轮刚发过' }
+    try {
+      const row = parseSeen(readFileSync(join(stateDir, 'seen.md'), 'utf8')).find((r) => r.bv === bv && !r.root)
+      return row ? { rpid: row.rpid, from: '判重表' } : null
+    } catch { return null }   // 读不到判重表就别拦（不能因为读不了表就一条都发不出去）
+  }
+
   tool({
     name: 'bili_reply',
     description: '在视频下发评论（或回复某条评论）。这就是"@ 本人"那一下：短、干净、纯文本 @ 写在正文里。\n'
       + '🔴 安全闸：设置页的「自动评论并 @ 你」**默认是关的**；关着的时候这个工具会拒绝 —— '
-      + '除非本人当场让你发（那时传 force: true）。',
+      + '除非本人当场让你发（那时传 force: true）。\n'
+      + '另：同一个视频只会有一条顶层评论（这条由插件自己把关，force 也越不过去）。',
     parameters: {
       bvid: { type: 'string', description: 'BV号' },
       text: { type: 'string', description: '评论正文（短、干净、纯文本 @；别写敏感词）' },
@@ -578,6 +597,26 @@ function reportMeta() {
       force: { type: 'boolean', description: '本人当场让你发的，传 true 越过"自动评论关着"的闸' },
     },
     async execute(args) {
+      const bvid = String(args.bvid ?? '').trim()
+      const wantReply = Number(args.rpid) > 0
+      // ⭐ 同一视频只留一条顶层评论（见上面那段注释）。
+      //    ⚠️ 这道闸**故意不给 force 开口子**：force 只该越过「自动评论关着」那道闸，
+      //       不该让模型自己说服自己"再发一条也没事"。真要发第二条，先手工删判重表里那行。
+      if (!wantReply && bvid) {
+        const dup = existingTopComment(bvid)
+        if (dup) {
+          log(`挡住重复评论：${bvid} 已有顶层评论 rpid=${dup.rpid}（${dup.from}）`)
+          return {
+            ok: false,
+            blocked: true,
+            duplicate: true,
+            bvid,
+            existingRpid: dup.rpid,
+            hint: `${bvid} 已经有我们的一条顶层评论了（rpid ${dup.rpid}，${dup.from}）—— 同一个视频只发一条，这条不发。`
+              + `（force 也越不过这道闸；确实要发第二条，只能先手工删判重表里那一行。）`,
+          }
+        }
+      }
       // dmMode==='only' 时本轮根本不该发公开评论 —— 在工具层也一并挡掉（除非当场 force）
       const commentOn = Boolean(cfg.autoComment && cfg.mentionName && cfg.dmMode !== 'only')
       if (!commentOn && !args.force) {
@@ -589,11 +628,17 @@ function reportMeta() {
             : '要发评论得同时满足两条：设置里开着「自动评论并 @ 你」、并且填了「要 @ 谁」。或者本人当场让你发时传 force: true。',
         }
       }
-      return call('bili_reply', {
-        bvid: String(args.bvid ?? ''),
+      const res = await call('bili_reply', {
+        bvid,
         text: String(args.text ?? ''),
         rpid: Number(args.rpid) || 0,
       })
+      // ⭐ 发成功了就记进本进程的去重表 —— 挡住「以为没发出去、换个说法再补一条」
+      if (!wantReply && bvid && res && typeof res === 'object' && res.success !== false) {
+        const newRpid = Number(res.rpid ?? res.rpid_str ?? 0)
+        if (newRpid) commentedHere.set(bvid, newRpid)
+      }
+      return res
     },
   })
 
@@ -1165,6 +1210,32 @@ function reportMeta() {
       try { stubReportIfMissing(1) } catch { /* 补不上也不影响这句话已经进日志 */ }
       return { started: false, why, error: msg }
     }
+    // ⭐ 2026-10-22（用户：「你怎么一个视频 @ 我两次」）：**同一时间只许跑一轮**。
+    //    起因：那一轮被两个手动轮同时开跑，两边读到的判重表都是旧的 ⇒ 同一视频被评论两次，
+    //    报告和判重表还互相覆盖（后写的把先写的挤掉）。跟 dmTick 那把锁同一个思路：
+    //    锁里带子进程 pid；进程没了、或者锁超过 3 小时 ⇒ 当成死锁直接接管（别让一次崩溃把之后全卡死）。
+    const lockFile = join(stateDir, 'run.lock')
+    const lockAlive = () => {
+      let l
+      try { l = JSON.parse(readFileSync(lockFile, 'utf8')) } catch { return null }
+      const at = Number(l?.at) || 0
+      if (!at || Date.now() - at > 3 * 3600_000) return null
+      const pid = Number(l?.childPid) || Number(l?.pid) || 0
+      if (!pid) return l
+      try { process.kill(pid, 0); return l }
+      catch (e) {
+        // Windows 上权限不足也会 EPERM —— 那说明进程还活着，不能当死锁接管
+        return e?.code === 'EPERM' ? l : null
+      }
+    }
+    const releaseLock = () => { try { rmSync(lockFile, { force: true }) } catch { /* 删不掉就留个旧锁，3 小时后自动接管 */ } }
+    const running = lockAlive()
+    if (running) {
+      const mins = Math.max(1, Math.round((Date.now() - (Number(running.at) || Date.now())) / 60000))
+      const msg = `上一轮还在跑（${running.why || '未知'}，已经 ${mins} 分钟）—— 这次不重复开，等它结束再来。`
+      log(`刷B站没开跑：${msg}`)
+      return { started: false, concurrent: true, error: msg }
+    }
     const overlay = ensureOverlay()
     const args = [...dsh.args, '--profile', cfg.headlessProfile || 'headless']
     if (overlay) args.push('--patch', overlay)
@@ -1205,9 +1276,15 @@ function reportMeta() {
     const pick = (buf) => {
       try { appendFileSync(logFile, toText(buf), 'utf8') } catch { /* 写不进去就丢，绝不能抛 */ }
     }
+    // ⭐ 锁在 spawn 之后立刻落盘（带子进程 pid）—— 这段时间差只有几毫秒，
+    //    两个宿主同时点「立刻跑一轮」时，后到的那个会在这道闸上被挡住 ✓
+    try {
+      writeFileSync(lockFile, JSON.stringify({ at: Date.now(), pid: process.pid, childPid: child.pid, why }), 'utf8')
+    } catch (e) { log(`写运行锁失败（不影响这一轮）：${e?.message ?? e}`) }
     child.stdout?.on('data', pick)
     child.stderr?.on('data', pick)
     child.on('exit', (code) => {
+      releaseLock()
       log(`刷B站结束（${why}，code=${code}）`)
       stubReportIfMissing(code)   // ⭐ 没写报告就补一份占位 —— 别让使用者什么都看不到
     // ⭐ 2026-10-20：这一轮跑成了、并且使用者选了收藏夹 ⇒ 把挑中的存进去（后台做，别拖住收尾）
@@ -1228,7 +1305,7 @@ function reportMeta() {
       const verifyTimer = setTimeout(() => { Promise.resolve(runVerify('round')).catch((e) => log('复核异常：' + (e?.message ?? e))) }, 90_000)
       verifyTimer.unref?.()   // 别为了一次复核把宿主进程的退出拖住 90 秒
     })
-    child.on('error', (e) => log(`刷B站起不来：${e?.message ?? e}`))
+    child.on('error', (e) => { releaseLock(); log(`刷B站起不来：${e?.message ?? e}`) })
     return { started: true, why, profile: cfg.headlessProfile, cwd, log: logFile }
    } catch (e) {
     log(`刷B站开跑失败（${why}）：${e?.stack ?? e}`)
