@@ -267,6 +267,8 @@ function reportMeta() {
    *      loadCfg 读回来也过一遍，写进去和读出来一个口径） */
   const clampPatch = (patch) => {
     const p = { ...patch }
+    if ('dmMode' in p) p.dmMode = ['off', 'only', 'both'].includes(String(p.dmMode)) ? String(p.dmMode) : 'off'
+    if ('dmUid' in p) p.dmUid = Math.max(0, Math.min(Number(p.dmUid) || 0, Number.MAX_SAFE_INTEGER))
     if ('perDay' in p) p.perDay = Math.max(0, Math.min(Number(p.perDay) || 0, 50))
     if ('reportLevel' in p) p.reportLevel = ['full', 'brief', 'off'].includes(String(p.reportLevel)) ? String(p.reportLevel) : 'full'
     if ('replyToComments' in p) p.replyToComments = Boolean(p.replyToComments)
@@ -419,7 +421,13 @@ function reportMeta() {
    *      漏掉任何一处，正好就是「设置页改了没反应」那个 bug 本身 ⇒ 收成一个函数。）
    */
   const persistCfg = async (patch) => {
-    const clean = clampPatch(patch)
+    // 复用配置字段和类型，只写本次提交的键，避免 HTTP 白名单漏掉新增设置。
+    const normalized = normalize(patch, cfg)
+    const selected = {}
+    for (const k of Object.keys(DEFAULTS)) {
+      if (Object.hasOwn(patch || {}, k)) selected[k] = normalized[k]
+    }
+    const clean = clampPatch(selected)
     saveCfg(clean)
     const host = await saveCfgHost(clean)
     // 宿主写成功 ⇒ 恢复对账；失败 ⇒ 记成"本地优先"，别让界面把它们压回去
@@ -1924,17 +1932,7 @@ function reportMeta() {
 
     if (req.method === 'POST' && path === '/api/bili-duty/config') {
       const body = await readBody(req)
-      const patch = {}
-      for (const k of ['perDay', 'peakValley', 'noon', 'night', 'autoComment', 'transcribe', 'asrModel',
-        'commentPerRound', 'mentionName', 'dmMode', 'dmUid',
-        'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound']) {
-        if (k in body) patch[k] = body[k]
-      }
-      // ⭐ 范围钳制 + 两份都写（config.json / DSH 原生设置页），统一走 persistCfg —— 见文件上方
-      // ⭐ 私信那两个字段的合法值（2026-10-17 摘 PR #9；其余范围钳制统一在 persistCfg 里）
-      if ('dmMode' in patch) patch.dmMode = ['off', 'only', 'both'].includes(String(patch.dmMode)) ? String(patch.dmMode) : 'off'
-      if ('dmUid' in patch) patch.dmUid = Math.max(0, Math.min(Number(patch.dmUid) || 0, Number.MAX_SAFE_INTEGER))
-      const { clean, host } = await persistCfg(patch)
+      const { clean, host } = await persistCfg(body)
       log(`设置已更新：${JSON.stringify(clean)}（DSH 那边${host.ok ? '已同步' : '没写成：' + host.error}）`)
       return sendJson(res, 200, { ok: true, config: cfg, host })
     }
