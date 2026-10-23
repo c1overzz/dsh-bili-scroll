@@ -1,0 +1,102 @@
+# ============================================================================
+# bili-duty —— 「刷B站」值班轮专用 profile（2026-10-24 安全加固）
+# ============================================================================
+# 为什么单独建一个 profile：
+#   值班轮是一个**无人值守**的 agent。原来它跑在 stock 的 headless profile 上，
+#   那个 profile 只关了 hmr / credentials / authorization / deepseek-account —— 工具一个没动。
+#   于是那一轮除了 B站 MCP 的四个只读工具，还带着整台「电脑」：
+#   tool-fs（任意读/写/编辑）、tool-pwsh（任意命令）、tool-fs-search（全局搜）、
+#   tool-web（能抓任意 URL）、tool-subagent / tool-workflow（能绕开工具限制）。
+#   DSH 的沙箱只限制"写"，**读是不受限的** ⇒ 它能读 ~/.dsh/sessions/**（全部会话记录）、
+#   凭证、工作区；而 B站 MCP 进程在沙箱外，是现成的外发通道。
+#   一句话：能力给多了。它不需要文件系统，就别给文件系统。
+#
+# 这一层把上面那些全关掉；B站 MCP + 值班 IO（duty_*）由插件自己的 --patch overlay 挂进来。
+# 需要的能力由插件的 MCP 窄口提供（报告/判重表/归档/转写），不再给 shell 和 fs。
+# ============================================================================
+
+# headless 默认把这三个服务关了（值班轮 overlay 里也会再开一次，双保险）
+- id: credentials
+  disabled: false
+- id: authorization
+  disabled: false
+- id: deepseek-account
+  disabled: false
+- id: agent-default-model
+  config:
+    provider: deepseek-account
+    model: deepseek-flash
+
+# ── 命令执行 ────────────────────────────────────────────────────────────────
+- id: tool-bash
+  disabled: true
+- id: tool-pwsh
+  disabled: true
+- id: tool-jobs
+  disabled: true
+
+# ── 文件系统：读 / 写 / 编辑 / glob / grep —— 一个都不留 ────────────────────
+- id: tool-fs
+  disabled: true
+- id: tool-fs-search
+  disabled: true
+- id: tool-working-directory
+  disabled: true
+
+# ── 联网：抓取和搜索都不需要（B站 数据走 MCP）───────────────────────────────
+- id: tool-web
+  disabled: true
+- id: web-fetch-http
+  disabled: true
+
+# ── 子代理 / 工作流：能绕开工具限制 ─────────────────────────────────────────
+- id: tool-subagent
+  disabled: true
+- id: tool-subagent-fork
+  disabled: true
+- id: tool-subagent-control
+  disabled: true
+- id: tool-subagent-list-agents
+  disabled: true
+- id: workflow-ptc
+  disabled: true
+- id: tool-workflow
+  disabled: true
+
+# ── 技能：会读文件 ──────────────────────────────────────────────────────────
+- id: skill
+  disabled: true
+- id: skill-filesystem
+  disabled: true
+- id: tool-skill
+  disabled: true
+
+# ── 自动读 AGENTS.md（会把上级目录的私人设定塞进模型上下文）─────────────────
+- id: agent-instructions
+  disabled: true
+
+# ── 装插件 / 热重载 ─────────────────────────────────────────────────────────
+- id: tool-plugin-manager
+  disabled: true
+- id: plugin-manager
+  disabled: true
+- id: hmr
+  disabled: true
+
+# ── 目标循环 / 计划模式 / 待办：无人值守不需要 ──────────────────────────────
+- id: goal
+  disabled: true
+- id: goal-round-driver
+  disabled: true
+- id: command-goal
+  disabled: true
+- id: tool-goal
+  disabled: true
+- id: plan-mode
+  disabled: true
+- id: tool-todo
+  disabled: true
+
+# ── MCP 资源读取（不需要）───────────────────────────────────────────────────
+- id: mcp-resources
+  disabled: true

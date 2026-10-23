@@ -1134,6 +1134,307 @@ async def bili_received_at_and_likes() -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
+
+# ========== 值班轮窄口 IO（2026-10-24 安全加固） ==========
+# 背景（这是安全问题，不是功能）：值班轮是**无人值守**的 agent。以前它跑在 stock
+#   headless profile 上，除了 B站 MCP 的四只只读工具，还带着整台电脑：
+#   tool-fs（任意读/写/编辑）、tool-pwsh（任意命令）、tool-fs-search（全局搜）、
+#   tool-web（抓任意 URL）、subagent / workflow（能绕开工具限制）。
+#   DSH 的沙箱只限制"写"、**读是不受限的** ⇒ 它能读 ~/.dsh/sessions/**（你和所有会话的
+#   完整对话记录）、凭证、工作区；而 B站 MCP 进程在沙箱外，是现成的外发通道。
+# 修法不是"叮嘱它别读"，而是**不给它文件系统**：那一轮改用 bili-duty profile
+#   （tool-fs / pwsh / web / subagent / skill / goal / plugin-manager 全部 disabled）。
+#   它要写日报 / 判重表 / 归档时，改走下面几个"窄口"工具：
+#     · 路径全部由服务端写死（就是插件家），模型不能传路径；
+#     · 参数校验过；表外的一个能力都没有。
+import datetime as _dt
+import re as _re
+import subprocess as _sp
+
+_DUTY_ENV = os.environ.get("BILI_DUTY_HOME", "").strip()
+DUTY_HOME = Path(_DUTY_ENV) if _DUTY_ENV else Path(__file__).resolve().parent
+DUTY_OUT = DUTY_HOME / "out"
+DUTY_DIGEST = DUTY_HOME / "digest"
+DUTY_SEEN = DUTY_HOME / "seen.md"
+_DUTY_ROWS_MAX = 200
+_DUTY_TEXT_MAX = 200_000
+
+
+def _dt_today() -> str:
+    return _dt.datetime.now().strftime("%Y-%m-%d")
+
+
+def _dt_read(path: Path, limit: int = 0) -> str:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ""
+    except OSError as e:
+        raise RuntimeError(f"读不了 {path.name}：{e}") from e
+    if limit and len(text) > limit:
+        return text[-limit:]
+    return text
+
+
+def _dt_append(path: Path, text: str, header: str = "", blank_before: bool = False) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    exists = path.exists() and path.stat().st_size > 0
+    prefix = ""
+    if exists:
+        last = b""
+        try:
+            with open(path, "rb") as rf:
+                rf.seek(-1, os.SEEK_END)
+                last = rf.read(1)
+        except OSError:
+            last = b"\n"
+        if last != b"\n":
+            prefix = "\n"
+        if blank_before:
+            prefix += "\n"
+    with open(path, "a", encoding="utf-8", newline="\n") as f:
+        if not path.exists() or path.stat().st_size == 0:
+            if header:
+                f.write(header)
+        f.write(prefix)
+        f.write(text if text.endswith("\n") else text + "\n")
+
+
+def _dt_lines(value, max_n: int, what: str):
+    """把模型给的 str / 字符串列表归一成"非空单行"列表；拒绝超长、超量。"""
+    if isinstance(value, str):
+        raw = value.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    elif isinstance(value, (list, tuple)):
+        raw = []
+        for item in value:
+            if not isinstance(item, str):
+                raise ValueError(f"{what} 里有一项不是字符串：{type(item).__name__}")
+            raw.append(item)
+    else:
+        raise ValueError(f"{what} 需要字符串或字符串列表")
+    lines = [ln.strip() for ln in raw if ln and ln.strip()]
+    if not lines:
+        raise ValueError(f"{what} 是空的")
+    if len(lines) > max_n:
+        raise ValueError(f"{what} 一次最多 {max_n} 行（这次给了 {len(lines)}）")
+    return lines
+
+
+def _dt_table_rows(value, what: str):
+    """判重表行：必须是单行 Markdown 表格行（| 日期 | BV | 标题 | UP | 状态 |）。"""
+    rows = _dt_lines(value, _DUTY_ROWS_MAX, what)
+    out = []
+    for ln in rows:
+        if not ln.startswith("|") or ln.count("|") < 5:
+            raise ValueError(
+                f"{what} 的每一行必须是表格行，像这样：| 2026-10-24 | BV1xxxx | 标题 | UP | 挑了（值得看） |"
+            )
+        out.append(ln)
+    return out
+
+
+def _dt_asr_python():
+    """本地转写环境的解释器（跟插件首页的 asrReady 同一处）。"""
+    if sys.platform == "win32":
+        p = DUTY_HOME / ".venv-asr" / "Scripts" / "python.exe"
+    else:
+        p = DUTY_HOME / ".venv-asr" / "bin" / "python"
+    return p if p.exists() else None
+
+
+async def duty_state() -> str:
+    """值班轮开始先调这个：返回今天的日期、报告/判重表内容、归档路径、转写环境状态。
+
+    这一轮**没有文件 / 命令行工具**：所有读写都走 duty_* 这几个窄口工具。
+    判重：用这里返回的 seen（判重表）判断视频看过没有；不要当成"没记录"重发。
+    """
+    today = _dt_today()
+    report_path = DUTY_OUT / f"{today}.md"
+    digest_path = DUTY_DIGEST / f"{today[:7]}.md"
+    seen_text = _dt_read(DUTY_SEEN, 80_000)
+    report_text = _dt_read(report_path, 40_000)
+    picks = len(_re.findall(r"^###\s*BV[0-9A-Za-z]+", report_text, _re.M))
+    py = _dt_asr_python()
+    return json.dumps({
+        "today": today,
+        "paths": {
+            "report": str(report_path),
+            "seen": str(DUTY_SEEN),
+            "digest": str(digest_path),
+        },
+        "report_today": report_text,
+        "report_picks_today": picks,
+        "seen": seen_text,
+        "seen_truncated": len(seen_text) >= 80_000,
+        "transcribe": {
+            "ready": bool(py),
+            "hint": "" if py else "本地转写环境没装好 ⇒ 没字幕的视频按「跳过（无字幕）」处理，不要重试",
+        },
+    }, ensure_ascii=False)
+
+
+async def duty_report_append(markdown: str) -> str:
+    """把这一轮的报告追加到今天的 out/<YYYY-MM-DD>.md 末尾（不覆盖上一轮写的内容）。
+
+    Args:
+        markdown: 要追加的 Markdown 正文。每挑中一条视频，其段落第一行必须是 ### BV号。
+    """
+    if not isinstance(markdown, str) or not markdown.strip():
+        return json.dumps({"ok": False, "error": "markdown 是空的，什么都没写"}, ensure_ascii=False)
+    text = markdown.replace("\r\n", "\n").replace("\r", "\n").strip("\n")
+    if len(text) > _DUTY_TEXT_MAX:
+        return json.dumps({"ok": False, "error": f"一次最多追加 {_DUTY_TEXT_MAX} 字符（这次 {len(text)}），请拆成两次"}, ensure_ascii=False)
+    today = _dt_today()
+    path = DUTY_OUT / f"{today}.md"
+    header = f"# 刷B站 · {today}\n\n"
+    try:
+        _dt_append(path, text, header, blank_before=True)
+    except OSError as e:
+        return json.dumps({"ok": False, "error": f"写报告失败：{e}"}, ensure_ascii=False)
+    return json.dumps({
+        "ok": True,
+        "file": str(path),
+        "appended_chars": len(text),
+        "note": "已追加到今天的报告末尾；宿主会数 ### BV… 行算今天挑了几条",
+    }, ensure_ascii=False)
+
+
+async def duty_seen_append(rows) -> str:
+    """把这一轮看过的视频追加进判重表「## 看过的视频」那张表（追加在文件末尾）。
+
+    Args:
+        rows: 一行或多行 Markdown 表格行，格式：
+              | 2026-10-24 | BV1xxxxxxx | 标题 | UP | 挑了（值得看） |
+              状态词必须含「挑了」或「跳过」（宿主按这个筛）。
+    """
+    try:
+        table = _dt_table_rows(rows, "rows")
+    except ValueError as e:
+        return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
+    header = (
+        "# 刷B站 · 判重表（宿主预建，那一轮只往后面追加）\n\n"
+        "## 评论记录（BV | rpid | root（楼中楼才填） | 时间 | 正文前 20 字）\n\n"
+        "| BV | rpid | root（楼中楼才填） | 时间 | 正文前 20 字 |\n"
+        "| --- | --- | --- | --- | --- |\n\n"
+        "## 看过的视频\n\n"
+        "| 日期 | BV | 标题 | UP | 状态 |\n"
+        "| --- | --- | --- | --- | --- |\n"
+    )
+    try:
+        _dt_append(DUTY_SEEN, "\n".join(table), header)
+    except OSError as e:
+        return json.dumps({"ok": False, "error": f"写判重表失败：{e}"}, ensure_ascii=False)
+    return json.dumps({"ok": True, "file": str(DUTY_SEEN), "appended_rows": len(table)}, ensure_ascii=False)
+
+
+async def duty_comment_append(rows) -> str:
+    """把「评论记录」追加进判重表上方那张「## 评论记录」表（不是文件末尾）。
+
+    Args:
+        rows: 一行或多行表格行，格式：
+              | BV1xxxxxxx | 123456789 | 0 | 2026-10-24 03:12 | 评论正文前 20 字 |
+              （楼中楼时 root 填被回复那条根评论的 rpid，否则填 0）
+    """
+    try:
+        table = _dt_table_rows(rows, "rows")
+    except ValueError as e:
+        return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
+    try:
+        text = _dt_read(DUTY_SEEN, 0)
+    except RuntimeError as e:
+        return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
+    marker = "## 看过的视频"
+    if marker not in text:
+        return json.dumps({
+            "ok": False,
+            "error": "判重表里找不到「## 看过的视频」这一节，没法把评论记录插到正确的位置 ⇒ 请把这件事写进报告",
+        }, ensure_ascii=False)
+    head, tail = text.split(marker, 1)
+    block = "\n".join(table) + "\n"
+    new_text = head.rstrip("\n") + "\n" + block + "\n" + marker + tail
+    try:
+        DUTY_SEEN.write_text(new_text, encoding="utf-8")
+    except OSError as e:
+        return json.dumps({"ok": False, "error": f"写判重表失败：{e}"}, ensure_ascii=False)
+    return json.dumps({"ok": True, "file": str(DUTY_SEEN), "appended_rows": len(table)}, ensure_ascii=False)
+
+
+async def duty_digest_append(lines) -> str:
+    """把这一轮「看过的每一条视频」追加进归档 digest/<YYYY-MM>.md（一行一条）。
+
+    Args:
+        lines: 一行或多行，格式：
+               2026-10-24 · BV1xxxxxxx · 标题 · UP · 一句话结论 · 链接（跳过的注明理由）
+    """
+    try:
+        rows = _dt_lines(lines, 500, "lines")
+    except ValueError as e:
+        return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
+    month = _dt_today()[:7]
+    path = DUTY_DIGEST / f"{month}.md"
+    header = f"# 刷B站 · 归档 {month}\n\n"
+    try:
+        _dt_append(path, "\n".join(rows), header)
+    except OSError as e:
+        return json.dumps({"ok": False, "error": f"写归档失败：{e}"}, ensure_ascii=False)
+    return json.dumps({"ok": True, "file": str(path), "appended_lines": len(rows)}, ensure_ascii=False)
+
+
+async def bili_transcribe(bvid: str) -> str:
+    """没有字幕的视频：用插件家里那份本地转写环境（asr.py）把语音转成文字。
+
+    只有设置里开着「本地转写」、并且环境已装好时才用；没装好就按「跳过（无字幕）」处理，别重试。
+
+    Args:
+        bvid: 视频 BV 号（如 BV1xx411c7mD）
+    """
+    bv = (bvid or "").strip()
+    if not _re.fullmatch(r"BV[0-9A-Za-z]{6,14}", bv):
+        return json.dumps({"ok": False, "error": "bvid 看起来不对（要 BV 开头的 BV 号）"}, ensure_ascii=False)
+    py = _dt_asr_python()
+    script = DUTY_HOME / "asr.py"
+    if py is None or not script.exists():
+        return json.dumps({
+            "ok": False,
+            "error": "转写环境没装好（设置里开着「本地转写」但依赖没装） ⇒ 这条按「跳过（无字幕）」处理，不要重试、不要写脚本",
+        }, ensure_ascii=False)
+
+    def _run():
+        return _sp.run(
+            [str(py), str(script), bv],
+            cwd=str(DUTY_HOME),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=600,
+        )
+
+    try:
+        proc = await asyncio.to_thread(_run)
+    except Exception as e:  # noqa: BLE001 - 超时 / 环境异常都按"这条跳过"处理
+        return json.dumps({"ok": False, "error": f"转写没跑成：{e} ⇒ 按「跳过（无字幕）」记"}, ensure_ascii=False)
+    out = (proc.stdout or "").strip()
+    if proc.returncode != 0 and not out:
+        tail = (proc.stderr or "").strip()[-400:]
+        return json.dumps({"ok": False, "error": f"转写退出码 {proc.returncode}：{tail}"}, ensure_ascii=False)
+    if not out or len(out) <= 20 or _re.fullmatch(r"字幕\s*[Bb]y\s*\S+[。.]?", out):
+        return json.dumps({
+            "ok": True,
+            "empty": True,
+            "text": "",
+            "note": "转写返回空 / 只有署名 ⇒ 这条视频没有语音，按「跳过（无语音）」记一笔，别重试",
+        }, ensure_ascii=False)
+    return json.dumps({"ok": True, "chars": len(out), "text": out[:100_000]}, ensure_ascii=False)
+
+
+# 值班 IO 工具总是注册（它们只操作插件家，不接受任意路径）；
+# 不放进 BILI_MCP_TOOLS，是因为那个白名单管的是"B站 侧"的工具。
+for _fn in (duty_state, duty_report_append, duty_seen_append, duty_comment_append, duty_digest_append, bili_transcribe):
+    mcp.tool()(_fn)
+del _fn
+
+
 # ========== 启动 ==========
 
 if __name__ == "__main__":

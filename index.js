@@ -77,7 +77,7 @@ export const Config = !z ? undefined : z.object({
   /** dsh 的 bin.js（不填就试自动探测，再退化成 shell 里的 dsh） */
   dshBin: z.string().default('').extra('volatile', true),
   /** headless 那一轮用哪个 profile */
-  headlessProfile: z.string().default('headless').extra('volatile', true),
+  headlessProfile: z.string().default('bili-duty').extra('volatile', true),
   /** 给那一轮叠一份插件自己的 patch（把 B站 MCP 挂上）—— 用户 profile 一个字都不用改 */
   overlayMcp: z.boolean().default(true).extra('volatile', true),
   /** 跑 headless 时的工作目录 */
@@ -238,7 +238,7 @@ function reportMeta() {
     personaPrompt: '',
     perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
     dmMode: 'only', dmUid: 0,
-    keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, favFolderId: 0,
+    keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'bili-duty', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, favFolderId: 0,
   }
   const normalize = (src, base) => {
     const out = { ...base }
@@ -1028,11 +1028,12 @@ function reportMeta() {
           ? '下面是**值班章程**（里面的「<家目录>」已经替换成真实绝对路径了）—— 严格按它执行：\n\n'
             + charterText + '\n\n按上面的章程刷一轮 B站，'
           : `然后读章程 ${duty}，按里面的要求刷一轮 B站（章程里的 <家目录> 指的是 ${stateDir}），`)
+      + `⚠️ 这一轮你**没有文件 / 命令行 / 联网 / 子代理工具**：只有 B站 MCP 和 duty_* 值班 IO 工具（duty_state / duty_report_append / duty_seen_append / duty_comment_append / duty_digest_append；没字幕要转写用 bili_transcribe）。别尝试读写文件、别写脚本。`
       + (cfg.reportLevel === 'brief'
         ? `日报写成薄版：每条一两行（值不值得 + 链接）就够，别写长摘要。`
         : cfg.reportLevel === 'off'
-          ? `这一轮不要写日报文件，也别生成任何报告；只有真发了评论就一句话记下。`
-          : `把报告写到 ${join(outDir, `${dayKey()}.md`)}。`)
+          ? `这一轮不要写日报（连保底那一行也别写），也别调用 duty_report_append；判重表照写；只有真发了评论就一句话记下。`
+          : `报告用 duty_report_append 写（宿主会落到 ${join(outDir, `${dayKey()}.md`)}）。`)
       + (cfg.reportLevel === 'off' ? '' : `⚠️ 今天那份报告里可能已经有上一轮写的东西 —— 有就**追加到末尾**，别覆盖（配额按全天算）。`)
       + (cfg.reportLevel === 'off' ? '' : '⭐ 报告里**每挑中一条**，第一行写成 `### BV号`（例：`### BV1xxxxxxx`）—— 宿主**就数这些标题行**算今天挑了几条：漏写当成没挑中，给只是提到 / 跳过的视频加上标题则当成挑中。')
       + (already > 0
@@ -1041,13 +1042,13 @@ function reportMeta() {
       + `关键词${kws.length ? `用这些：${kws.join('、')}` : '用章程里的默认那几组'}。`
       + `本地转写：${cfg.transcribe
         ? (asrReadyNow()
-          ? '开着，而且装好了（没字幕的视频用家里那份 asr.py 转，命令见章程）'
+          ? '开着，而且装好了（没字幕的视频用 bili_transcribe(BV号) 转，见章程）'
           : '**开着、但依赖没装好** ⇒ 这一轮没字幕的视频只能跳过')
         : '关着（没字幕的视频就跳过）'}；`
       + `⭐ 不管哪种情况，**报告里都要写一行「因无字幕跳过 N 条」**（N=0 也写）—— 别让它悄悄少几条。`
-      + `判重表 = ${join(stateDir, 'seen.md')}（**就是这个绝对路径**，别写到家目录 ~、也别写到别处）；`
+      + `判重表：用 duty_state 读、duty_seen_append 写（宿主文件是 ${join(stateDir, 'seen.md')}）；`
       + `⚠️ 它读不出来或写不进去，**必须在报告里明说** —— 那一轮宁可不发评论，也别当成"没有记录"重发一遍。`
-      + `⭐ 另外把这一轮**看过的每一条视频（挑中的和跳过的都算）**追加进归档：${join(digestDir, `${dayKey().slice(0, 7)}.md`)}`
+      + `⭐ 另外把这一轮**看过的每一条视频（挑中的和跳过的都算）**用 duty_digest_append 追加进归档（宿主文件是 ${join(digestDir, `${dayKey().slice(0, 7)}.md`)}）`
       + ` —— 一行一条：日期 · BV 号 · 标题 · UP · 一句话结论 · 链接（跳过的那条在后面注明理由）；`
       + `这是**给以后检索用**的（报告是给人看的，归档是给"回头翻"用的），别省略、也别只写挑中的。`
       + `自动评论并 @ ${cfg.mentionName || '（还没填要 @ 谁）'} 是${commentOn
