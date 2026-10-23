@@ -71,6 +71,12 @@ window.__ModuleLoader__.load({
 [data-bd-num]{width:88px;text-align:center;}
 /* 下拉框：固定宽度 + 不许被压缩 —— 否则 width:100% 会把左边那列挤成一字一行 */
 [data-bd-sel]{width:132px;flex:0 0 132px;}
+[data-bd-stickers]{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:10px;margin:8px 0;}
+[data-bd-sticker]{background:var(--dsw-alias-bg-overlay,rgba(128,128,128,.10));border-radius:10px;padding:8px;font-size:11px;}
+[data-bd-thumb]{width:100%;aspect-ratio:1;object-fit:cover;border-radius:8px;display:block;background:rgba(128,128,128,.15);}
+[data-bd-sname]{margin-top:6px;opacity:.85;word-break:break-all;}
+[data-bd-sdesc]{margin-top:2px;opacity:.7;line-height:1.4;}
+[data-bd-smood]{margin-top:2px;opacity:.55;}
 [data-bd-btn]{padding:7px 12px;border-radius:8px;font-size:12px;cursor:pointer;font-family:inherit;
   border:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.16));
   background:var(--dsw-alias-bg-overlay,rgba(128,128,128,.14));color:inherit;}
@@ -146,6 +152,8 @@ window.__ModuleLoader__.load({
       const [effortText, setEffortText] = React.useState(null)
       const [modelInfo, setModelInfo] = React.useState(null)
       const [stickersDir, setStickersDir] = React.useState(null)
+      const [stickerView, setStickerView] = React.useState(null)
+      const [stickerBusy, setStickerBusy] = React.useState(false)
       const [catalog, setCatalog] = React.useState(null)
       const [selModel, setSelModel] = React.useState(null)
       const [subsText, setSubsText] = React.useState(null)
@@ -365,6 +373,14 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         jget('/models').then((d) => setCatalog(d || { ok: false, error: '空' })).catch(() => setCatalog({ ok: false, error: '请求失败' }))
       }, [])
+
+      const onViewStickers = async () => {
+        setStickerBusy(true)
+        try {
+          const r = await jget('/stickers')
+          setStickerView(r && r.ok ? r : { ok: false, error: (r && r.error) || '读不到' })
+        } catch (e) { setStickerView({ ok: false, error: String(e?.message ?? e) }) } finally { setStickerBusy(false) }
+      }
 
       const onSaveModel = async () => {
         await patch({ headlessModel: String(modelText || '').trim(), headlessEffort: String(effortText ?? '') }, '模型')
@@ -730,6 +746,19 @@ window.__ModuleLoader__.load({
               h('option', { value: 'off' }, '不配'),
               h('option', { value: 'auto' }, '看情况'),
               h('option', { value: 'always' }, '每条都配'))),
+          h('div', { 'data-bd-row': '' },
+            h('button', { 'data-bd-btn': '', disabled: stickerBusy, onClick: onViewStickers },
+              stickerBusy ? '读索引…' : '看看索引里有什么'),
+            h('div', { 'data-bd-note': '' },
+              stickerView && stickerView.ok
+                ? `${stickerView.total} 张，已描述 ${stickerView.indexed} 张 · ${stickerView.dir}`
+                : (stickerView && !stickerView.ok ? '读不到：' + (stickerView.error || '未知') : '点一下看当前索引'))),
+          (stickerView && stickerView.ok && stickerView.items && stickerView.items.length) ? h('div', { 'data-bd-stickers': '' },
+            ...stickerView.items.map((it) => h('div', { key: it.name, 'data-bd-sticker': '' },
+              it.thumb ? h('img', { src: it.thumb, alt: it.name, 'data-bd-thumb': '' }) : h('div', { 'data-bd-thumb': '' }, '?'),
+              h('div', { 'data-bd-sname': '' }, it.name + (it.indexed ? '' : '（未描述）')),
+              it.desc ? h('div', { 'data-bd-sdesc': '' }, it.desc) : null,
+              (it.mood && it.mood.length) ? h('div', { 'data-bd-smood': '' }, it.mood.join(' / ')) : null))) : null,
           h('div', { 'data-bd-note': '' },
             '⚠️ B站 评论不能纯图，必须带文字；单条最多 9 张，这里只发 1 张。')),
         /* ── 关注什么 / 在哪儿刷 ── */

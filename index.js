@@ -257,14 +257,31 @@ export function apply(ctx, config) {
     // ⭐ 读回来统一过一遍范围：原生设置页那边我们是钳不到写的（见 clampPatch 的注释）
     if (!row) return clampPatch(saved)
     const user = row.user || {}
+    const value = row.value || {}
     const out = { ...hostCfg() }
-    for (const k of Object.keys(DEFAULTS)) if (user[k] === undefined) out[k] = saved[k]
+    for (const k of Object.keys(DEFAULTS)) {
+      // ⭐ 宿主那份**不认识**这个键（schema 比我们旧，比如新加的 stickerMode）⇒ 用插件自己的，
+      //    否则会出现"改了设置、界面又跳回旧值"（2026-10-24 实测：stickerMode 选 auto 又变回 off）
+      const rw = recentWrites.get(k)
+      if (rw && Date.now() - rw.at < 60000) { out[k] = rw.v; continue }
+      if (!(k in value)) { out[k] = saved[k]; continue }
+      if (user[k] === undefined) out[k] = saved[k]
+    }
     return clampPatch(out)
   }
   const cfg = loadCfg()
   // ⭐ 配置是"随时可能被设置页就地改掉"的东西 ⇒ 每个入口用之前重算一遍（cfg 这个对象要一直指向同一份）
   const refreshCfg = () => { Object.assign(cfg, loadCfg()) }
-  const saveCfg = (patch) => { Object.assign(cfg, normalize(patch, cfg)); writeJson(cfgFile, cfg) }
+  // ⭐ 刚写过的键：60 秒内读配置时优先用我们写进去的值 ——
+  //    宿主那份（settings.update 的落地）有时慢半拍，甚至因为 schema 旧而不认这个键，
+  //    不这样做就会出现"设置页选完又跳回旧值"（2026-10-24 stickerMode 实测）
+  const recentWrites = new Map()
+  const saveCfg = (patch) => {
+    Object.assign(cfg, normalize(patch, cfg))
+    writeJson(cfgFile, cfg)
+    const at = Date.now()
+    for (const k of Object.keys(patch || {})) recentWrites.set(k, { v: cfg[k], at })
+  }
   /**
    * ⭐ 同时写一份到宿主：不写的话会出现死结 —— 某个键一旦在原生设置页设过就由宿主说了算，
    *    插件页再改那个键就成了"改了没反应" ✗。写失败不算致命（config.json 那份还在），把话带回给用户。
@@ -1535,6 +1552,15 @@ export function apply(ctx, config) {
       const { clean, host } = await persistCfg(patch)
       log(`设置已更新：${JSON.stringify(clean)}（DSH 那边${host.ok ? '已同步' : '没写成：' + host.error}）`)
       return sendJson(res, 200, { ok: true, config: cfg, host })
+    }
+
+    if (req.method === 'GET' && path === '/api/bili-duty/stickers') {
+      try {
+        const r = await call('bili_sticker_view', {})
+        return sendJson(res, 200, { ok: true, ...(typeof r === 'object' ? r : { raw: r }) })
+      } catch (e) {
+        return sendJson(res, 200, { ok: false, error: String(e?.message ?? e) })
+      }
     }
 
     if (req.method === 'POST' && path === '/api/bili-duty/watch') {

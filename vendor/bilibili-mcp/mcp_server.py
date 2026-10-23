@@ -1770,6 +1770,55 @@ async def bili_stickers(limit: int = 9) -> str:
 
 
 @tool()
+async def bili_sticker_view(size: int = 96) -> str:
+    """
+    看一眼表情包索引里都有什么（给设置页那个小面板用）
+
+    Args:
+        size: 缩略图边长（默认 96px）
+
+    Returns:
+        JSON：dir / total / indexed / items[{name, desc, mood, fits, avoid, thumb}]
+        thumb 是 data:image/jpeg;base64,…（拿不到图就是空串）
+    """
+    import base64
+    import io as _io
+    from PIL import Image
+
+    files = sticker_files()
+    idx = load_sticker_index()
+    n = max(48, min(int(size or 96), 256))
+    items = []
+    for f in files:
+        meta = idx.get(f["name"]) or {}
+        thumb = ""
+        try:
+            im = Image.open(f["path"]).convert("RGB")
+            im.thumbnail((n, n), Image.LANCZOS)
+            buf = _io.BytesIO()
+            im.save(buf, format="JPEG", quality=78)
+            thumb = "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+        except Exception:
+            thumb = ""
+        items.append({
+            "name": f["name"],
+            "size": f["size"],
+            "desc": meta.get("desc", ""),
+            "mood": meta.get("mood", []),
+            "fits": meta.get("fits", ""),
+            "avoid": meta.get("avoid", ""),
+            "indexed": bool(meta),
+            "thumb": thumb,
+        })
+    return json.dumps({
+        "dir": str(sticker_dir()),
+        "total": len(files),
+        "indexed": sum(1 for i in items if i["indexed"]),
+        "items": items,
+    }, ensure_ascii=False)
+
+
+@tool()
 async def bili_sticker_save(items: str) -> str:
     """
     保存表情包描述（给 bili_stickers 看完图之后用）
