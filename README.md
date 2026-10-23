@@ -99,6 +99,37 @@ dsh plugin --profile web add dsh-bili-scroll
 
 > ⭐ 这些设置写在 `<DSH_HOME>/bili-duty/config.json`；在插件这一页改，就以这一页为准。
 
+## 可选：顶层评论附一张本地表情图
+
+默认仍是纯文本。要启用配图，在插件数据目录 `<DSH_HOME>/bili-duty/` 新建 `comment-stickers.json`：
+
+```json
+{
+  "directory": "stickers",
+  "default": "中性_等你.png"
+}
+```
+
+将图片放进同目录的 `stickers/`（也可以把 `directory` 设为后端 Python 可读取的绝对路径）。`default` 必须是库内实际存在的图片文件名，用于模型漏选时的中性兜底。可自行提供图片，也可使用源码附带的 [DS 大肥鱼表情包（180 张原图）](assets/DS表情包/使用说明.md)，按目录内示例配置接入。素材约 122 MiB，仅随 GitHub 源码提供，不纳入默认 npm 插件包；来源和署名见素材说明与 [NOTICE.md](NOTICE.md)。
+
+- 支持 PNG、JPEG、WebP、GIF。评论上传副本转为最长边 768 像素的 PNG；GIF 使用静态首帧，原文件不改。
+- 文件名可用「情绪_内容」，如 `开心_比耶.png`、`安慰_抱抱.webp`。普通图片目录即可使用，不强制建立索引。
+- 可选 `index.json`（兼容同格式的 `表情索引.json`）补充元数据：`{"items":[{"filename":"开心_比耶.png","emotion":"开心","content":"比耶","animated":false}]}`。有两个索引时优先 `index.json`；元数据只补充当前目录内实际图片的描述。
+- 模型通过只读 `bili_stickers` 按情绪或内容查询，再把返回的文件名传给 `bili_reply` 的 `sticker` 参数。精确文件名优先，也可传精确情绪名（同情绪内优先选静态图）。
+- 配置存在即启用：顶层新评论在**同一条评论**附一张图。图片读取或上传失败会报错，**不静默退回纯文字，也不另发补图评论**；发送阶段超时等异常应先核楼，避免重复发布。
+- B站会拒绝子评论配图（`-400：子评论不能带图`）。回复评论（`rpid != 0`，包含回复一级评论与楼中楼）主动走纯文本，不读取配置或上传图片；即使误传 `sticker`，也只发一次文本，回执返回 `sticker=""` 与 `sticker_skip_reason="bilibili_child_reply_no_images"`，保留 `root`、`parent`、`rpid`。
+- 删除配置文件即可对新调用恢复纯文本；顶层评论未配置却显式选择 `sticker` 会报错，防止把用户要求的图悄悄丢掉。顶层评论和图库查询会在每次调用时重读该文件；自动刷的下一轮也会读取新配置。
+
+离线验证（不访问账号、不发布评论）：
+
+```bash
+python -m unittest discover -s tests -p 'test_comment_stickers.py' -v
+node --test tests/comment-stickers.test.mjs
+node selfcheck.mjs
+```
+
+Python 测试使用 `vendor/bilibili-mcp/requirements.txt` 中的依赖；实际运行以用户已安装的 B 站 API 库为准。
+
 ## 红线（写死在提示词里，不靠自觉）
 
 - 不透露你的隐私：账号、机器路径、你聊过的话 —— 一个字都不进评论

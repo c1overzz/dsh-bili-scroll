@@ -572,14 +572,33 @@ function reportMeta() {
   })
 
   tool({
+    name: 'bili_stickers',
+    description: '只读检索评论配图，返回真实 filename、emotion、content。将选中的 filename 传给 bili_reply 的 sticker；未配置时 configured=false。',
+    parameters: {
+      emotion: { type: 'string', description: '精确情绪；留空查看情绪目录' },
+      query: { type: 'string', description: '文件名或图片内容关键词' },
+      limit: { type: 'number', description: '最多返回几张，默认12，最大30' },
+    },
+    async execute(args) {
+      return call('bili_stickers', {
+        emotion: String(args.emotion ?? ''), query: String(args.query ?? ''),
+        limit: Math.max(1, Math.min(Number(args.limit) || 12, 30)),
+      })
+    },
+  })
+
+  tool({
     name: 'bili_reply',
     description: '在视频下发评论（或回复某条评论）。这就是"@ 本人"那一下：短、干净、纯文本 @ 写在正文里。\n'
       + '🔴 安全闸：设置页的「自动评论并 @ 你」**默认是关的**；关着的时候这个工具会拒绝 —— '
-      + '除非本人当场让你发（那时传 force: true）。',
+      + '除非本人当场让你发（那时传 force: true）。'
+      + '配置配图后仅顶层评论同条附一张图；可先用 bili_stickers 选图再传 sticker。B站子评论不能带图，回复时只发文本。',
     parameters: {
       bvid: { type: 'string', description: 'BV号' },
       text: { type: 'string', description: '评论正文（短、干净、纯文本 @；别写敏感词）' },
       rpid: { type: 'number', description: '要回复的评论 id（0/不填 = 发新评论）' },
+      root: { type: 'number', description: '回复楼中楼时的根评论ID' },
+      sticker: { type: 'string', description: '仅顶层评论：bili_stickers 返回的 filename 或精确情绪，启用后漏传用默认图；子评论不使用图片并返回跳过原因' },
       force: { type: 'boolean', description: '本人当场让你发的，传 true 越过"自动评论关着"的闸' },
     },
     async execute(args) {
@@ -598,6 +617,8 @@ function reportMeta() {
         bvid: String(args.bvid ?? ''),
         text: String(args.text ?? ''),
         rpid: Number(args.rpid) || 0,
+        root: Number(args.root) || 0,
+        sticker: String(args.sticker ?? ''),
       })
     },
   })
@@ -1019,6 +1040,13 @@ function reportMeta() {
         : (dmModeEff === 'only'
           ? '关着的 —— 当前是「**只私信**」模式：**这一轮一条公开评论都不许发**，改走私信'
           : '关着的（只写报告，别发评论）')}。`
+      + (existsSync(join(stateDir, 'comment-stickers.json'))
+        ? `评论配图：已启用，仅顶层评论先用 bili_stickers 按情绪/内容找真实 filename，`
+          + `再传 bili_reply 的 sticker 参数；没有合适台词时可留空使用默认中性图。`
+          + `顶层文字和图片在同一条评论发送；B站子评论不能带图，回复时不选图、不传 sticker，只发文本。`
+          + `不把文件名、路径或图片占位符写进正文，也不另发补图评论。`
+          + `图片或发送失败如实记报告；stage=send 可能结果未知，先核楼，不能直接重复发布。`
+        : '')
       + (dmOn
         ? `⭐⭐ **私信投递**：用 bili_send_message 把这一轮的结果发到 UID **${dmUidEff}**。`
           + `内容**别照抄评论那套**：把本轮每条值得的写成 **标题 + 链接 + 一句话理由**`
@@ -1060,7 +1088,7 @@ function reportMeta() {
    *    要读全就手工改这个列表（或者直接跑 mcp_server.py，不设这个变量 = 全放）。
    */
   const mcpWhitelist = () => {
-    const list = ['bili_search', 'bili_subtitle', 'bili_comments', 'bili_video_info']
+    const list = ['bili_search', 'bili_subtitle', 'bili_comments', 'bili_video_info', 'bili_stickers']
     if (cfg.autoComment || cfg.replyToComments) list.push('bili_reply')   // 只有真要发评论才给这只
     // ⭐ 2026-10-19（issue #25 / #16 的实证，做法参考社区 PR #37）：私信开着却忘了给 bili_send_message ⇒
     //   模型手里压根没有这只工具 ⇒ 表现成"开关也开了、这一轮也跑了，但从来没发出去过" ✗

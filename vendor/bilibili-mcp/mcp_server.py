@@ -14,13 +14,17 @@ B站数据采集 MCP 服务，支持 OpenClaw / Claude Code / Cursor / Cline
 #      ③ 登录成功后凭证**原子写**（先写 .tmp 再 os.replace）
 #      ④ `bili_comments` 把抓取异常带进返回（风控 -412 不再伪装成"这条视频 0 条评论"）
 #      ⑤ `bili_reply` 回执带上 `rpid` / `rpid_str` / `root` / `parent`（判重表与评论复核要用）
+#      ⑥ 可选的评论配图：只读检索、每条一图、独立临时上传文件；未配置时保持纯文本。
 import asyncio
 import json
 import base64
 import os
 import sys
 import tempfile
+import random
+from contextlib import ExitStack
 from pathlib import Path
+from PIL import Image, ImageOps
 from mcp.server.fastmcp import FastMCP
 
 from bilibili_api import video, search, comment, Credential, dynamic, opus
@@ -29,6 +33,7 @@ from bilibili_api.video_uploader import (
     VideoUploader, VideoUploaderPage, VideoMeta, Lines,
 )
 from bilibili_api.utils.picture import Picture
+from bilibili_api.utils.network import BiliAPIFile
 from bilibili_api.login_v2 import QrCodeLogin, QrCodeLoginEvents
 
 # ========== 初始化 ==========
@@ -42,6 +47,75 @@ mcp = FastMCP("bilibili-mcp")
 #    · 给了 ⇒ 只注册名单里的；不在名单里的工具**连名字都不会出现在 list_tools 里**，
 #      模型那边等于根本不存在 —— 这才是真的闸门（光靠提示词说"别用"不算）✓
 _ALLOWED = {t.strip() for t in os.environ.get("BILI_MCP_TOOLS", "").split(",") if t.strip()}
+
+_STICKER_CONFIG = Path(__file__).with_name("comment-stickers.json")
+
+
+def _sticker_catalog():
+    """None means not configured; an invalid existing config must not become a text-only send."""
+    if not _STICKER_CONFIG.exists() and not _STICKER_CONFIG.is_symlink():
+        return None
+    config = json.loads(_STICKER_CONFIG.read_text(encoding="utf-8"))
+    if not isinstance(config.get("directory"), str) or not config["directory"].strip():
+        raise ValueError("comment-stickers.json 需要非空的 directory")
+    directory = Path(config["directory"]).expanduser()
+    if not directory.is_absolute():
+        directory = _STICKER_CONFIG.parent / directory
+    directory = directory.resolve(strict=True)
+    if not directory.is_dir():
+        raise ValueError("表情 directory 必须是文件夹")
+    # Optional metadata enriches filenames; files in the configured directory remain the source of truth.
+    metadata = {}
+    for index_name in ("index.json", "表情索引.json"):
+        index = directory / index_name
+        if index.exists() or index.is_symlink():
+            rows = json.loads(index.read_text(encoding="utf-8"))["items"]
+            if not isinstance(rows, list):
+                raise ValueError("表情索引的 items 必须是数组")
+            metadata = {row["filename"]: row for row in rows}
+            break
+    catalog = {}
+    for path in sorted(directory.iterdir()):
+        if not path.is_file() or path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
+            continue
+        name = path.name
+        if "/" in name or "\\" in name:
+            continue
+        emotion, separator, content = path.stem.partition("_")
+        row = metadata.get(name, {})
+        catalog[name] = dict(filename=name, emotion=str(row.get("emotion") or (emotion if separator else "")),
+                             content=str(row.get("content") or (content if separator else path.stem)),
+                             animated=bool(row.get("animated", path.suffix.lower() == ".gif")))
+    default = config.get("default")
+    if not isinstance(default, str) or default not in catalog:
+        raise ValueError("default 必须是素材目录内真实的中性图片文件名")
+    return directory, default, catalog
+
+
+def _select_comment_sticker(sticker: str, data):
+    directory, default, catalog = data
+    choice = str(sticker or "").strip() or default
+    if choice in catalog:
+        selected = catalog[choice]
+    else:
+        matches = [row for row in catalog.values() if row["emotion"] == choice]
+        if not matches:
+            raise ValueError("未找到这张表情或情绪，请用 bili_stickers 选择真实文件名")
+        selected = random.choice([row for row in matches if not row["animated"]] or matches)
+    source = (directory / selected["filename"]).resolve(strict=True)
+    source.relative_to(directory)  # Do not upload a symlink escaping the configured library.
+    return source, selected
+
+
+class _CommentStickerPicture(Picture):
+    """Picture's default test.png is shared across requests; keep each upload isolated."""
+    def __init__(self, path: Path, width: int, height: int):
+        super().__init__(width=width, height=height, imageType="png", url="",
+                         size=path.stat().st_size / 1024, content=path.read_bytes())
+        self._comment_path = str(path)
+
+    def _to_biliapifile(self):
+        return BiliAPIFile(path=self._comment_path, mime_type="image/png")
 
 
 def tool():
@@ -510,7 +584,33 @@ async def bili_video_info(bvid: str) -> str:
 # ========== Tool 6: 回复评论 ==========
 
 @tool()
-async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0) -> str:
+async def bili_stickers(emotion: str = "", query: str = "", limit: int = 12) -> str:
+    """只读检索评论图片，返回 filename/emotion/content；将 filename 传给 bili_reply 的 sticker。
+
+    emotion: 精确情绪；query: 文件名或内容关键词；limit: 最多返回几张（1-30）。
+    未配置时 configured=false；默认只列静态候选，GIF 可按精确文件名查询并作为静态首帧发送。
+    """
+    try:
+        data = _sticker_catalog()
+        if data is None:
+            return json.dumps({"ok": True, "configured": False, "items": [], "emotions": {}, "total": 0})
+        _, default, catalog = data
+        emotions = {}
+        for row in catalog.values():
+            emotions[row["emotion"]] = emotions.get(row["emotion"], 0) + 1
+        emotion, query = emotion.strip(), query.strip()
+        rows = [row for row in catalog.values()
+                if (not emotion or row["emotion"] == emotion)
+                and (not row["animated"] or query == row["filename"])
+                and (not query or query.casefold() in (row["filename"] + row["content"]).casefold())]
+        return json.dumps({"ok": True, "configured": True, "default": default, "emotions": emotions,
+                           "total": len(rows), "items": rows[:max(1, min(int(limit), 30))]}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
+
+
+@tool()
+async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0, sticker: str = "") -> str:
     """
     在B站视频下发表评论或回复某条评论
 
@@ -519,42 +619,56 @@ async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0) -> str:
         text: 评论/回复的文本内容
         rpid: 要回复的目标评论ID（0表示发表新评论）
         root: 楼层根评论ID（回复一级评论时不用填，回复楼中楼时填根评论ID）
+        sticker: bili_stickers 返回的 filename（优先）或精确情绪。配置配图库后漏传用 default 图。
+                 只对顶层评论生效，GIF 使用静态首帧。未配置且不传时保持纯文本。
+                 B站子评论不能带图：rpid!=0 时不读取图库、不上传图片，回执说明跳过原因。
     
     Returns:
         发表结果
     """
-    cred = get_cred()
-    v = video.Video(bvid=bvid, credential=cred)
-    info = await v.get_info()
-    aid = info["aid"]
-
+    stage = "prepare"
     try:
-        if rpid == 0:
-            # 发表新评论
-            result = await comment.send_comment(
-                text=text,
-                oid=aid,
-                type_=comment.CommentResourceType.VIDEO,
-                credential=cred,
-            )
-        else:
-            # 回复评论
-            # root=0 表示回复一级评论，root=rpid
-            # root!=0 表示回复楼中楼，root=根评论，parent=目标评论
-            actual_root = root if root != 0 else rpid
-            result = await comment.send_comment(
-                text=text,
-                oid=aid,
-                type_=comment.CommentResourceType.VIDEO,
-                root=actual_root,
-                parent=rpid,
-                credential=cred,
-            )
+        is_reply = rpid != 0
+        # Bilibili rejects pictures on child replies with -400. Choose text-only before any image work.
+        data = None if is_reply else _sticker_catalog()
+        if not is_reply and data is None and str(sticker or "").strip():
+            raise ValueError("请先在插件数据目录配置 comment-stickers.json，再选择图片")
+        selected = None
+        with ExitStack() as stack:
+            picture = None
+            if data is not None:
+                source, selected = _select_comment_sticker(sticker, data)
+                temporary = stack.enter_context(tempfile.TemporaryDirectory(prefix="bili-comment-sticker-"))
+                image_path = Path(temporary) / "sticker.png"
+                with Image.open(source) as original:
+                    source_animated = getattr(original, "n_frames", 1) > 1
+                    original.seek(0)
+                    image = ImageOps.exif_transpose(original).convert("RGBA")
+                    image.thumbnail((768, 768))
+                    image.save(image_path, format="PNG", optimize=True)
+                picture = _CommentStickerPicture(image_path, image.width, image.height)
+            cred = get_cred()
+            v = video.Video(bvid=bvid, credential=cred)
+            info = await v.get_info()
+            args = dict(text=text, oid=info["aid"], type_=comment.CommentResourceType.VIDEO, credential=cred)
+            if picture is not None:
+                args["pic"] = picture
+            if is_reply:
+                args.update(root=root if root != 0 else rpid, parent=rpid)
+            # Text and picture share one comment request. Never retry or downgrade a failed image send.
+            stage = "send"
+            result = await comment.send_comment(**args)
 
         # ⭐ 把回执里的 rpid 带回去：判重表要靠它记「我们发过哪条」，宿主的评论复核
         #    （lib/verify.mjs）也要拿它去 B站 查公开可见性。只回 success 的话那条链是断的。
         #（2026-10-16 审查修：原实现把上面的 result 丢掉了）
         out = {"success": True, "message": "评论发送成功"}
+        if is_reply:
+            out.update(message="楼中楼纯文本回复已接收", sticker="",
+                       sticker_skip_reason="bilibili_child_reply_no_images")
+        elif selected is not None:
+            out.update(sticker=selected["filename"], sticker_emotion=selected["emotion"],
+                       sticker_rendering="gif_first_frame" if source_animated else "static_png")
         if isinstance(result, dict):
             for key in ("rpid", "rpid_str", "root", "parent"):
                 val = result.get(key)
@@ -562,7 +676,9 @@ async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0) -> str:
                     out[key] = val
         return json.dumps(out, ensure_ascii=False)
     except Exception as e:
-        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+        return json.dumps({"success": False, "error": str(e), "stage": stage,
+                           "retry_safe": stage == "prepare",
+                           "hint": "发送阶段失败可能结果未知，请先复核评论，勿直接重复发布"}, ensure_ascii=False)
 
 
 # ========== Tool 7: 批量采集 ==========
