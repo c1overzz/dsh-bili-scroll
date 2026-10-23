@@ -74,6 +74,17 @@ window.__ModuleLoader__.load({
 [data-bd-btn]{padding:7px 12px;border-radius:8px;font-size:12px;cursor:pointer;font-family:inherit;white-space:nowrap;
   border:1px solid var(--dsw-alias-bg-layer-3,rgba(255,255,255,.16));
   background:var(--dsw-alias-bg-layer-4,rgba(128,128,128,.14));color:inherit;}
+/* 下拉框：固定宽度 + 不许被压缩 —— 否则 width:100% 会把左边那列挤成一字一行 */
+[data-bd-sel]{width:132px;flex:0 0 132px;}
+[data-bd-stickers]{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:10px;margin:8px 0;}
+[data-bd-sticker]{background:var(--dsw-alias-bg-overlay,rgba(128,128,128,.10));border-radius:10px;padding:8px;font-size:11px;}
+[data-bd-thumb]{width:100%;aspect-ratio:1;object-fit:cover;border-radius:8px;display:block;background:rgba(128,128,128,.15);}
+[data-bd-sname]{margin-top:6px;opacity:.85;word-break:break-all;}
+[data-bd-sdesc]{margin-top:2px;opacity:.7;line-height:1.4;}
+[data-bd-smood]{margin-top:2px;opacity:.55;}
+[data-bd-btn]{padding:7px 12px;border-radius:8px;font-size:12px;cursor:pointer;font-family:inherit;
+  border:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.16));
+  background:var(--dsw-alias-bg-overlay,rgba(128,128,128,.14));color:inherit;}
 [data-bd-btn]:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.24));}
 [data-bd-btn][data-primary]{background:#3b82f6;border-color:#3b82f6;color:#fff;}
 [data-bd-btn][disabled]{opacity:.5;cursor:default;}
@@ -232,11 +243,23 @@ function WatchTab() {
 }
 
     function Panel() {
-      const [st, setSt, fails] = useStatus(5000)
+      const [st, setSt, fails] = useStatus(3000)
       const [busy, setBusy] = React.useState('')
       const [msg, setMsg] = React.useState('')
       const [msgTone, setMsgTone] = React.useState('')
       const [kws, setKws] = React.useState(null)
+      const [modelText, setModelText] = React.useState(null)
+      const [effortText, setEffortText] = React.useState(null)
+      const [modelInfo, setModelInfo] = React.useState(null)
+      const [stickersDir, setStickersDir] = React.useState(null)
+      const [stickerView, setStickerView] = React.useState(null)
+      const [stickerBusy, setStickerBusy] = React.useState(false)
+      const [catalog, setCatalog] = React.useState(null)
+      const [selModel, setSelModel] = React.useState(null)
+      const [subsText, setSubsText] = React.useState(null)
+      const [watchText, setWatchText] = React.useState('')
+      const [watchMsg, setWatchMsg] = React.useState('')
+      const [ws, setWs] = React.useState(null)
       const [favFolders, setFavFolders] = React.useState(null)   // 收藏夹列表（下拉用，null = 还没读）
       const [favId, setFavId] = React.useState(null)             // 选中的收藏夹 fid（字符串）
       const [persona, setPersona] = React.useState(null)   // 人设提示词草稿
@@ -277,6 +300,16 @@ function WatchTab() {
       const cfg = st?.config
       React.useEffect(() => {
         if (cfg && kws === null) setKws((cfg.keywords || []).join('\n'))
+        if (cfg && subsText === null) setSubsText((cfg.subs || []).join('\n'))
+        if (cfg && modelText === null) setModelText(cfg.headlessModel || '')
+        if (cfg && effortText === null) setEffortText(cfg.headlessEffort || '')
+        if (cfg && stickersDir === null) setStickersDir(cfg.stickersDir || '')
+        if (cfg && selModel === null) {
+          setSelModel(String(cfg.headlessModel || '').trim()
+            ? `${String(cfg.headlessProvider || 'deepseek-official').trim()}::${String(cfg.headlessModel).trim()}`
+            : '')
+        }
+        if (cfg && ws === null) setWs(cfg.workspace || '')
         if (cfg && persona === null) setPersona(cfg.personaPrompt || '')
         if (cfg && rl === null) setRl(cfg.reportLevel || 'full')
         if (cfg && perDay === null) setPerDay(String(cfg.perDay ?? 5))
@@ -515,6 +548,63 @@ function WatchTab() {
         await patch({ keywords: list, personaPrompt: String(persona || '').trim() }, '关键词 / 人设 / 工作区')
       }
 
+      React.useEffect(() => {
+        jget('/models').then((d) => setCatalog(d || { ok: false, error: '空' })).catch(() => setCatalog({ ok: false, error: '请求失败' }))
+      }, [])
+
+      const onIndexStickers = async () => {
+        setStickerBusy(true)
+        try {
+          const r = await jpost('/stickers/index', {})
+          if (r?.started) {
+            say(`开始补描述：${r.pending} 张（跑完刷新一下列表）`, 'good')
+            setStickerView(null)
+          } else {
+            say(String(r?.error || '没起来'), 'warn')
+          }
+        } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setStickerBusy(false) }
+      }
+
+      const onViewStickers = async () => {
+        setStickerBusy(true)
+        try {
+          const r = await jget('/stickers')
+          setStickerView(r && r.ok ? r : { ok: false, error: (r && r.error) || '读不到' })
+        } catch (e) { setStickerView({ ok: false, error: String(e?.message ?? e) }) } finally { setStickerBusy(false) }
+      }
+
+      const onSaveModel = async () => {
+        await patch({ headlessModel: String(modelText || '').trim(), headlessEffort: String(effortText ?? '') }, '模型')
+        setModelInfo(null)
+      }
+
+      const onRefreshModel = async () => {
+        setBusy('model')
+        try { setModelInfo(await jget('/model?fresh=1')) } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
+      }
+
+      const onWatch = async () => {
+        setBusy('watch'); setWatchMsg('')
+        try {
+          const r = await jpost('/watch', { items: watchText })
+          if (r?.started) {
+            const n = (r.bvids || []).length
+            setWatchMsg(`已经在看了（${n} 条）→ ${r.file}`)
+            say(`点名看 ${n} 条：结果会写到 ${r.file}`, 'good')
+          } else { setWatchMsg('没起来：' + (r?.error || '未知原因')); say(String(r?.error || '没起来'), 'warn') }
+        } catch (e) {
+          const m = String(e?.message ?? e)
+          setWatchMsg(/unknown POST/i.test(m)
+            ? '宿主还没加载这个接口 —— 重启一次 DSH 再试（不是设置的问题）'
+            : m)
+        } finally { setBusy('') }
+      }
+
+      const onSaveSubs = async () => {
+        const list = String(subsText || '').split('\n').map((x) => x.trim()).filter(Boolean)
+        await patch({ subs: list }, '订阅')
+      }
+
       if (!cfg) {
         return h('div', { 'data-bd-page': '' },
           h('div', { 'data-bd-note': '' }, fails >= 3
@@ -526,6 +616,39 @@ function WatchTab() {
       }
 
       const sw = (k) => Boolean(cfg[k])
+      const mmss = (s) => (s < 60 ? `${s} 秒` : `${Math.floor(s / 60)} 分 ${s % 60} 秒`)
+      /* 模型下拉：优先用 DSH 报上来的目录；拿不到就退回内置已知的那几个 */
+      const FALLBACK_MODELS = [
+        { provider: 'deepseek-official', id: 'deepseek-flash', name: 'DeepSeek-V41-Flash' },
+        { provider: 'deepseek-official', id: 'deepseek-v4-pro', name: 'DeepSeek-V4-Pro' },
+      ]
+      const modelChoices = (() => {
+        const list = []
+        if (catalog && catalog.ok && Array.isArray(catalog.providers)) {
+          for (const pv of catalog.providers) {
+            for (const m of (pv.models || [])) {
+              list.push({ provider: pv.provider, label: pv.label || pv.provider, id: m.id, name: m.name || m.id })
+            }
+          }
+        }
+        if (!list.length) return FALLBACK_MODELS.map((m) => ({ ...m, label: 'deepseek-official' }))
+        return list
+      })()
+
+      /* 看画面：按"格子数 × 清晰度"算一张拼图多大，再折算走图的 token（估算，量级对就行） */
+      const fgrid = ({ 4: [2, 2], 9: [3, 3], 16: [4, 4] })[Number(cfg.frameCount) || 9] || [3, 3]
+      const fw = Number(cfg.frameHeight) || 480
+      const fh = Math.round(fw * 9 / 16)
+      const sheetW = fgrid[1] * fw + (fgrid[1] + 1) * 6
+      const sheetH = fgrid[0] * (fh + 22) + (fgrid[0] + 1) * 6
+      // ⭐ 用 DSH 里 deepseek 适配器写的官方算法：14px patch、每轴 3:1 下采样 ⇒ 42px 一格，
+      //    整张图封顶 1024 tokens（见 dsh-llm-deepseek/image-tokens）
+      const CELL = 42
+      const effW = sheetW
+      const effH = sheetH
+      const tokPer = Math.min(1024, Math.ceil(effW / CELL) * Math.ceil(effH / CELL))
+      const nPerDay = Number(cfg.perDay) || 0
+      const tokPerDay = sw('seeVideo') ? tokPer * nPerDay : 0
 
       return h('div', { 'data-bd-page': '' },
 
@@ -581,6 +704,64 @@ function WatchTab() {
               onBlur: () => { const n = Math.max(0, Math.min(Number(perDay) || 0, 50)); setPerDay(String(n)); patch({ perDay: n }, '每天挑几条') },
             })),
           st.lastRunAt ? h('div', { 'data-bd-note': '' }, `上次跑：${new Date(st.lastRunAt).toLocaleString('zh-CN')}`) : null),
+        /* ── 这一轮用哪个模型 ── */
+        h('div', { 'data-bd-sec': '', 'data-bd-group': 'adv', 'data-bd-away': tab === 'adv' ? undefined : '' },
+          h('div', { 'data-bd-h': '' }, '这一轮用哪个模型'),
+          h('div', { 'data-bd-note': '' }, '定时刷、点名看用的都是 headless 那一档。留空就跟着 profile 的默认走 —— 这是以前的黑盒。'),
+          (modelChoices.length > 0)
+            ? h('div', { 'data-bd-row': '' },
+              h('div', { 'data-bd-grow': '' },
+                h('div', { 'data-bd-label': '' }, '模型'),
+                h('div', { 'data-bd-note': '' }, '列的是这个 DSH 里**能用的**模型（接了几家就列几家；读不到目录时列内置的那几个）')),
+              h('select', {
+                'data-bd-input': '', 'data-bd-sel': '', style: { width: '280px', flex: '0 0 280px' },
+                value: selModel ?? '',
+                onChange: (e) => {
+                  const v = e.target.value
+                  setSelModel(v)
+                  const [pv, mv] = v.split('::')
+                  patch({ headlessProvider: pv || 'deepseek-official', headlessModel: mv || '' }, '模型')
+                },
+              },
+                h('option', { value: '' }, '跟默认（不覆盖）'),
+                ...modelChoices.map((m) => h('option', { key: `${m.provider}::${m.id}`, value: `${m.provider}::${m.id}` },
+                  `${m.label && m.label !== m.provider ? m.label + ' · ' : ''}${m.name}${m.name === m.id ? '' : `（${m.id}）`}`)),
+                (selModel && !modelChoices.some((m) => `${m.provider}::${m.id}` === selModel)
+                  ? h('option', { value: selModel }, `（当前保存的 ${selModel.split('::')[1] || selModel} 不在目录里）`)
+                  : null)))
+            : h('div', { 'data-bd-row': '' },
+              h('div', { 'data-bd-grow': '' },
+                h('div', { 'data-bd-label': '' }, '模型'),
+                h('div', { 'data-bd-note': '' }, catalog && !catalog.ok
+                  ? `读不到模型目录（${catalog.error || '未知原因'}）—— 先手填吧`
+                  : '读模型目录中…（读不到就只能手填）')),
+              h('input', {
+                'data-bd-input': '', style: { width: '200px', flex: '0 0 200px' },
+                value: modelText ?? '', placeholder: '留空 = 跟默认',
+                onChange: (e) => setModelText(e.target.value),
+                onBlur: () => patch({ headlessModel: String(modelText || '').trim() }, '模型'),
+              })),
+          h('div', { 'data-bd-row': '' },
+            h('div', { 'data-bd-grow': '' },
+              h('div', { 'data-bd-label': '' }, '思考等级'),
+              h('div', { 'data-bd-note': '' }, '越高越慢越贵；「跟默认」= 不写这一项')),
+            h('select', {
+              'data-bd-input': '', 'data-bd-sel': '', value: String(effortText ?? ''),
+              onChange: (e) => { setEffortText(e.target.value); patch({ headlessEffort: e.target.value }, '思考等级') },
+            },
+              h('option', { value: '' }, '跟默认'),
+              h('option', { value: 'low' }, 'low'),
+              h('option', { value: 'medium' }, 'medium'),
+              h('option', { value: 'high' }, 'high'),
+              h('option', { value: 'max' }, 'max'))),
+          h('div', { 'data-bd-row': '' },
+            h('button', { 'data-bd-btn': '', disabled: busy === 'model', onClick: onRefreshModel }, '看实际生效'),
+            h('div', { 'data-bd-note': '' },
+              !modelInfo ? '（点一下会去读 headless profile 里真正在用的那份）'
+                : `profile=${modelInfo.profile} · 实际 ${modelInfo.current ? `${modelInfo.current.provider} / ${modelInfo.current.model} / 思考 ${modelInfo.current.effort || '默认'}` : '读不到'}`
+                  + (modelInfo.injected ? ` · 本插件会覆盖成 ${modelInfo.injected.model}${modelInfo.injected.effort ? ' / ' + modelInfo.injected.effort : ''}` : ' · 本插件不覆盖')))),
+
+
 
         /* ── 发言与转写 ── */
         h('div', { 'data-bd-sec': '', 'data-bd-group': 'social', 'data-bd-away': tab === 'social' ? undefined : '' },
@@ -674,6 +855,144 @@ function WatchTab() {
               h('div', { 'data-bd-note': '' }, st.asrInstalling ? '正在装转写依赖（进度）：' : '转写依赖的日志（末尾）—— 只有「没字幕的视频」用得到它：'),
               h('pre', { 'data-bd-pre': '' }, st.asrTail)) : null) : null),
 
+        /* ── 看不看画面 ── */
+        h('div', { 'data-bd-sec': '', 'data-bd-group': 'taste', 'data-bd-away': tab === 'taste' ? undefined : '' },
+          h('div', { 'data-bd-h': '' }, '看不看画面'),
+          h(ToggleRow, {
+            label: '看视频画面（抽关键帧）',
+            note: '默认开。只下 480p 纯视频轨、把几帧拼成一张九宫格让模型"看"；关掉 = 只读字幕',
+            on: sw('seeVideo'),
+            onChange: (v) => patch({ seeVideo: v }, '看画面'),
+          }),
+          sw('seeVideo') ? h('div', { 'data-bd-sub': '' },
+            h('div', { 'data-bd-row': '' },
+              h('div', { 'data-bd-grow': '' },
+                h('div', { 'data-bd-label': '' }, '清晰度'),
+                h('div', { 'data-bd-note': '' }, '格子宽度按帧数自动算（4 帧≈890px / 9 帧≈600 / 16 帧≈450），下载高度会自动匹配；这里只是上限：设 480 更省流量，但小字会糊一点')),
+              h('select', {
+                'data-bd-input': '', 'data-bd-sel': '', value: String(cfg.frameHeight ?? 480),
+                onChange: (e) => patch({ frameHeight: Number(e.target.value) }, '清晰度'),
+              },
+                h('option', { value: '480' }, '480p'),
+                h('option', { value: '720' }, '720p'),
+                h('option', { value: '1080' }, '1080p'))),
+            h('div', { 'data-bd-row': '' },
+              h('div', { 'data-bd-grow': '' },
+                h('div', { 'data-bd-label': '' }, '每条抽几帧'),
+                h('div', { 'data-bd-note': '' }, '9 帧 = 3×3 九宫格（默认）；16 帧更不容易漏，但一张图更大')),
+              h('select', {
+                'data-bd-input': '', 'data-bd-sel': '', value: String(cfg.frameCount ?? 9),
+                onChange: (e) => patch({ frameCount: Number(e.target.value) }, '抽几帧'),
+              },
+                h('option', { value: '4' }, '4 帧'),
+                h('option', { value: '9' }, '9 帧'),
+                h('option', { value: '16' }, '16 帧'))),
+            h('div', { 'data-bd-row': '' },
+              h('div', { 'data-bd-grow': '' },
+                h('div', { 'data-bd-label': '' }, '每格配哪来的台词'),
+                h('div', { 'data-bd-note': '' }, '画面里烧的字幕可能是防和谐的字母/拼音；「总是本地转写」直接听音频——不会被改，但慢（4 分钟视频约 +40 秒）')),
+              h('select', {
+                'data-bd-input': '', 'data-bd-sel': '', value: String(cfg.frameAudio ?? 'auto'),
+                onChange: (e) => patch({ frameAudio: e.target.value }, '台词来源'),
+              },
+                h('option', { value: 'auto' }, '优先字幕轨'),
+                h('option', { value: 'always' }, '总是本地转写'))),
+            h(ToggleRow, {
+              label: '下载时用账号 Cookie',
+              note: '默认关：匿名就能下 480p，完全不碰你的号。开了才稳拿 720p/1080p，但下载请求会挂在账号上',
+              on: sw('useCookie'),
+              onChange: (v) => patch({ useCookie: v }, '下载用 Cookie'),
+            }),
+            h('div', { 'data-bd-note': '' },
+              `预估多花的 token：每条一张拼图（${effW}×${effH}，${fgrid[0]}×${fgrid[1]} 格 / ${fw}p）≈ ${tokPer.toLocaleString()} tokens；`,
+              nPerDay > 0
+                ? `按每天 ${nPerDay} 条算 ≈ ${(tokPerDay / 1000).toFixed(1)}k tokens／天。`
+                : '每天挑 0 条的话不额外花。',
+              h('br'),
+              '钱其实很便宜（每条不到一分钱）；真代价是这些图会在上下文里一直占着，一轮下来上下文明显变长。')
+          ) : h('div', { 'data-bd-note': '' }, '关着：只读字幕。便宜、快，但看不出「真人 / PPT 播报 / 录屏 / 剪辑」这种字幕永远说不清的事。')),
+
+        /* ── 额外看这些 / 订阅 ── */
+        h('div', { 'data-bd-sec': '', 'data-bd-group': 'daily', 'data-bd-away': tab === 'daily' ? undefined : '' },
+          h('div', { 'data-bd-h': '' }, '额外看这些（不算每日额度）'),
+          h('div', { 'data-bd-note': '' }, '粘 BV 号或视频链接，一行一个。点名看的不占每天那几条，也不进判重表。'),
+          h('textarea', {
+            'data-bd-input': '', rows: 3,
+            placeholder: 'BV1awJX6HEDM\nhttps://www.bilibili.com/video/BV1p4pn6REh7',
+            value: watchText, onChange: (e) => setWatchText(e.target.value),
+          }),
+          h('div', { 'data-bd-row': '' },
+            h('button', { 'data-bd-btn': '', disabled: busy === 'watch', onClick: onWatch }, '看这些'),
+            watchMsg ? h('div', { 'data-bd-note': '' }, watchMsg) : null),
+          st.active
+            ? h('div', { 'data-bd-msg': '', 'data-good': '' },
+              `⏳ ${st.active.why === 'watch' ? '点名看' : '一轮'}进行中：${st.active.stage} · 已 ${mmss(st.active.elapsed)}`
+              + (st.active.quiet >= 20 ? ` · ${st.active.quiet} 秒无新输出` : '')
+              + (st.active.stalled ? ' ⚠️ 可能卡住了' : '')
+              + (st.active.bvids ? ` · ${st.active.bvids.join('、')}` : ''))
+            : null,
+          st.lastExit && !st.lastExit.ok
+            ? h('div', { 'data-bd-msg': '', 'data-warn': '' },
+              `上一次跑（${st.lastExit.why || '一轮'}）失败：exit=${st.lastExit.code} —— 详情在 duty.log`)
+            : null,
+          h('div', { 'data-bd-note': '' }, '结果写到 out/watch-<时间>.md；一次最多 10 条。')),
+
+        h('div', { 'data-bd-sec': '', 'data-bd-group': 'taste', 'data-bd-away': tab === 'taste' ? undefined : '' },
+          h('div', { 'data-bd-h': '' }, '订阅（每一轮优先看）'),
+          h('div', { 'data-bd-note': '' },
+            '一行一个：UP 空间链接（space.bilibili.com/123）、合集链接（…/collectiondetail?sid=456）、'
+            + '或他的任意一条视频链接。一轮里先看订阅的新片，再搜关键词。'),
+          h('textarea', {
+            'data-bd-input': '', rows: 3,
+            placeholder: 'space.bilibili.com/3691011358329713',
+            value: subsText ?? '', onChange: (e) => setSubsText(e.target.value),
+          }),
+          h('div', { 'data-bd-row': '' },
+            h('button', { 'data-bd-btn': '', disabled: busy === 'subs', onClick: onSaveSubs }, '保存订阅'))),
+
+        /* ── 评论配图（表情包） ── */
+        h('div', { 'data-bd-sec': '', 'data-bd-group': 'social', 'data-bd-away': tab === 'social' ? undefined : '' },
+          h('div', { 'data-bd-h': '' }, '评论配图（表情包）'),
+          h('div', { 'data-bd-note': '' },
+            '把表情包放进目录，它**先看懂每张图**（一次性建索引），之后发评论时按语气挑一张；'
+            + '配图失败会自动退回纯文字。'),
+          h('div', { 'data-bd-row': '' },
+            h('div', { 'data-bd-grow': '' },
+              h('div', { 'data-bd-label': '' }, '表情包目录'),
+              h('div', { 'data-bd-note': '' }, '留空 = 插件家目录下的 stickers/')),
+            h('input', {
+              'data-bd-input': '', style: { width: '260px', flex: '0 0 260px' },
+              value: stickersDir ?? '', placeholder: '留空用默认',
+              onChange: (e) => setStickersDir(e.target.value),
+              onBlur: () => patch({ stickersDir: String(stickersDir || '').trim() }, '表情包目录'),
+            })),
+          h('div', { 'data-bd-row': '' },
+            h('div', { 'data-bd-grow': '' },
+              h('div', { 'data-bd-label': '' }, '什么时候配图'),
+              h('div', { 'data-bd-note': '' }, 'always = 每条都配；auto = 看评论语气自己决定（推荐）')),
+            h('select', {
+              'data-bd-input': '', 'data-bd-sel': '', value: String(cfg.stickerMode ?? 'off'),
+              onChange: (e) => patch({ stickerMode: e.target.value }, '配图频率'),
+            },
+              h('option', { value: 'off' }, '不配'),
+              h('option', { value: 'auto' }, '看情况'),
+              h('option', { value: 'always' }, '每条都配'))),
+          h('div', { 'data-bd-row': '' },
+            h('button', { 'data-bd-btn': '', disabled: stickerBusy, onClick: onViewStickers },
+              stickerBusy ? '读索引…' : '看看索引里有什么'),
+            h('button', { 'data-bd-btn': '', disabled: stickerBusy, onClick: onIndexStickers }, '给新图补描述'),
+            h('div', { 'data-bd-note': '' },
+              stickerView && stickerView.ok
+                ? `${stickerView.total} 张，已描述 ${stickerView.indexed} 张 · ${stickerView.dir}`
+                : (stickerView && !stickerView.ok ? '读不到：' + (stickerView.error || '未知') : '点一下看当前索引'))),
+          (stickerView && stickerView.ok && stickerView.items && stickerView.items.length) ? h('div', { 'data-bd-stickers': '' },
+            ...stickerView.items.map((it) => h('div', { key: it.name, 'data-bd-sticker': '' },
+              it.thumb ? h('img', { src: it.thumb, alt: it.name, 'data-bd-thumb': '' }) : h('div', { 'data-bd-thumb': '' }, '?'),
+              h('div', { 'data-bd-sname': '' }, it.name + (it.indexed ? '' : '（未描述）')),
+              it.desc ? h('div', { 'data-bd-sdesc': '' }, it.desc) : null,
+              (it.mood && it.mood.length) ? h('div', { 'data-bd-smood': '' }, it.mood.join(' / ')) : null))) : null,
+          h('div', { 'data-bd-note': '' },
+            '⚠️ B站 评论不能纯图，必须带文字；单条最多 9 张，这里只发 1 张。')),
         /* ── 关注什么 / 在哪儿刷 ── */
         h('div', { 'data-bd-sec': '', 'data-bd-group': 'taste', 'data-bd-away': tab === 'taste' ? undefined : '' },
           h('div', { 'data-bd-h': '' }, '关注什么'),
@@ -795,6 +1114,7 @@ function WatchTab() {
             h('button', { 'data-bd-btn': '', disabled: busy === 'report', onClick: onShowReport },
               report !== null ? '收起报告' : '看今天的报告'),
             h('button', { 'data-bd-btn': '', onClick: () => onOpenFolder('out') }, '打开报告文件夹'),
+            h('button', { 'data-bd-btn': '', onClick: () => onOpenFolder('report') }, '打开今天的报告'),
             h('button', { 'data-bd-btn': '', onClick: () => onOpenFolder('home') }, '打开家目录'),
             h('button', { 'data-bd-btn': '', disabled: busy === 'verify', onClick: onVerify },
               '复核评论'),
