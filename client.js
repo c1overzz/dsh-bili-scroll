@@ -49,9 +49,11 @@ window.__ModuleLoader__.load({
 
     const CSS = `
 [data-bd-page]{display:flex;flex-direction:column;gap:18px;padding:2px 2px 8px;max-width:640px;}
+    [data-bd-page][data-bd-wide]{max-width:none;width:100%;}
+    [data-bd-page][data-bd-wide] [data-bd-list]{grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px;}
 [data-bd-sec]{display:flex;flex-direction:column;gap:8px;}
 [data-bd-h]{font-size:11px;font-weight:600;letter-spacing:.04em;color:var(--dsw-alias-label-tertiary,#9aa0a6);}
-[data-bd-row]{display:flex;align-items:center;gap:10px;}
+[data-bd-row]{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
 [data-bd-grow]{flex:1;min-width:0;}
 [data-bd-label]{font-size:13px;}
 [data-bd-note]{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary,#9aa0a6);}
@@ -62,13 +64,16 @@ window.__ModuleLoader__.load({
   transition:left .15s;display:block;}
 [data-bd-sw][data-on] i{left:19px;}
 [data-bd-sw][disabled]{opacity:.45;cursor:default;}
-[data-bd-sub]{margin-left:14px;padding-left:12px;border-left:2px solid var(--dsw-alias-border-l2,rgba(255,255,255,.1));
+[data-bd-sub]{margin-left:14px;padding-left:12px;border-left:2px solid var(--dsw-alias-bg-layer-3,rgba(255,255,255,.1));
   display:flex;flex-direction:column;gap:10px;}
 [data-bd-input]{width:100%;box-sizing:border-box;padding:7px 9px;border-radius:8px;font-size:12px;
-  border:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.14));
-  background:var(--dsw-alias-bg-overlay,rgba(128,128,128,.12));color:inherit;font-family:inherit;}
+  border:1px solid var(--dsw-alias-bg-layer-3,rgba(255,255,255,.14));
+  background:var(--dsw-alias-bg-layer-4,rgba(128,128,128,.12));color:inherit;font-family:inherit;}
 [data-bd-input]:focus{outline:none;border-color:#3b82f6;}
 [data-bd-num]{width:88px;text-align:center;}
+[data-bd-btn]{padding:7px 12px;border-radius:8px;font-size:12px;cursor:pointer;font-family:inherit;white-space:nowrap;
+  border:1px solid var(--dsw-alias-bg-layer-3,rgba(255,255,255,.16));
+  background:var(--dsw-alias-bg-layer-4,rgba(128,128,128,.14));color:inherit;}
 /* 下拉框：固定宽度 + 不许被压缩 —— 否则 width:100% 会把左边那列挤成一字一行 */
 [data-bd-sel]{width:132px;flex:0 0 132px;}
 [data-bd-stickers]{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:10px;margin:8px 0;}
@@ -84,17 +89,55 @@ window.__ModuleLoader__.load({
 [data-bd-btn][data-primary]{background:#3b82f6;border-color:#3b82f6;color:#fff;}
 [data-bd-btn][disabled]{opacity:.5;cursor:default;}
 [data-bd-msg]{font-size:11px;line-height:16px;padding:7px 9px;border-radius:8px;word-break:break-all;
-  background:var(--dsw-alias-bg-overlay,rgba(128,128,128,.12));color:var(--dsw-alias-label-tertiary,#9aa0a6);}
+  background:var(--dsw-alias-bg-layer-4,rgba(128,128,128,.12));color:var(--dsw-alias-label-tertiary,#9aa0a6);}
 [data-bd-msg][data-warn]{color:#f59e0b;}
 [data-bd-msg][data-good]{color:#22c55e;}
 [data-bd-qr]{display:flex;gap:14px;align-items:flex-start;}
 [data-bd-qr] img{width:150px;height:150px;border-radius:8px;background:#fff;padding:6px;}
 [data-bd-pre]{margin:6px 0 0;padding:8px 9px;border-radius:8px;max-height:170px;overflow:auto;font-size:11px;
   line-height:15px;white-space:pre-wrap;word-break:break-all;
-  background:var(--dsw-alias-bg-overlay,rgba(0,0,0,.25));color:var(--dsw-alias-label-secondary,#c9ccd1);}
+  background:var(--dsw-alias-bg-layer-4,rgba(0,0,0,.25));color:var(--dsw-alias-label-secondary,#c9ccd1);}
+    /* ⭐ 2026-10-21 重做：卡片网格 + 颜色全部取「真实存在」的主题变量
+       （之前用了 --dsw-alias-bg-layer-1 / --dsw-alias-bg-layer-3 —— 这两个在应用里根本不存在 ⇒
+        fallback 落到硬编码深色，而文字用的 --dsw-alias-label-primary 是存在的 ⇒ 浅色主题下变近黑 ⇒ 黑底黑字看不见） */
+    [data-bd-list]{margin:10px 0 0;max-height:none;display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px;}
+    [data-bd-item]{display:flex;flex-direction:column;overflow:hidden;border-radius:12px;
+      background:var(--dsw-alias-bg-layer-1,rgba(127,127,127,.06));
+      border:1px solid var(--dsw-alias-bg-layer-3,rgba(127,127,127,.22));
+      color:var(--dsw-alias-label-primary,inherit);}
+    [data-bd-cover]{display:block;width:100%;aspect-ratio:16/9;height:auto;object-fit:cover;
+      background:var(--dsw-alias-bg-layer-2,rgba(127,127,127,.1));}
+    [data-bd-item-body]{display:flex;flex-direction:column;gap:4px;padding:9px 11px;min-width:0;}
+    [data-bd-item-t]{font-size:13px;line-height:18px;font-weight:600;
+      color:var(--dsw-alias-label-primary,inherit);
+      display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word;}
+    [data-bd-item-t] a{color:inherit;text-decoration:none;}
+    [data-bd-item-t] a:hover{text-decoration:underline;}
+    [data-bd-item-n]{font-size:11px;line-height:15px;color:var(--dsw-alias-label-tertiary,inherit);margin:0;}
+    [data-bd-item-why]{font-size:12px;line-height:17px;color:var(--dsw-alias-label-secondary,inherit);
+      display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
+    [data-bd-clickable]{cursor:pointer;transition:border-color .12s,background .12s;}
+    [data-bd-clickable]:hover{border-color:var(--dsw-alias-brand-primary,rgba(76,141,255,.5));
+      background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.1));}
+    [data-bd-tabs]{display:flex;gap:4px;padding:4px;border-radius:10px;background:var(--dsw-alias-bg-layer-2,rgba(127,127,127,.08));}
+    [data-bd-tab]{flex:1;min-width:0;cursor:pointer;font:inherit;font-size:13px;padding:7px 10px;border:0;border-radius:8px;background:transparent;color:var(--dsw-alias-label-secondary,inherit);}
+    [data-bd-tab]:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.1));}
+    [data-bd-tab][aria-selected=true]{background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,inherit);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.12);}
+    [data-bd-away]{display:none !important;}
+    [data-bd-chip]{cursor:pointer;white-space:nowrap;font:inherit;font-size:12px;padding:3px 10px;border-radius:999px;
+      border:1px solid var(--dsw-alias-bg-layer-3,rgba(127,127,127,.22));background:transparent;
+      color:var(--dsw-alias-label-secondary,inherit);}
+    [data-bd-chip]:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.1));}
+    [data-bd-chip][aria-selected=true]{color:var(--dsw-alias-label-primary,inherit);
+      border-color:var(--dsw-alias-brand-primary,rgba(76,141,255,.6));
+      background:color-mix(in srgb,var(--dsw-alias-brand-primary,#4c8dff) 16%,transparent);}
+    [data-bd-tier]{font-weight:600;color:var(--dsw-alias-label-secondary,inherit);}
+    [data-bd-tier='值得看']{color:#3fb950;}
+    [data-bd-tier='可以看']{color:#d29922;}
+    [data-bd-tier='不值当']{color:var(--dsw-alias-label-tertiary,inherit);}
 [data-bd-kv]{font-size:11px;line-height:18px;color:var(--dsw-alias-label-tertiary,#9aa0a6);word-break:break-all;}
 [data-bd-badge]{font-size:11px;padding:2px 7px;border-radius:6px;
-  background:var(--dsw-alias-bg-overlay,rgba(128,128,128,.14));color:var(--dsw-alias-label-secondary,#c9ccd1);}
+  background:var(--dsw-alias-bg-layer-4,rgba(128,128,128,.14));color:var(--dsw-alias-label-secondary,#c9ccd1);}
 `
 
     // ⚠️ 与 lib/state.mjs 的 WINDOWS 保持一致（官方口径：工作日 9–12、14–18 是高峰，其余都是谷时）
@@ -125,25 +168,82 @@ window.__ModuleLoader__.load({
 
     function useStatus(intervalMs) {
       const [st, setSt] = React.useState(null)
+      // ⭐ 2026-10-19（用户报"没有开关这一项，只能让 ai 帮我开"）：读不到配置时界面只显示"读设置中…"，
+      //    用户会以为是开关坏了 ✗ ⇒ 数一下连续失败次数，交给界面把话说清楚（版本太旧 / 没重启 / 读不到）
+      const [fails, setFails] = React.useState(0)
       React.useEffect(() => {
         let alive = true
         const tick = async () => {
           try {
             const d = await jget('/status')
-            if (alive && d?.ok) setSt(d)
-          } catch { /* 网络抖动就下次再问 */ }
+            if (!alive) return
+            if (d && d.ok) { setSt(d); setFails(0) } else setFails((n) => n + 1)
+          } catch { if (alive) setFails((n) => n + 1) }
         }
         tick()
         const t = setInterval(tick, intervalMs || 5000)
         return () => { alive = false; clearInterval(t) }
       }, [intervalMs])
-      return [st, setSt]
+      return [st, setSt, fails]
     }
 
     /* ────────────── 设置页正文 ────────────── */
 
+/* ────────────── 会话头那个 tab：它刷过的视频（最小实验版）────────────── */
+function WatchTab() {
+  const PAGE = 30
+  const onOpenUrl = (u) => { jpost('/open', { what: 'url', u }).catch(() => {}) }
+  const [rows, setRows] = React.useState(null)
+  const [st, setSt] = React.useState('')      // '' | picked | skipped | commented
+  const [tier, setTier] = React.useState('')  // '' | 值得看 / 可以看 / 不值当
+  const [offset, setOffset] = React.useState(0)
+  const [total, setTotal] = React.useState(0)
+  const load = (s, t, off) => {
+    setRows(null)
+    const q = `/watched?limit=${PAGE}&offset=${off}` + (s ? '&state=' + s : '') + (t ? '&tier=' + encodeURIComponent(t) : '')
+    jget(q).then((r) => {
+      if (!r || !r.ok) { setRows([]); return }
+      setRows(r.rows || [])
+      setTotal(Number(r.total) || 0)
+    }).catch(() => setRows([]))
+  }
+  React.useEffect(() => { load("", "", 0) }, [])
+  const pick = (kind, v) => {
+    const next = (kind === 'state' ? st : tier) === v ? '' : v
+    if (kind === 'state') setSt(next); else setTier(next)
+    setOffset(0)
+    load(kind === 'state' ? next : st, kind === 'tier' ? next : tier, 0)
+  }
+  const go = (d) => { const n = Math.max(0, Math.min(offset + d, Math.max(0, total - 1))); setOffset(n); load(st, tier, n) }
+  const chip = (label, on, active) => h('button', { 'data-bd-chip': '', 'aria-selected': active ? 'true' : 'false', onClick: on }, label)
+  return h('div', { 'data-bd-page': '', 'data-bd-wide': '' },
+    h('div', { 'data-bd-row': '' },
+      chip('全部', () => pick('state', ''), st === ''),
+      chip('挑了', () => pick('state', 'picked'), st === 'picked'),
+      chip('跳过', () => pick('state', 'skipped'), st === 'skipped'),
+      chip('发给你了', () => pick('state', 'commented'), st === 'commented'),
+      h('div', { 'data-bd-note': '' }, rows === null ? '读取中…' : `共 ${total} 条`)),
+    h('div', { 'data-bd-row': '' },
+      chip('值得看', () => pick('tier', '值得看'), tier === '值得看'),
+      chip('可以看', () => pick('tier', '可以看'), tier === '可以看'),
+      chip('不值当', () => pick('tier', '不值当'), tier === '不值当')),
+    rows && rows.length ? h('div', { 'data-bd-list': '' },
+      rows.map((x, i) => h('div', { key: x.day + x.bvid, 'data-bd-item': '', 'data-bd-clickable': '', title: '在浏览器打开', onClick: () => onOpenUrl(x.url) },
+        i < 30 ? h('img', { 'data-bd-cover': '', src: API + '/cover?bv=' + x.bvid, loading: 'lazy', alt: '' }) : null,
+        h('div', { 'data-bd-item-body': '' },
+          h('div', { 'data-bd-item-t': '' }, x.title),
+          h('div', { 'data-bd-item-n': '' }, `${x.day} · ${x.up} · `, x.picked ? '挑中了' : '跳过', (x.delivered || x.commented) ? ' · 已发给你' : '',
+            x.tier ? h('span', { 'data-bd-tier': x.tier }, ' · ' + x.tier) : null),
+          x.why ? h('div', { 'data-bd-item-why': '' }, x.why) : null))))
+      : h('div', { 'data-bd-note': '' }, rows === null ? '' : '这一类还没有记录 —— 跑一轮之后就有了'),
+    total > PAGE ? h('div', { 'data-bd-row': '' },
+      h('button', { 'data-bd-btn': '', disabled: offset <= 0, onClick: () => go(-PAGE) }, '上一页'),
+      h('div', { 'data-bd-note': '' }, `${offset + 1}–${Math.min(offset + PAGE, total)} / ${total}`),
+      h('button', { 'data-bd-btn': '', disabled: offset + PAGE >= total, onClick: () => go(PAGE) }, '下一页')) : null)
+}
+
     function Panel() {
-      const [st, setSt] = useStatus(3000)
+      const [st, setSt, fails] = useStatus(3000)
       const [busy, setBusy] = React.useState('')
       const [msg, setMsg] = React.useState('')
       const [msgTone, setMsgTone] = React.useState('')
@@ -160,6 +260,9 @@ window.__ModuleLoader__.load({
       const [watchText, setWatchText] = React.useState('')
       const [watchMsg, setWatchMsg] = React.useState('')
       const [ws, setWs] = React.useState(null)
+      const [favFolders, setFavFolders] = React.useState(null)   // 收藏夹列表（下拉用，null = 还没读）
+      const [favId, setFavId] = React.useState(null)             // 选中的收藏夹 fid（字符串）
+      const [persona, setPersona] = React.useState(null)   // 人设提示词草稿
       const [rl, setRl] = React.useState(null)
       const [newVer, setNewVer] = React.useState('')       // 发现的新版本号（空 = 没发现）          // 日报形态：full / brief / off
       // ⚠️ 输入框必须绑"本地草稿"：页面每 5 秒轮询 /status，服务端那份会把 config 盖掉
@@ -167,10 +270,22 @@ window.__ModuleLoader__.load({
       const [perDay, setPerDay] = React.useState(null)
       const [perRound, setPerRound] = React.useState(null)
       const [replyPer, setReplyPer] = React.useState(null)
+      const [dmUid, setDmUid] = React.useState(null)        // 私信收件人 UID（本地草稿）
+      const [dmWatch, setDmWatch] = React.useState(null)          // 私信双向开关
+      const [dmMode, setDmMode] = React.useState(null)      // 投递方式：off / only / both
       const [mention, setMention] = React.useState(null)
       const [login, setLogin] = React.useState(null)
       const [runNote, setRunNote] = React.useState(null)
       const [report, setReport] = React.useState(null)        // 非 null = 报告已展开   // 顶部那行状态（跑一轮/装依赖的反馈原来在最底下，看不见）
+      const [watchedRows, setWatchedRows] = React.useState(null)   // null = 还没读；[] = 读到了但没记录
+      const [watchedPicked, setWatchedPicked] = React.useState(false) // 只看挑中的
+    const [watchedState, setWatchedState] = React.useState('')
+    const [watchedTier, setWatchedTier] = React.useState('')
+    const [watchedOffset, setWatchedOffset] = React.useState(0)
+    const [watchedTotal, setWatchedTotal] = React.useState(0)
+    const [tab, setTab] = React.useState('daily')   // daily | taste | social | adv
+      const [diag, setDiag] = React.useState(null)      // 诊断信息文本
+      const [checks, setChecks] = React.useState(null)   // 环境自检结果 [{name, ok, detail, fix}]
       const [loginState, setLoginState] = React.useState('')
       const [loginTone, setLoginTone] = React.useState('')
       /* ⚠️ 扫码轮询的 timer 必须能停：切走设置页后还在跑的话会在已卸载的组件上 setState，
@@ -195,12 +310,24 @@ window.__ModuleLoader__.load({
             : '')
         }
         if (cfg && ws === null) setWs(cfg.workspace || '')
+        if (cfg && persona === null) setPersona(cfg.personaPrompt || '')
         if (cfg && rl === null) setRl(cfg.reportLevel || 'full')
         if (cfg && perDay === null) setPerDay(String(cfg.perDay ?? 5))
         if (cfg && perRound === null) setPerRound(String(cfg.commentPerRound ?? 1))
         if (cfg && replyPer === null) setReplyPer(String(cfg.replyPerRound ?? 1))
         if (cfg && mention === null) setMention(cfg.mentionName || '')
+        if (cfg && dmUid === null) setDmUid(cfg.dmUid ? String(cfg.dmUid) : '')
+        if (cfg && dmMode === null) setDmMode(cfg.dmMode || 'only')
+        if (cfg && dmWatch === null) setDmWatch(cfg.dmWatch !== false)   // 2.0 起默认开
+        if (cfg && favId === null) setFavId(String(cfg.favFolderId ?? 0))
       }, [cfg])
+
+      // ⭐ 收藏夹列表：只读一次，读不到就空列表（别每 5 秒重拉）
+      React.useEffect(() => {
+        if (favFolders !== null) return
+        jget('/fav-folders').then((r) => { if (alive.current) setFavFolders(r && r.ok ? (r.folders || []) : []) })
+          .catch(() => { if (alive.current) setFavFolders([]) })
+      }, [favFolders])
 
       const win = { ...DEFAULT_WINDOWS, ...(st?.windows || {}) }
 
@@ -220,6 +347,28 @@ window.__ModuleLoader__.load({
         } catch (e) { say(String(e?.message ?? e), 'warn') }
         finally { setBusy('') }
       }
+
+      // 「它刷过的视频」：点开才读，读一次就留着（不会每 5 秒重拉）
+    const WATCH_PAGE = 30
+    const onLoadWatched = async (st, tr, off) => {
+      setBusy('watched')
+      try {
+        const q = `/watched?limit=${WATCH_PAGE}&offset=${off}` + (st ? '&state=' + st : '') + (tr ? '&tier=' + encodeURIComponent(tr) : '')
+        const r = await jget(q)
+        setWatchedRows(r && r.ok ? (r.rows || []) : [])
+        setWatchedTotal(r && r.ok ? (Number(r.total) || 0) : 0)
+        setWatchedState(st)
+        setWatchedTier(tr)
+        setWatchedOffset(off)
+        if (!r || r.ok === false) say('读不到记录：' + ((r && r.error) || '未知原因'), 'warn')
+      } catch (e) { say('读不到记录：' + String(e?.message ?? e), 'warn') } finally { setBusy('') }
+    }
+    const onWatchPick = (kind, v) => {
+      const cur = kind === 'state' ? watchedState : watchedTier
+      const next = cur === v ? '' : v
+      return onLoadWatched(kind === 'state' ? next : watchedState, kind === 'tier' ? next : watchedTier, 0)
+    }
+    const onWatchPage = (d) => onLoadWatched(watchedState, watchedTier, Math.max(0, watchedOffset + d))
 
       const onShowReport = async () => {
         if (report !== null) { setReport(null); return }       // 再点一次收起
@@ -243,6 +392,25 @@ window.__ModuleLoader__.load({
           else say(`复核完 ${n} 条：公开可见 ${vis} 条，其余「没查到」（可能还在审核 —— 看不到不等于没发出去）。结果也追加到今天的报告末尾了。`, vis ? 'good' : 'warn')
           if (r.report) setReport(null)
         } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
+      }
+
+      // ⭐ 把"要日志"变成"点一下"（2026-10-21）
+      const onDiagnose = async () => {
+        setBusy('diag')
+        try {
+          const r = await jget('/diagnose')
+          const text = String(r?.text || '（没拿到诊断信息）')
+          setDiag(text)
+          copyText(text).catch(() => {})
+          say('诊断信息已生成并复制到剪贴板', 'good')
+        } catch (e) { say('生成诊断信息失败：' + String(e?.message ?? e), 'warn') } finally { setBusy('') }
+      }
+      const onSelfCheck = async () => {
+        setBusy('selfcheck')
+        try {
+          const r = await jget('/selfcheck')
+          setChecks(Array.isArray(r?.items) ? r.items : [])
+        } catch (e) { say('自检失败：' + String(e?.message ?? e), 'warn') } finally { setBusy('') }
       }
 
       const copyText = async (text) => {
@@ -277,10 +445,11 @@ window.__ModuleLoader__.load({
         try {
           const r = await jget('/update')
           if (r && r.ok && r.latest) {
+            const from = r.source === 'github' ? '（npm 上还没发上去，这个版本来自 GitHub）' : ''
             if (r.hasNew) {
               setNewVer(r.latest)
-              say('有新版 v' + r.latest + '（你的是 v' + r.current + '）—— 点右边的「一键升级」，完了重启一次 dsh', 'warn')
-            } else say('已经是最新版 v' + r.current, 'good')
+              say('有新版 v' + r.latest + '（你的是 v' + r.current + '）' + from + ' —— 点右边的「一键升级」，完了重启一次 dsh', 'warn')
+            } else say('已经是最新版 v' + r.current + from, 'good')
           } else {
             say('查不到最新版（可能网络不通）—— 你现在的版本是 v' + ((r && r.current) || '?'))
           }
@@ -365,9 +534,18 @@ window.__ModuleLoader__.load({
         finally { setBusy('') }
       }
 
+      const onFavToday = async () => {
+        setBusy('fav')
+        try {
+          const r = await jpost('/fav-today', {})
+          if (!r || r.ok === false) say('收藏没做成：' + ((r && r.error) || '未知原因'), 'warn')
+          else say(`收藏好了：${r.added}/${r.total} 条` + (r.failures && r.failures.length ? `（失败 ${r.failures.length} 条）` : ''), 'good')
+        } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
+      }
+
       const onSaveText = async () => {
         const list = String(kws || '').split('\n').map((s) => s.trim()).filter(Boolean)
-        await patch({ keywords: list, workspace: String(ws || '').trim() }, '关键词与工作区')
+        await patch({ keywords: list, personaPrompt: String(persona || '').trim() }, '关键词 / 人设 / 工作区')
       }
 
       React.useEffect(() => {
@@ -428,7 +606,13 @@ window.__ModuleLoader__.load({
       }
 
       if (!cfg) {
-        return h('div', { 'data-bd-page': '' }, h('div', { 'data-bd-note': '' }, '读设置中…'))
+        return h('div', { 'data-bd-page': '' },
+          h('div', { 'data-bd-note': '' }, fails >= 3
+            ? '读不到插件配置（已经试了 ' + fails + ' 次）。常见原因有三个：装的还是 0.1.11 / 0.1.12（那两版有 bug，会卡在这里）；刚装完没重启 dsh；或者插件加载失败。'
+            : '读设置中…'),
+          fails >= 6 ? h('div', { 'data-bd-note': '' },
+            '可以先试：升级到最新版（dsh plugin --profile web add github:c1overzz/dsh-bili-scroll）→ 重启 dsh；还不行就把 ' +
+            '%USERPROFILE%\\.dsh\\bili-duty\\duty.log 的最后几十行发给作者。') : null)
       }
 
       const sw = (k) => Boolean(cfg[k])
@@ -479,8 +663,17 @@ window.__ModuleLoader__.load({
           runNote ? h('div', { 'data-bd-msg': '', 'data-good': runNote.tone === 'good' ? '' : undefined,
             'data-warn': runNote.tone === 'warn' ? '' : undefined }, runNote.t) : null,
 
+
         /* ── 定时 ── */
-        h('div', { 'data-bd-sec': '' },
+        h('div', { 'data-bd-tabs': '' },
+          [['daily', '日常'], ['taste', '偏好'], ['social', '互动'], ['adv', '高级']].map(([v, label]) =>
+            h('button', { key: v, 'data-bd-tab': '', 'aria-selected': tab === v ? 'true' : 'false', onClick: () => setTab(v) }, label))),
+
+        h('div', { 'data-bd-row': '' },
+          h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: Boolean(busy), onClick: onSaveText }, '保存'),
+          msg ? h('div', { 'data-bd-msg': '', 'data-good': msgTone === 'good' ? '' : undefined, 'data-warn': msgTone === 'warn' ? '' : undefined }, msg) : null),
+
+        h('div', { 'data-bd-sec': '', 'data-bd-group': 'daily', 'data-bd-away': tab === 'daily' ? undefined : '' },
           h('div', { 'data-bd-h': '' }, '什么时候自己跑'),
           h(ToggleRow, {
             label: '峰谷时段自动刷',
@@ -498,7 +691,7 @@ window.__ModuleLoader__.load({
             }))) : null),
 
         /* ── 一轮挑几条 ── */
-        h('div', { 'data-bd-sec': '' },
+        h('div', { 'data-bd-sec': '', 'data-bd-group': 'daily', 'data-bd-away': tab === 'daily' ? undefined : '' },
           h('div', { 'data-bd-h': '' }, '一轮挑几条'),
           h('div', { 'data-bd-row': '' },
             h('div', { 'data-bd-grow': '' },
@@ -512,7 +705,7 @@ window.__ModuleLoader__.load({
             })),
           st.lastRunAt ? h('div', { 'data-bd-note': '' }, `上次跑：${new Date(st.lastRunAt).toLocaleString('zh-CN')}`) : null),
         /* ── 这一轮用哪个模型 ── */
-        h('div', { 'data-bd-sec': '' },
+        h('div', { 'data-bd-sec': '', 'data-bd-group': 'adv', 'data-bd-away': tab === 'adv' ? undefined : '' },
           h('div', { 'data-bd-h': '' }, '这一轮用哪个模型'),
           h('div', { 'data-bd-note': '' }, '定时刷、点名看用的都是 headless 那一档。留空就跟着 profile 的默认走 —— 这是以前的黑盒。'),
           (modelChoices.length > 0)
@@ -571,15 +764,51 @@ window.__ModuleLoader__.load({
 
 
         /* ── 发言与转写 ── */
-        h('div', { 'data-bd-sec': '' },
-          h('div', { 'data-bd-h': '' }, '它会不会替你说话'),
-          h(ToggleRow, {
+        h('div', { 'data-bd-sec': '', 'data-bd-group': 'social', 'data-bd-away': tab === 'social' ? undefined : '' },
+          h('div', { 'data-bd-h': '' }, '它怎么把结果给你'),
+          h('div', { 'data-bd-label': '' }, '投递方式'),
+          h('select', {
+            'data-bd-input': '', value: dmMode ?? 'only',
+            onChange: (e) => { setDmMode(e.target.value); patch({ dmMode: e.target.value }, '投递方式') },
+          },
+            h('option', { value: 'only' }, '只发私信 —— 一条公开评论都不发（默认，最不打扰别人）'),
+            h('option', { value: 'off' }, '只发评论 —— 在视频下面 @ 你（公开，别人也看得见）'),
+            h('option', { value: 'both' }, '私信 + 评论 —— 两边都发')),
+          h('div', { 'data-bd-label': '' }, '发给谁 / @ 谁（B站 昵称）'),
+          h('input', {
+            'data-bd-input': '', value: mention ?? '',
+            placeholder: '填你自己的 B站 昵称；私信按它查 UID，评论也 @ 它',
+            onChange: (e) => setMention(e.target.value),
+            onBlur: () => { const v = String(mention || '').trim(); setMention(v); patch({ mentionName: v }, '发给谁') },
+          }),
+          (dmMode && dmMode !== 'off') ? h('div', { 'data-bd-note': '' }, '私信会发给他（用昵称自动查一次 UID）；查不到就改回只发评论，不会一条都不送。') : null,
+          (dmMode && dmMode !== 'off') ? h('div', { 'data-bd-note': '' }, '私信内容 = 本轮每条的「标题 + 链接 + 一句话」，一轮合并成一条发。⚠️ 建议先让这个号和收件人互关：B站 对「陌生人私信」会限流，还可能不弹提醒。') : null,
+
+          (dmMode === 'off' || dmMode === 'both') ? h('div', { 'data-bd-sep': '' }) : null,
+          (dmMode === 'off' || dmMode === 'both') ? h(ToggleRow, {
+            label: '自动评论并 @ 你',
+            note: '开了之后它会在挑中的视频下面留评论，并 @ 上面那个人',
+            on: sw('autoComment'),
+            onChange: (v) => patch({ autoComment: v }, '自动评论'),
+          }) : null,
+          (dmMode === 'off' || dmMode === 'both') && sw('autoComment') ? h('div', { 'data-bd-sub': '' },
+            h('div', { 'data-bd-row': '' },
+              h('div', { 'data-bd-grow': '' },
+                h('div', { 'data-bd-label': '' }, '每轮最多发几条评论'),
+                h('div', { 'data-bd-note': '' }, '每条评论里 @ 一次上面那个人；填 0 = 这一轮不发评论')),
+              h('input', {
+                'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 0, max: 20,
+                value: perRound ?? '',
+                onChange: (e) => setPerRound(e.target.value),
+                onBlur: () => { const n = Math.max(0, Math.min(Number(perRound) || 0, 20)); setPerRound(String(n)); patch({ commentPerRound: n }, '每轮发几条评论') },
+              }))) : null,
+          (dmMode === 'off' || dmMode === 'both') ? h(ToggleRow, {
             label: '回复评论（只回楼中楼）',
-            note: '默认关；开了之后它只回「直接回复到你那条评论下面的人」，不参与讨论',
+            note: '开了之后它只回「直接回复到你那条评论下面的人」，不参与讨论',
             on: sw('replyToComments'),
             onChange: (v) => patch({ replyToComments: v }, '回复评论'),
-          }),
-          sw('replyToComments') ? h('div', { 'data-bd-sub': '' },
+          }) : null,
+          (dmMode === 'off' || dmMode === 'both') && sw('replyToComments') ? h('div', { 'data-bd-sub': '' },
             h('div', { 'data-bd-row': '' },
               h('div', { 'data-bd-grow': '' },
                 h('div', { 'data-bd-label': '' }, '每轮最多回几条'),
@@ -588,34 +817,23 @@ window.__ModuleLoader__.load({
                 'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 1, max: 10,
                 value: replyPer ?? '',
                 onChange: (e) => setReplyPer(e.target.value),
-                onBlur: () => { const n = Math.max(1, Math.min(Number(replyPer) || 1, 10)); setReplyPer(String(n)); patch({ replyPerRound: n }, '每轮几条回复') },
+                onBlur: () => { const n = Math.max(1, Math.min(Number(replyPer) || 1, 10)); setReplyPer(String(n)); patch({ replyPerRound: n }, '每轮回几条') },
               }))) : null,
+
+          h('div', { 'data-bd-sep': '' }),
           h(ToggleRow, {
-            label: '自动评论并 @ 你',
-            note: '默认关；开了之后它会在挑中的视频下面留评论，并 @ 你填的那个人',
-            on: sw('autoComment'),
-            onChange: (v) => patch({ autoComment: v }, '自动评论'),
+            label: '私信双向（有人私信它就回一句）',
+            note: '默认开。你在 B站 私信里跟它说话，它会回你（陌生人的私信不回）。⭐ 查私信本身不花 token，只有真收到你的新消息时才花一点点。',
+            on: Boolean(dmWatch),
+            onChange: (v) => { setDmWatch(v); patch({ dmWatch: v }, '私信双向') },
           }),
-          sw('autoComment') ? h('div', { 'data-bd-sub': '' },
-            h('div', { 'data-bd-row': '' },
-              h('div', { 'data-bd-grow': '' },
-                h('div', { 'data-bd-label': '' }, '每轮最多发几条评论'),
-                h('div', { 'data-bd-note': '' }, '每条评论里 @ 一次下面那个人；填 0 = 这一轮不发评论')),
-              h('input', {
-                'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 0, max: 20,
-                value: perRound ?? '',
-                onChange: (e) => setPerRound(e.target.value),
-                // ⭐ 0 是合法值（= 这一轮不发评论）；范围与 index.js 的 clampPatch 一致（0–20）
-                onBlur: () => { const n = Math.max(0, Math.min(Number(perRound) || 0, 20)); setPerRound(String(n)); patch({ commentPerRound: n }, '每轮几条评论') },
-              })),
-            h('div', { 'data-bd-label': '' }, '要 @ 谁（B站 昵称）'),
-            h('input', {
-              'data-bd-input': '', value: mention ?? '',
-              placeholder: '填你要 @ 的那个人的 B站 昵称；留空 = 只写报告、不发评论',
-              onChange: (e) => setMention(e.target.value),
-              onBlur: () => { const v = String(mention || '').trim(); setMention(v); patch({ mentionName: v }, '要 @ 谁') },
-            }),
-            h('div', { 'data-bd-note': '' }, '留空的话它就不发评论了 —— 因为评论存在的意义就是 @ 那一下')) : null,
+          // ⭐ 2026-10-23：**不加新输入框**，只把"它认谁当主人"显示出来 —— 填错当场看得见 ✓
+          (st.ownerInfo && dmWatch) ? h('div', { 'data-bd-note': '' },
+            '它会认这个人当主人：',
+            (st.ownerInfo.name ? st.ownerInfo.name + ' · ' : ''),
+            'uid ' + st.ownerInfo.uid,
+            st.ownerInfo.self ? '（就是现在登录的这个号）' : '',
+            ' —— 想换人，改上面那个「要 @ 谁」就行') : null,
           h(ToggleRow, {
             label: '本地转写没字幕的视频',
             note: '默认关；开了以后，没字幕的视频会在本机转写一遍（不花 API 钱）',
@@ -638,7 +856,7 @@ window.__ModuleLoader__.load({
               h('pre', { 'data-bd-pre': '' }, st.asrTail)) : null) : null),
 
         /* ── 看不看画面 ── */
-        h('div', { 'data-bd-sec': '' },
+        h('div', { 'data-bd-sec': '', 'data-bd-group': 'taste', 'data-bd-away': tab === 'taste' ? undefined : '' },
           h('div', { 'data-bd-h': '' }, '看不看画面'),
           h(ToggleRow, {
             label: '看视频画面（抽关键帧）',
@@ -695,7 +913,7 @@ window.__ModuleLoader__.load({
           ) : h('div', { 'data-bd-note': '' }, '关着：只读字幕。便宜、快，但看不出「真人 / PPT 播报 / 录屏 / 剪辑」这种字幕永远说不清的事。')),
 
         /* ── 额外看这些 / 订阅 ── */
-        h('div', { 'data-bd-sec': '' },
+        h('div', { 'data-bd-sec': '', 'data-bd-group': 'daily', 'data-bd-away': tab === 'daily' ? undefined : '' },
           h('div', { 'data-bd-h': '' }, '额外看这些（不算每日额度）'),
           h('div', { 'data-bd-note': '' }, '粘 BV 号或视频链接，一行一个。点名看的不占每天那几条，也不进判重表。'),
           h('textarea', {
@@ -719,7 +937,7 @@ window.__ModuleLoader__.load({
             : null,
           h('div', { 'data-bd-note': '' }, '结果写到 out/watch-<时间>.md；一次最多 10 条。')),
 
-        h('div', { 'data-bd-sec': '' },
+        h('div', { 'data-bd-sec': '', 'data-bd-group': 'taste', 'data-bd-away': tab === 'taste' ? undefined : '' },
           h('div', { 'data-bd-h': '' }, '订阅（每一轮优先看）'),
           h('div', { 'data-bd-note': '' },
             '一行一个：UP 空间链接（space.bilibili.com/123）、合集链接（…/collectiondetail?sid=456）、'
@@ -733,7 +951,7 @@ window.__ModuleLoader__.load({
             h('button', { 'data-bd-btn': '', disabled: busy === 'subs', onClick: onSaveSubs }, '保存订阅'))),
 
         /* ── 评论配图（表情包） ── */
-        h('div', { 'data-bd-sec': '' },
+        h('div', { 'data-bd-sec': '', 'data-bd-group': 'social', 'data-bd-away': tab === 'social' ? undefined : '' },
           h('div', { 'data-bd-h': '' }, '评论配图（表情包）'),
           h('div', { 'data-bd-note': '' },
             '把表情包放进目录，它**先看懂每张图**（一次性建索引），之后发评论时按语气挑一张；'
@@ -776,22 +994,22 @@ window.__ModuleLoader__.load({
           h('div', { 'data-bd-note': '' },
             '⚠️ B站 评论不能纯图，必须带文字；单条最多 9 张，这里只发 1 张。')),
         /* ── 关注什么 / 在哪儿刷 ── */
-        h('div', { 'data-bd-sec': '' },
+        h('div', { 'data-bd-sec': '', 'data-bd-group': 'taste', 'data-bd-away': tab === 'taste' ? undefined : '' },
           h('div', { 'data-bd-h': '' }, '关注什么'),
           h('textarea', {
             'data-bd-input': '', rows: 5, placeholder: '一行一个关键词；留空用内置那几组',
             value: kws ?? '', onChange: (e) => setKws(e.target.value),
           }),
-          h('div', { 'data-bd-label': '' }, '工作区（它按这里的 AGENTS.md 认设定）'),
-          h('input', {
-            'data-bd-input': '', value: ws ?? '',
-            placeholder: '填你自己的工作区路径（留空 = 不读人设，按中性说话）',
-            onChange: (e) => setWs(e.target.value),
+          h('div', { 'data-bd-label': '' }, '它按什么说话（人设提示词，可留空）'),
+          h('textarea', {
+            'data-bd-input': '', rows: 6,
+            placeholder: '想让它怎么说话就写在这儿 —— 比如「叫我某某，说话简短点，别用 emoji」。也可以直接填一个文件路径（如 D:\\deepseek\\AGENTS.md，或它所在的那个目录），每次运行都会重新读那个文件。留空 = 按中性说话（不扮演任何人）。',
+            value: persona ?? '', onChange: (e) => setPersona(e.target.value),
           }),
           h('div', { 'data-bd-note': '' },
-            '⭐ 想让它按你的设定说话，这里要填你自己平时用的那个工作区（放 AGENTS.md 的那个目录）；',
-            h('br'),
-            '留空不等于"用你的工作区" —— 那是不读设定、按中性说话（以前会去猜 dsh 进程自己的目录，容易读错人设）。'),
+            (st.personaFromWs && String(persona || '').trim() === '')
+              ? '你现在还是用「工作区」里那份 AGENTS.md 说话的（照旧生效）。想把它搬到这儿改，就把上面的路径填成本机那个目录。'
+              : '改完点下面「保存」；下一轮就按这个说话。'),
           h('div', { 'data-bd-label': '' }, '日报写多细'),
           h('select', {
             'data-bd-input': '', value: rl ?? 'full',
@@ -800,12 +1018,66 @@ window.__ModuleLoader__.load({
             h('option', { value: 'full' }, '完整 —— 每条：标题 / UP / 为什么值得（默认）'),
             h('option', { value: 'brief' }, '薄 —— 每条一两行，只留值不值得 + 链接'),
             h('option', { value: 'off' }, '不写 —— 只发评论，不生成日报文件')),
+        h('div', { 'data-bd-label': '' }, '自动收藏到（这一轮挑中的视频存进你的收藏夹）'),
+        h('select', {
+          'data-bd-input': '', value: favId ?? '0',
+          onChange: (e) => { setFavId(e.target.value); patch({ favFolderId: Math.max(0, Number(e.target.value) || 0) }, '自动收藏') },
+        },
+          h('option', { value: '0' }, '不收藏（默认）'),
+          (favFolders || []).map((f) => h('option', { key: String(f.id), value: String(f.id) }, `${f.title}（${f.count} 条）`))),
+        h('div', { 'data-bd-row': '' },
+          h('button', { 'data-bd-btn': '', disabled: busy === 'fav', onClick: onFavToday }, '补收藏今天的'),
+          h('div', { 'data-bd-note': '' },
+            favFolders === null ? '收藏夹列表读取中…'
+              : (favFolders.length ? '每轮跑完会把挑中的视频存进上面选的收藏夹'
+                : '读不到收藏夹 —— 先「扫码登录」，或过会儿重开设置页'))),
+
           h('div', { 'data-bd-row': '' },
-            h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: Boolean(busy), onClick: onSaveText }, '保存'),
             msg ? h('div', { 'data-bd-msg': '', 'data-good': msgTone === 'good' ? '' : undefined, 'data-warn': msgTone === 'warn' ? '' : undefined }, msg) : null)),
 
         /* ── 环境与账号 ── */
-        h('div', { 'data-bd-sec': '' },
+        /* ── 它刷过的视频 ── */
+        h('div', { 'data-bd-sec': '', 'data-bd-group': 'daily', 'data-bd-away': tab === 'daily' ? undefined : '' },
+          h('div', { 'data-bd-h': '' }, '它刷过的视频'),
+          h('div', { 'data-bd-row': '' },
+            h('button', { 'data-bd-btn': '', disabled: busy === 'watched', onClick: () => (watchedRows !== null ? setWatchedRows(null) : onLoadWatched(watchedState, watchedTier, watchedOffset)) },
+              watchedRows !== null ? '收起' : '看它刷过什么'),
+            h('div', { 'data-bd-note': '' },
+              watchedRows === null ? '（点一下读出来；数据来自判重表 seen.md + 报告里的档位）'
+                : (watchedTotal ? `共 ${watchedTotal} 条` : '这一类还没有记录 —— 跑一轮之后就有了'))),
+          watchedRows !== null ? h('div', { 'data-bd-row': '' },
+            [['', '全部'], ['picked', '挑了'], ['skipped', '跳过'], ['commented', '发给你了']].map(([v, label]) =>
+              h('button', { key: v || 'all', 'data-bd-chip': '', 'aria-selected': watchedState === v ? 'true' : 'false', onClick: () => onWatchPick('state', v) }, label)),
+            ['值得看', '可以看', '不值当'].map((v) =>
+              h('button', { key: v, 'data-bd-chip': '', 'aria-selected': watchedTier === v ? 'true' : 'false', onClick: () => onWatchPick('tier', v) }, v))) : null,
+          watchedRows !== null && watchedRows.length ? h('div', { 'data-bd-list': '' },
+            watchedRows.map((x, i) => h('div', { key: x.day + x.bvid, 'data-bd-item': '' },
+              // 封面走宿主代理（直连 i0.hdslb.com 会被防盗链挡，也等于把使用者 IP 交出去）
+              i < 40 ? h('img', { 'data-bd-cover': '', src: API + '/cover?bv=' + x.bvid, loading: 'lazy', alt: '' }) : null,
+              h('div', { 'data-bd-item-body': '' },
+                h('div', { 'data-bd-item-t': '' },
+                  h('a', { href: x.url, target: '_blank', rel: 'noreferrer' }, x.title)),
+                h('div', { 'data-bd-item-n': '' },
+                  `${x.day} · ${x.up} · `, x.picked ? '挑中了' : '跳过', (x.delivered || x.commented) ? ' · 已发给你' : '',
+                  x.tier ? h('span', { 'data-bd-tier': x.tier }, ' · ' + x.tier) : null),
+                x.why ? h('div', { 'data-bd-item-why': '' }, x.why) : null))))
+            : null,
+          watchedRows !== null && watchedTotal > WATCH_PAGE ? h('div', { 'data-bd-row': '' },
+            h('button', { 'data-bd-btn': '', disabled: watchedOffset <= 0, onClick: () => onWatchPage(-WATCH_PAGE) }, '上一页'),
+            h('div', { 'data-bd-note': '' }, `${watchedOffset + 1}–${Math.min(watchedOffset + WATCH_PAGE, watchedTotal)} / ${watchedTotal}`),
+            h('button', { 'data-bd-btn': '', disabled: watchedOffset + WATCH_PAGE >= watchedTotal, onClick: () => onWatchPage(WATCH_PAGE) }, '下一页')) : null),
+
+        h('div', { 'data-bd-sec': '', 'data-bd-group': 'adv', 'data-bd-away': tab === 'adv' ? undefined : '' },
+          h('div', { 'data-bd-row': '' },
+            h('button', { 'data-bd-btn': '', disabled: busy === 'diag', onClick: onDiagnose }, '复制诊断信息'),
+            h('button', { 'data-bd-btn': '', disabled: busy === 'selfcheck', onClick: onSelfCheck }, '环境自检'),
+            h('div', { 'data-bd-note': '' }, '出问题时先点这两个：第一个把环境+日志拼成一段（已自动复制），第二个逐项告诉你哪一步不通。')),
+          checks && checks.length ? h('div', { 'data-bd-list': '', 'data-bd-checks': '' },
+            checks.map((x) => h('div', { key: x.name, 'data-bd-item': '', 'data-bd-item-t': '' },
+              h('div', { 'data-bd-item-t': '' }, (x.ok ? '正常 · ' : '有问题 · ') + x.name),
+              h('div', { 'data-bd-item-n': '' }, x.detail || ''),
+              x.ok ? null : h('div', { 'data-bd-item-why': '' }, '怎么办：' + (x.fix || '把诊断信息发给作者'))))) : null,
+          diag ? h('pre', { 'data-bd-pre': '' }, diag) : null,
           h('div', { 'data-bd-h': '' }, '环境与账号'),
           h('div', { 'data-bd-row': '' },
             h('button', { 'data-bd-btn': '', disabled: busy === 'install', onClick: onInstall },
@@ -827,9 +1099,12 @@ window.__ModuleLoader__.load({
               '手机 B站 → 我的 → 扫一扫。',
               h('br'),
               '确认时选「记住我 / 长期」那张 —— 选 24 小时的话，明天就得重扫。')) : null),
+          (Array.isArray(st.missingDeps) && st.missingDeps.length)
+            ? h('div', { 'data-bd-note': '' }, '还缺这几项：' + st.missingDeps.join(' / ') + '（qrcode = 画登录二维码用的）—— 点一次「重装主依赖」就会补上')
+            : null,
 
         /* ── 它是怎么干活的（给他看的） ── */
-        h('div', { 'data-bd-sec': '' },
+        h('div', { 'data-bd-sec': '', 'data-bd-group': 'adv', 'data-bd-away': tab === 'adv' ? undefined : '' },
           h('div', { 'data-bd-h': '' }, '它的地盘'),
           h('div', { 'data-bd-kv': '' },
             `家目录：${st.home}`,
@@ -864,6 +1139,17 @@ window.__ModuleLoader__.load({
           { name: 'settings.section', id: 'bili-scroll', order: 30, label: '刷B站' },
           () => h(Panel),
         ))
+
+  // ⭐ 2026-10-20 实验：会话头第三个 tab（0.2.1 里这个槽位真实存在；老版本没有就静默跳过）
+  try {
+    slots.inject('conversation.view', () => slots.register({
+      name: 'conversation.view',
+      id: 'bili-watched',
+      order: 20,
+      label: '刷过的视频',
+      scope: 'session',
+    }, () => h(WatchTab)))
+  } catch (e) { /* 没有这个槽位就算了 */ }
       },
     }
   },

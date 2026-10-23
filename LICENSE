@@ -1,6 +1,6 @@
 MIT License
 
-Copyright (c) 2026 dsh-bili-duty contributors
+Copyright (c) 2026 c1overzz
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -19,13 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----------------------------------------------------------------------------
-
-本插件内含第三方代码：`vendor/bilibili-mcp/`
-  · 项目：bilibili-mcp
-  · 许可证：MIT，Copyright (c) 2026 AGI_Ananas
-  · 完整许可见该目录下的 LICENSE 文件
-
-（如果你要改版权署名 —— 比如换成你自己的名字或 GitHub 用户名 —— 改上面第一行那个
-  "dsh-bili-duty contributors" 就行。）

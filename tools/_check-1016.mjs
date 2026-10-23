@@ -177,6 +177,11 @@ ok(idx.includes('ELECTRON_RUN_AS_NODE'), '桌面版 spawn 没带 ELECTRON_RUN_AS
 ok(idx.includes('process.resourcesPath'), '桌面版找不到 dsh 时没有去应用目录里找')
 ok(idx.includes('找不到 dsh'), '找不到 dsh 时没有出声（静默失败）')
 
+// ⑯ 私信投递（摘 PR #9）：默认必须关、收信人要 UID、正文有 500 字上限
+ok(/dmMode: z\.string\(\)\.default\('off'\)/.test(idx), 'dmMode 默认不是 off（会改变老用户的行为）')
+ok(idx.includes('commentOn'), '没有 commentOn 这个统一判据（工具闸和提示词会各说各话）')
+ok(duty.includes('500') || idx.includes('500'), '私信没写 500 字上限（超了接口直接拒）')
+
 console.log(fail.length ? '❌ 有 ' + fail.length + ' 条没过（共 ' + total + ' 条）：' : `✅ 全部 ${total} 条断言通过`)
 for (const f of fail) console.log('   - ' + f)
 process.exit(fail.length ? 1 : 0)

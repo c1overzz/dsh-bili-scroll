@@ -137,6 +137,17 @@ def tool():
     return deco
 
 
+# ⭐⭐ 2026-10-23 安全加固（issue #39）：**白名单以前只挡"注册"，不挡"直接调用"** ——
+#    agent 手里有 python/shell，可以自己写脚本 import 这个文件再调函数 ⇒ 闸门形同虚设。
+#    ⇒ 每个"会往 B站 写东西"的函数入口都过一遍 _guard()；没开就直接返回、什么都不做 ✓
+def _guard(name: str) -> str:
+    """没开这个工具就返回一句提示；开着返回空串。"""
+    if _ALLOWED and name not in _ALLOWED:
+        print(f"[bili-mcp] 拒绝调用 {name}（不在 BILI_MCP_TOOLS 白名单里）", file=sys.stderr)
+        return f"这个工具没开：{name}"
+    return ""
+
+
 def load_credential() -> Credential:
     """从文件加载凭证"""
     if not CRED_FILE.exists():
@@ -717,6 +728,8 @@ async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0, pic: st
     Returns:
         发表结果。带图失败时会**自动退回纯文字**再发一次，并在 pic_error 里说明原因。
     """
+    _deny = _guard("bili_reply")
+    if _deny: return _deny
     cred = get_cred()
     v = video.Video(bvid=bvid, credential=cred)
     info = await v.get_info()
@@ -894,316 +907,6 @@ def _extract_cover_from_video(video_path: str) -> Picture:
         if os.path.isfile(tmp_cover2):
             os.remove(tmp_cover2)
     raise RuntimeError(f"无法从视频截取封面: {video_path}")
-
-
-
-
-@tool()
-async def bili_send_dynamic(
-    text: str,
-    images: list[str] | None = None,
-    topic_id: int = 0,
-    schedule_time: int = 0,
-) -> str:
-    """
-    发布B站图文动态
-
-    Args:
-        text: 动态文本内容，支持@和表情（如 [doge]）
-        images: 图片列表，每项可以是本地文件路径或图片URL，最多9张。为空则发布纯文字动态
-        topic_id: 话题ID（可选，0表示不关联话题）
-        schedule_time: 定时发布的Unix时间戳（可选，0表示立即发布）
-
-    Returns:
-        发布结果，包含动态ID
-    """
-    if not text or not text.strip():
-        return json.dumps({"success": False, "error": "text 不能为空"}, ensure_ascii=False)
-
-    cred = get_cred()
-
-    dyn = dynamic.BuildDynamic.empty()
-    dyn.add_plain_text(text.strip())
-    # 上传图片
-    if images:
-        for img_path in images[:9]:
-            try:
-                if not img_path or not img_path.strip():
-                    continue
-                img_path = img_path.strip()
-                if img_path.startswith(("http://", "https://")):
-                    pic = await Picture.async_from_url(img_path)
-                else:
-                    if not os.path.isfile(img_path):
-                        return json.dumps({"success": False, "error": f"图片文件不存在: {img_path}"}, ensure_ascii=False)
-                    pic = Picture.from_file(img_path)
-                dyn.add_image(pic)
-            except Exception as e:
-                return json.dumps({"success": False, "error": f"图片处理失败: {img_path} - {str(e)}"}, ensure_ascii=False)
-
-    if topic_id:
-        dyn.set_topic(topic_id)
-
-    if schedule_time > 0:
-        dyn.set_send_time(schedule_time)
-
-    try:
-        result = await dynamic.send_dynamic(info=dyn, credential=cred)
-        return json.dumps({
-            "success": True,
-            "message": "动态发布成功",
-            "data": result if isinstance(result, dict) else str(result),
-        }, ensure_ascii=False)
-    except Exception as e:
-        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
-
-
-# ========== Tool 9: 上传视频 ==========
-
-@tool()
-async def bili_upload_video(
-    video_path: str,
-    title: str,
-    desc: str = "",
-    tid: int = 124,
-    tags: str = "AI",
-    cover_path: str = "",
-    source: str = "",
-    dynamic_text: str = "",
-    no_reprint: bool = True,
-) -> str:
-    """
-    上传视频到B站
-
-    Args:
-        video_path: 视频文件的本地路径
-        title: 视频标题（最多80字）
-        desc: 视频简介描述
-        tid: 分区ID，默认124（趣味科普人文-社科·法律·心理）。
-             常用分区：17=单机游戏 21=日常 95=数码 122=野生技术协会
-             124=社科 160=生活记录 171=电子竞技 183=影视杂谈
-             188=科技资讯 201=科学 207=财经商业 208=科技 209=手工
-             230=其他(生活) 231=美食 234=健身 32=完结动画
-        tags: 标签，逗号分隔，如"AI,教程,编程"（至少1个标签）
-        cover_path: 封面图片路径（可选，不填则B站自动截取）
-        source: 转载来源URL（非原创时必填）
-        dynamic_text: 粉丝动态文本（可选，投稿时同步发布的动态内容）
-        no_reprint: 是否启用未经作者授权禁止转载，默认True
-
-    Returns:
-        上传结果，包含BV号
-    """
-    # ---- 参数校验 ----
-    if not video_path or not video_path.strip():
-        return json.dumps({"success": False, "error": "video_path 不能为空，请提供视频文件的本地路径"}, ensure_ascii=False)
-
-    video_path = video_path.strip()
-    if not os.path.isfile(video_path):
-        return json.dumps({"success": False, "error": f"视频文件不存在: {video_path}"}, ensure_ascii=False)
-
-    if not title or not title.strip():
-        return json.dumps({"success": False, "error": "title 不能为空"}, ensure_ascii=False)
-
-    cred = get_cred()
-
-    try:
-        # 准备分P
-        page = VideoUploaderPage(
-            path=video_path,
-            title=title.strip()[:80],
-            description=(desc or "")[:250],
-        )
-
-        # 标签处理
-        tag_list = [t.strip() for t in (tags or "").split(",") if t.strip()]
-        if not tag_list:
-            tag_list = ["视频"]
-
-        # 判断原创/转载
-        is_original = not bool(source and source.strip())
-
-        # 封面：用户提供 > 自动从视频截取
-        if cover_path and cover_path.strip() and os.path.isfile(cover_path.strip()):
-            cover_pic = Picture.from_file(cover_path.strip())
-        else:
-            cover_pic = _extract_cover_from_video(video_path)
-
-        meta = VideoMeta(
-            tid=tid,
-            title=title.strip()[:80],
-            desc=desc or "",
-            cover=cover_pic,
-            tags=tag_list,
-            original=is_original,
-            source=source.strip() if source and source.strip() else None,
-            no_reprint=no_reprint if is_original else False,
-            dynamic=dynamic_text.strip() if dynamic_text and dynamic_text.strip() else None,
-        )
-
-        uploader = VideoUploader(
-            pages=[page],
-            meta=meta,
-            credential=cred,
-        )
-
-        # 上传事件回调（记录进度）
-        progress_info = {"phase": "初始化"}
-
-        @uploader.on("__ALL__")
-        async def on_event(data: dict):
-            progress_info["phase"] = str(data)
-
-        result = await uploader.start()
-        return json.dumps({
-            "success": True,
-            "message": "视频上传成功",
-            "data": result if isinstance(result, dict) else str(result),
-        }, ensure_ascii=False)
-    except Exception as e:
-        return json.dumps({
-            "success": False,
-            "error": str(e),
-            "last_phase": progress_info.get("phase", "unknown") if "progress_info" in dir() else "init",
-        }, ensure_ascii=False)
-
-
-# ========== Tool 10: 上传多P视频 ==========
-
-@tool()
-async def bili_upload_video_multi(
-    video_paths: list[str],
-    page_titles: list[str],
-    title: str,
-    desc: str = "",
-    tid: int = 124,
-    tags: str = "AI",
-    cover_path: str = "",
-    source: str = "",
-) -> str:
-    """
-    上传多P视频到B站（多个分P合并为一个投稿）
-
-    Args:
-        video_paths: 视频文件路径列表，如["/path/p1.mp4", "/path/p2.mp4"]
-        page_titles: 各分P标题列表，与video_paths一一对应
-        title: 视频总标题
-        desc: 视频简介
-        tid: 分区ID，默认124
-        tags: 标签，逗号分隔
-        cover_path: 封面图片路径（可选）
-        source: 转载来源URL（非原创时必填）
-
-    Returns:
-        上传结果
-    """
-    cred = get_cred()
-
-    if not video_paths:
-        return json.dumps({"success": False, "error": "video_paths 不能为空"}, ensure_ascii=False)
-    if not page_titles:
-        return json.dumps({"success": False, "error": "page_titles 不能为空"}, ensure_ascii=False)
-    if len(video_paths) != len(page_titles):
-        return json.dumps({"success": False, "error": "video_paths 和 page_titles 数量必须一致"}, ensure_ascii=False)
-
-    try:
-        pages = []
-        for i, vp in enumerate(video_paths):
-            vp = (vp or "").strip()
-            if not vp or not os.path.isfile(vp):
-                return json.dumps({"success": False, "error": f"文件不存在: {vp}"}, ensure_ascii=False)
-            pages.append(VideoUploaderPage(
-                path=vp,
-                title=(page_titles[i] or "").strip()[:80] or f"P{i+1}",
-                description="",
-            ))
-
-        tag_list = [t.strip() for t in (tags or "").split(",") if t.strip()] or ["视频"]
-        is_original = not bool(source and source.strip())
-
-        # 封面：用户提供 > 从第一个视频自动截取
-        if cover_path and cover_path.strip() and os.path.isfile(cover_path.strip()):
-            cover_pic = Picture.from_file(cover_path.strip())
-        else:
-            cover_pic = _extract_cover_from_video(pages[0].path)
-
-        meta = VideoMeta(
-            tid=tid,
-            title=(title or "").strip()[:80],
-            desc=desc or "",
-            cover=cover_pic,
-            tags=tag_list,
-            original=is_original,
-            source=source.strip() if source and source.strip() else None,
-        )
-
-        uploader = VideoUploader(pages=pages, meta=meta, credential=cred)
-
-        result = await uploader.start()
-        return json.dumps({
-            "success": True,
-            "message": f"多P视频上传成功（共{len(pages)}P）",
-            "data": result if isinstance(result, dict) else str(result),
-        }, ensure_ascii=False)
-    except Exception as e:
-        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
-
-
-# ========== Tool 11: 发布专栏文章 (Opus) ==========
-
-@tool()
-async def bili_send_opus(
-    title: str,
-    content: str,
-    images: list[str] | None = None,
-    category_id: int = 0,
-) -> str:
-    """
-    发布B站图文（Opus，新版专栏）
-
-    Args:
-        title: 文章标题
-        content: 文章正文内容（纯文本，段落用换行分隔）
-        images: 文章中插入的图片路径或URL列表（可选）
-        category_id: 分类ID（可选，0表示不指定）
-
-    Returns:
-        发布结果
-    """
-    cred = get_cred()
-
-    dyn = dynamic.BuildDynamic.empty()
-
-    # 专栏动态以纯文本+图片方式构建
-    # 标题作为第一行加粗
-    full_text = f"【{title}】\n\n{content}"
-    dyn.add_plain_text(full_text)
-
-    if images:
-        for img_path in images:
-            try:
-                if not img_path or not img_path.strip():
-                    continue
-                img_path = img_path.strip()
-                if img_path.startswith(("http://", "https://")):
-                    pic = await Picture.async_from_url(img_path)
-                else:
-                    pic = Picture.from_file(img_path)
-                dyn.add_image(pic)
-            except Exception as e:
-                pass  # 图片失败不阻断发布
-
-    try:
-        result = await dynamic.send_dynamic(info=dyn, credential=cred)
-        return json.dumps({
-            "success": True,
-            "message": "图文发布成功",
-            "data": result if isinstance(result, dict) else str(result),
-        }, ensure_ascii=False)
-    except Exception as e:
-        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
-
-
-# ========== Tool 12: 查询分区列表 ==========
 
 @tool()
 async def bili_video_zones() -> str:
@@ -1555,6 +1258,8 @@ async def bili_send_message(receiver_uid: int, text: str) -> str:
     Returns:
         发送结果
     """
+    _deny = _guard("bili_send_message")
+    if _deny: return _deny
     cred = get_cred()
 
     if not text or not text.strip():
@@ -1567,10 +1272,29 @@ async def bili_send_message(receiver_uid: int, text: str) -> str:
             msg_type=session.EventType.TEXT,
             content=text.strip(),
         )
+        # ⭐ 2.0.4（issue #35）：**接口没抛异常 ≠ 真的送到了** ——
+        #    以前只要不抛就报 success: True，而 B站 可能出现 code=0 却没给投递回执（msg_key）的情况 ✗
+        #    回执就在返回值里：有 msg_key 才算发出去；code 非 0 直接算失败 ✓
+        data = result if isinstance(result, dict) else {}
+        code = data.get("code", 0)
+        inner = data.get("data")
+        msg_key = data.get("msg_key") or (inner.get("msg_key") if isinstance(inner, dict) else None)
+        if code not in (0, None):
+            return json.dumps({
+                "success": False,
+                "error": f"接口拒绝（code={code}）：{data.get('message') or data.get('msg') or '未知原因'}",
+                "data": data,
+            }, ensure_ascii=False)
+        if not msg_key:
+            return json.dumps({
+                "success": False,
+                "error": "接口回了成功，但**没有投递回执（msg_key）** ⇒ 可能没真正送到（常见于：对方不接受陌生人私信 / 被风控）",
+                "data": data,
+            }, ensure_ascii=False)
         return json.dumps({
             "success": True,
-            "message": f"私信已发送给UID:{receiver_uid}",
-            "data": result if isinstance(result, dict) else str(result),
+            "message": f"私信已投递（回执 {str(msg_key)[:12]}…）",
+            "data": data,
         }, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
