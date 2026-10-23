@@ -2517,6 +2517,39 @@ function reportMeta() {
   }
 
   try {
+  // ⭐ 2026-10-24 安全加固（issue #88 第二道栅栏）：调 DSH 自己的 `connection.requestRejection`
+  //    —— 这是内核 `/api` 路由用的**同一道**准入判决（含浏览器鉴权 cookie 校验），
+  //    所以插件永远不会比内核更弱。拿不到栅栏时 **fail-closed**，不是放行。
+  //    ⚠️ 两个易错点，都对着 `connection` 服务的公开契约写：
+  //      ① 入参是 `ConnectionTrustRequest = { headers }`，**不是**原始的 IncomingMessage；
+  //      ② 必须**逐请求**取 connection：浏览器半身要到插件加载之后才被 provide 出来，
+  //         在 apply 时快照一次会让栅栏在整个进程生命周期内失效。
+  const connectionStatusFor = (req) => {
+    let conn
+    try { conn = ctx.get('connection') } catch { return 503 }
+    if (!conn) return 503                    // 拿不到栅栏 ⇒ fail-closed
+    const trustRequest = { headers: req.headers }
+    try {
+      // 首选 requestRejection：契约最短 —— 直接给 `401 | 403 | undefined`
+      //（undefined 表示「这道栅栏放行」，与内核 /api 的判决一致）
+      if (typeof conn.requestRejection === 'function') {
+        const status = conn.requestRejection(trustRequest)
+        return status === undefined ? undefined : status
+      }
+      // 老/异构宿主：admit 返回 `{ peer }` 或 `{ rejection: 401|403 }`
+      if (typeof conn.admit === 'function') {
+        const admission = conn.admit(trustRequest)
+        if (admission && typeof admission === 'object' && admission.rejection !== undefined) {
+          return admission.rejection
+        }
+        return undefined
+      }
+      return 503                             // service 在、但两个方法都没有 ⇒ fail-closed
+    } catch {
+      return 503                             // 判决过程抛错 ⇒ 绝不放行
+    }
+  }
+
   const sameOriginOk = (req) => {
     try {
       const host = String(req.headers.host || '')
@@ -2526,7 +2559,17 @@ function reportMeta() {
       if (!pick) return true   // 不是浏览器发的（本机脚本/宿主内部）—— 本机进程本来就有权限
       try {
         const u = new URL(pick)
-        return /^(127\.0\.0\.1|localhost|\[::1\])$/i.test(u.hostname)
+        // ⭐ 2026-10-24：**端口也要比**（issue #88 补充）。
+        //    以前只比 u.hostname ⇒ 本机上跑在别的端口的任何服务的页面
+        //    （另一个 dev server / Jupyter / 任何有 XSS 的本地页）都能驱动这些写接口。
+        //    这里要求 Origin 的 host:port 与请求的 Host 完全一致（同为回环）。
+        const originAuthority = String(u.host || '').toLowerCase()
+        const hostAuthority = host.toLowerCase()
+        if (originAuthority && originAuthority === hostAuthority) return true
+        // 没写端口时按协议补默认端口再比（http→80 / https→443）
+        const defaultPort = u.protocol === 'https:' ? '443' : '80'
+        const withPort = `${u.hostname}:${u.port || defaultPort}`.toLowerCase()
+        return withPort === hostAuthority
       } catch { return false }
     } catch { return false }
   }
@@ -2535,7 +2578,14 @@ function reportMeta() {
       path: '/api/bili-duty',
   // ⭐ 2026-10-23 安全加固（审计点名"未鉴权的控制接口"）：**只接受本机同源请求** ——
   //    别的网页在你浏览器里也能打到 127.0.0.1，所以要比对 Host 与本机、Origin/Referer 与同源 ✓
+  // ⭐ 2026-10-24 第二道（issue #88）：先过内核自己的 connection 准入判决，拿不到就 503。
+  //    顺序是「先内核栅栏，再结构化兜底」：内核判决更严格（带 cookie 鉴权），结构化那层只是补充。
       handler: async (req, res) => {
+    const rejection = connectionStatusFor(req)
+    if (rejection !== undefined) {
+      try { sendJson(res, rejection, { ok: false, error: '请求未通过宿主准入判决' }) } catch { /* 忽略 */ }
+      return
+    }
     if (!sameOriginOk(req)) {
       try { sendJson(res, 403, { ok: false, error: '只接受本机同源请求' }) } catch { /* 忽略 */ }
       return
