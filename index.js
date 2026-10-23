@@ -76,6 +76,10 @@ export const Config = !z ? undefined : z.object({
   headlessEffort: z.string().default('').extra('volatile', true),
   /** 下载视频时带账号 Cookie（默认关：匿名够用；开了才稳拿 720p/1080p） */
   useCookie: z.boolean().default(false).extra('volatile', true),
+  /** 表情包目录（留空 = <插件家>/stickers）*/
+  stickersDir: z.string().default('').extra('volatile', true),
+  /** 评论配图：off=不发 / always=每条都配 / auto=看语气自己决定 */
+  stickerMode: z.string().default('off').extra('volatile', true),
   /** ⭐ 每轮最多发几条评论（每条里 @ 一次下面那个人）；**有效范围 0–20，口径见 clampPatch**（0 = 不发评论）
    *  ⚠️ 这里故意**不加 `.max(20)`**：schema 校验不过 ⇒ cordis 拒收这条 entry ⇒ **整条插件不激活** ✗
    *     （跟 schemastery 拿不到时的降级同一个道理）—— 范围一律由 clampPatch 在**写**和**读**两头钳。 */
@@ -172,7 +176,7 @@ export function apply(ctx, config) {
    */
   const DEFAULTS = {
     perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small', seeVideo: true, frameHeight: 480, frameCount: 9, useCookie: false,
-    subs: [], frameAudio: 'auto', headlessModel: '', headlessProvider: 'deepseek-official', headlessEffort: '',
+    subs: [], frameAudio: 'auto', stickersDir: '', stickerMode: 'off', headlessModel: '', headlessProvider: 'deepseek-official', headlessEffort: '',
     keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1,
   }
   const normalize = (src, base) => {
@@ -207,6 +211,8 @@ export function apply(ctx, config) {
     if ('replyToComments' in p) p.replyToComments = Boolean(p.replyToComments)
     if ('replyPerRound' in p) p.replyPerRound = Math.max(1, Math.min(Number(p.replyPerRound) || 1, 10))
     if ('commentPerRound' in p) p.commentPerRound = Math.max(0, Math.min(Number(p.commentPerRound) || 0, 20))
+    if ('stickerMode' in p) p.stickerMode = ['off', 'always', 'auto'].includes(String(p.stickerMode)) ? String(p.stickerMode) : 'off'
+    if ('stickersDir' in p) p.stickersDir = String(p.stickersDir ?? '').trim().slice(0, 300)
     // 本分支新增的字段（看画面 / 订阅 / 模型）也在这里钳 —— 写和读两头都过 clampPatch
     if ('frameHeight' in p) p.frameHeight = [480, 720, 1080].includes(Number(p.frameHeight)) ? Number(p.frameHeight) : 480
     if ('frameCount' in p) p.frameCount = Math.max(4, Math.min(Number(p.frameCount) || 9, 16))
@@ -406,6 +412,29 @@ export function apply(ctx, config) {
   })
 
   tool({
+    name: 'bili_stickers',
+    description: '列表情包目录，并给「还没描述过」的图拼一张预览图。**先 read_image 看这张图**，'
+      + '再用 bili_sticker_save 写下每张图的描述/情绪/适用场景 —— 以后配图才能选得准。\n'
+      + '已描述过的不会重复让你看。',
+    parameters: { limit: { type: 'number', description: '这次最多拼几张（默认 9）' } },
+    async execute(args) {
+      const a = {}
+      if (Number(args?.limit) > 0) a.limit = Number(args.limit)
+      return call('bili_stickers', a)
+    },
+  })
+
+  tool({
+    name: 'bili_sticker_save',
+    description: '保存表情包描述（看完 bili_stickers 的预览图之后用）。items 是 JSON 数组字符串，'
+      + '每项 {file, desc, mood[], fits, avoid}。',
+    parameters: { items: { type: 'string', description: 'JSON 数组字符串' } },
+    async execute(args) {
+      return call('bili_sticker_save', { items: String(args?.items ?? '') })
+    },
+  })
+
+  tool({
     name: 'bili_watch',
     description: '点名看几条视频（BV 号或链接，逗号/换行都行）：读字幕 + 抽帧看画面 + 翻评论，'
       + '写成一份 watch-*.md。**不占每天刷B站的名额**，也不进判重表。',
@@ -450,6 +479,7 @@ export function apply(ctx, config) {
       text: { type: 'string', description: '评论正文（短、干净、纯文本 @；别写敏感词）' },
       rpid: { type: 'number', description: '要回复的评论 id（0/不填 = 发新评论）' },
       force: { type: 'boolean', description: '本人当场让你发的，传 true 越过"自动评论关着"的闸' },
+      pic: { type: 'string', description: '配图（表情包文件名，见 bili_stickers）；留空 = 纯文字' },
     },
     async execute(args) {
       if ((!cfg.autoComment || !cfg.mentionName) && !args.force) {
@@ -463,6 +493,7 @@ export function apply(ctx, config) {
         bvid: String(args.bvid ?? ''),
         text: String(args.text ?? ''),
         rpid: Number(args.rpid) || 0,
+        pic: String(args.pic ?? ''),
       })
     },
   })
@@ -749,6 +780,10 @@ export function apply(ctx, config) {
         ? `开着的（每轮最多 ${cfg.commentPerRound} 条评论，每条在正文里纯文本 @ ${cfg.mentionName}，150 字内）`
         : '关着的（只写报告，别发评论）'}。`
       + (cfg.replyToComments
+      + (String(cfg.stickerMode || 'off') === 'off' ? ''
+        : `评论配图：${cfg.stickerMode === 'always' ? '每条都配一张表情包' : '看这条评论的语气自己决定配不配'}；`
+          + `表情包目录 ${cfg.stickersDir || join(stateDir, 'stickers')}，先读 index.json 挑 mood 对得上的那张，`
+          + `没有合适的就发纯文字（宁可不配也别乱配）；配图失败会自动退回纯文字。`)
         ? `回复评论：开着（每轮最多回 ${Number(cfg.replyPerRound) || 1} 条）—— 只回「直接回复到你那条评论下面的人」，回完记进报告；找不到你那条评论就跳过，别硬找。`
         : `回复评论：关着（一个字都不要回任何人 —— 有人回复你那条评论也不要理）。`)
       + `最后用一句话汇报你挑到了什么。现在几点了自己看一眼系统时间。`
@@ -774,6 +809,9 @@ export function apply(ctx, config) {
       'bili_up_videos', 'bili_collection_videos']   // 本分支：订阅查询
     if (cfg.seeVideo !== false) list.push('bili_frames')   // 看画面关掉就不给它这只
     if (cfg.autoComment || cfg.replyToComments) list.push('bili_reply')   // 只有真要发评论才给这只
+    if (cfg.autoComment || cfg.replyToComments) {                          // 配图相关（含建索引）
+      list.push('bili_stickers', 'bili_sticker_save')
+    }
     return list
   }
 
@@ -1488,7 +1526,7 @@ export function apply(ctx, config) {
       const body = await readBody(req)
       const patch = {}
       for (const k of ['perDay', 'peakValley', 'noon', 'night', 'autoComment', 'transcribe', 'asrModel',
-        'seeVideo', 'frameHeight', 'frameCount', 'useCookie', 'frameAudio',
+        'seeVideo', 'frameHeight', 'frameCount', 'useCookie', 'frameAudio', 'stickersDir', 'stickerMode',
         'commentPerRound', 'mentionName',
         'keywords', 'subs', 'headlessModel', 'headlessProvider', 'headlessEffort', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound']) {
         if (k in body) patch[k] = body[k]

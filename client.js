@@ -145,6 +145,7 @@ window.__ModuleLoader__.load({
       const [modelText, setModelText] = React.useState(null)
       const [effortText, setEffortText] = React.useState(null)
       const [modelInfo, setModelInfo] = React.useState(null)
+      const [stickersDir, setStickersDir] = React.useState(null)
       const [catalog, setCatalog] = React.useState(null)
       const [selModel, setSelModel] = React.useState(null)
       const [subsText, setSubsText] = React.useState(null)
@@ -179,6 +180,7 @@ window.__ModuleLoader__.load({
         if (cfg && subsText === null) setSubsText((cfg.subs || []).join('\n'))
         if (cfg && modelText === null) setModelText(cfg.headlessModel || '')
         if (cfg && effortText === null) setEffortText(cfg.headlessEffort || '')
+        if (cfg && stickersDir === null) setStickersDir(cfg.stickersDir || '')
         if (cfg && selModel === null) {
           setSelModel(String(cfg.headlessModel || '').trim()
             ? `${String(cfg.headlessProvider || 'deepseek-official').trim()}::${String(cfg.headlessModel).trim()}`
@@ -701,6 +703,35 @@ window.__ModuleLoader__.load({
           h('div', { 'data-bd-row': '' },
             h('button', { 'data-bd-btn': '', disabled: busy === 'subs', onClick: onSaveSubs }, '保存订阅'))),
 
+        /* ── 评论配图（表情包） ── */
+        h('div', { 'data-bd-sec': '' },
+          h('div', { 'data-bd-h': '' }, '评论配图（表情包）'),
+          h('div', { 'data-bd-note': '' },
+            '把表情包放进目录，它**先看懂每张图**（一次性建索引），之后发评论时按语气挑一张；'
+            + '配图失败会自动退回纯文字。'),
+          h('div', { 'data-bd-row': '' },
+            h('div', { 'data-bd-grow': '' },
+              h('div', { 'data-bd-label': '' }, '表情包目录'),
+              h('div', { 'data-bd-note': '' }, '留空 = 插件家目录下的 stickers/')),
+            h('input', {
+              'data-bd-input': '', style: { width: '260px', flex: '0 0 260px' },
+              value: stickersDir ?? '', placeholder: '留空用默认',
+              onChange: (e) => setStickersDir(e.target.value),
+              onBlur: () => patch({ stickersDir: String(stickersDir || '').trim() }, '表情包目录'),
+            })),
+          h('div', { 'data-bd-row': '' },
+            h('div', { 'data-bd-grow': '' },
+              h('div', { 'data-bd-label': '' }, '什么时候配图'),
+              h('div', { 'data-bd-note': '' }, 'always = 每条都配；auto = 看评论语气自己决定（推荐）')),
+            h('select', {
+              'data-bd-input': '', 'data-bd-sel': '', value: String(cfg.stickerMode ?? 'off'),
+              onChange: (e) => patch({ stickerMode: e.target.value }, '配图频率'),
+            },
+              h('option', { value: 'off' }, '不配'),
+              h('option', { value: 'auto' }, '看情况'),
+              h('option', { value: 'always' }, '每条都配'))),
+          h('div', { 'data-bd-note': '' },
+            '⚠️ B站 评论不能纯图，必须带文字；单条最多 9 张，这里只发 1 张。')),
         /* ── 关注什么 / 在哪儿刷 ── */
         h('div', { 'data-bd-sec': '' },
           h('div', { 'data-bd-h': '' }, '关注什么'),

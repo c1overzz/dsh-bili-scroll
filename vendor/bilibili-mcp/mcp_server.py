@@ -32,6 +32,89 @@ from bilibili_api.video_uploader import (
 from bilibili_api.utils.picture import Picture
 from bilibili_api.login_v2 import QrCodeLogin, QrCodeLoginEvents
 
+# ========== 表情包（评论配图）==========
+#
+# 2026-10-24 实测：B站 评论接口的 `pictures` 字段可用 ——
+#   · send_comment(pic=Picture) 会先传到 new_dyn 图床，再随评论提交
+#   · 账号 Lv6 在自己的视频下带图评论成功（1 张），随后用 x/v2/reply/del 删掉
+#   · 限制：不能纯图（必须有文字）、单次最多 9 张、总大小约 10MB 以内
+
+STICKER_DIR_DEFAULT = Path(__file__).parent / "stickers"
+STICKER_INDEX = "index.json"
+STICKER_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+STICKER_MAX_BYTES = 9 * 1024 * 1024
+
+
+def _cfg() -> dict:
+    try:
+        with open(Path(__file__).parent / "config.json") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def sticker_dir() -> Path:
+    raw = str(_cfg().get("stickersDir") or "").strip()
+    d = Path(raw).expanduser() if raw else STICKER_DIR_DEFAULT
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    return d
+
+
+def sticker_files() -> list:
+    d = sticker_dir()
+    if not d.exists():
+        return []
+    out = []
+    for p in sorted(d.iterdir()):
+        if p.is_file() and p.suffix.lower() in STICKER_EXT:
+            try:
+                out.append({"name": p.name, "size": p.stat().st_size, "path": str(p)})
+            except Exception:
+                pass
+    return out
+
+
+def load_sticker_index() -> dict:
+    p = sticker_dir() / STICKER_INDEX
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_sticker_index(data: dict) -> None:
+    p = sticker_dir() / STICKER_INDEX
+    p.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+# ⚠️ 库里的 Picture._to_biliapifile() 会写**系统临时目录的固定文件名** test.<ext> ——
+#    并发会互相覆盖，沙箱里还可能写不进去。换成随机名 + 用完就删。
+def _patched_to_biliapifile(self):
+    import os
+    import tempfile
+    import uuid
+    from PIL import Image
+    from bilibili_api.utils.picture import BiliAPIFile
+
+    ext = (self.imageType or "png").lower()
+    path = os.path.join(tempfile.gettempdir(), f"bili-{uuid.uuid4().hex}.{ext}")
+    with open(path, "wb") as fh:
+        fh.write(self.content)
+    mime = Image.open(path).get_format_mimetype()
+    return BiliAPIFile(path=path, mime_type=mime)
+
+
+try:
+    from bilibili_api import Picture as _Pic
+    _Pic._to_biliapifile = _patched_to_biliapifile
+except Exception:
+    pass
+
+
 # ========== 初始化 ==========
 
 CRED_FILE = Path(__file__).parent / "bili_credential.json"
@@ -620,7 +703,7 @@ async def bili_video_info(bvid: str) -> str:
 # ========== Tool 6: 回复评论 ==========
 
 @tool()
-async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0) -> str:
+async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0, pic: str = "") -> str:
     """
     在B站视频下发表评论或回复某条评论
 
@@ -629,42 +712,74 @@ async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0) -> str:
         text: 评论/回复的文本内容
         rpid: 要回复的目标评论ID（0表示发表新评论）
         root: 楼层根评论ID（回复一级评论时不用填，回复楼中楼时填根评论ID）
-    
+        pic: 配图（表情包）—— 文件名（相对表情包目录）或绝对路径；留空 = 纯文字
+
     Returns:
-        发表结果
+        发表结果。带图失败时会**自动退回纯文字**再发一次，并在 pic_error 里说明原因。
     """
     cred = get_cred()
     v = video.Video(bvid=bvid, credential=cred)
     info = await v.get_info()
     aid = info["aid"]
 
-    try:
-        if rpid == 0:
-            # 发表新评论
-            result = await comment.send_comment(
-                text=text,
-                oid=aid,
-                type_=comment.CommentResourceType.VIDEO,
-                credential=cred,
-            )
+    # 配图（表情包）：按文件名或绝对路径解析，超过 9MB 直接不带
+    pic_obj = None
+    pic_note = ""
+    if str(pic or "").strip():
+        raw = str(pic).strip()
+        cand = Path(raw).expanduser()
+        if not cand.is_absolute():
+            cand = sticker_dir() / raw
+        if cand.exists() and cand.is_file():
+            if cand.stat().st_size > STICKER_MAX_BYTES:
+                pic_note = f"图片超过 {STICKER_MAX_BYTES // 1024 // 1024}MB，已按纯文字发"
+            else:
+                pic_obj = Picture.from_file(str(cand))
         else:
-            # 回复评论
-            # root=0 表示回复一级评论，root=rpid
-            # root!=0 表示回复楼中楼，root=根评论，parent=目标评论
-            actual_root = root if root != 0 else rpid
-            result = await comment.send_comment(
-                text=text,
-                oid=aid,
-                type_=comment.CommentResourceType.VIDEO,
-                root=actual_root,
-                parent=rpid,
-                credential=cred,
+            pic_note = f"找不到表情包 {raw}，已按纯文字发"
+
+    async def _send(with_pic):
+        kwargs = {}
+        if with_pic is not None:
+            kwargs["pic"] = with_pic
+        if rpid == 0:
+            return await comment.send_comment(
+                text=text, oid=aid, type_=comment.CommentResourceType.VIDEO,
+                credential=cred, **kwargs,
             )
+        actual_root = root if root != 0 else rpid
+        return await comment.send_comment(
+            text=text, oid=aid, type_=comment.CommentResourceType.VIDEO,
+            root=actual_root, parent=rpid, credential=cred, **kwargs,
+        )
+
+    try:
+        result = None
+        pic_failed = ""
+        if pic_obj is not None:
+            try:
+                result = await _send(pic_obj)
+            except Exception as pe:
+                # ⭐ 发图失败（权限/审核/格式）⇒ 退回纯文字，别让整条评论失败
+                pic_failed = str(pe)[:200]
+                result = await _send(None)
+        else:
+            result = await _send(None)
+
 
         # ⭐ 把回执里的 rpid 带回去：判重表要靠它记「我们发过哪条」，宿主的评论复核
         #    （lib/verify.mjs）也要拿它去 B站 查公开可见性。只回 success 的话那条链是断的。
         #（2026-10-16 审查修：原实现把上面的 result 丢掉了）
         out = {"success": True, "message": "评论发送成功"}
+        if pic_obj is not None and not pic_failed:
+            out["pic_sent"] = True
+            out["pic"] = str(pic)
+        elif pic_failed:
+            out["pic_sent"] = False
+            out["pic_error"] = pic_failed
+        elif pic_note:
+            out["pic_sent"] = False
+            out["pic_note"] = pic_note
         if isinstance(result, dict):
             for key in ("rpid", "rpid_str", "root", "parent"):
                 val = result.get(key)
@@ -1591,6 +1706,106 @@ async def bili_collection_videos(uid: int, sid: int, num: int = 20) -> str:
         return json.dumps({"uid": uid, "sid": sid, "count": len(out), "videos": out}, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"uid": uid, "sid": sid, "error": str(e)}, ensure_ascii=False)
+
+
+# ========== Tool: 表情包索引 ==========
+
+@tool()
+async def bili_stickers(limit: int = 9) -> str:
+    """
+    列出表情包目录，并给「还没描述过」的图拼一张预览图 —— 之后用 read_image 看懂它们，
+    再用 bili_sticker_save 写下描述（这样以后选图才选得准）。
+
+    Args:
+        limit: 这次最多拼几张（默认 9）
+
+    Returns:
+        JSON：dir=目录、total=总数、indexed=已描述数、
+        unindexed=还没描述的（最多 9 个）、sheet=预览图路径（没东西可看时为 null）
+    """
+    from PIL import Image, ImageDraw, ImageFont
+
+    files = sticker_files()
+    idx = load_sticker_index()
+    un = [f for f in files if f["name"] not in idx][: max(1, min(int(limit or 9), 16))]
+    out = {
+        "dir": str(sticker_dir()),
+        "total": len(files),
+        "indexed": sum(1 for f in files if f["name"] in idx),
+        "unindexed": [f["name"] for f in un],
+        "sheet": None,
+        "hint": "用 read_image 看 sheet，然后调 bili_sticker_save 写描述；已描述过的不会重复让你看。",
+    }
+    if not un:
+        out["hint"] = "所有表情包都描述过了。" if files else "表情包目录是空的，先把图片放进去。"
+        return json.dumps(out, ensure_ascii=False)
+
+    cell, cols, pad, bar = 220, 3, 6, 20
+    rows = (len(un) + cols - 1) // cols
+    sheet = Image.new("RGB", (cols * cell + (cols + 1) * pad, rows * (cell + bar) + (rows + 1) * pad), (18, 18, 20))
+    d = ImageDraw.Draw(sheet)
+    try:
+        font = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial.ttf", 14)
+    except Exception:
+        font = ImageFont.load_default()
+    for i, f in enumerate(un):
+        r, c = divmod(i, cols)
+        x = pad + c * (cell + pad)
+        y = pad + r * (cell + bar + pad)
+        try:
+            im = Image.open(f["path"]).convert("RGB")
+            im.thumbnail((cell, cell), Image.LANCZOS)
+            sheet.paste(im, (x + (cell - im.width) // 2, y + (cell - im.height) // 2))
+        except Exception:
+            d.text((x + 8, y + 8), "（打不开）", font=font, fill=(200, 120, 120))
+        d.rectangle([x, y + cell, x + cell, y + cell + bar], fill=(28, 28, 32))
+        d.text((x + 5, y + cell + 2), f"{i + 1}. {f['name'][:26]}", font=font, fill=(240, 240, 240))
+
+    tmp = Path(__file__).parent / "tmp" / "stickers"
+    tmp.mkdir(parents=True, exist_ok=True)
+    sp = tmp / f"sheet-{int(time.time())}.jpg"
+    sheet.save(sp, quality=86, optimize=True)
+    out["sheet"] = str(sp)
+    return json.dumps(out, ensure_ascii=False)
+
+
+@tool()
+async def bili_sticker_save(items: str) -> str:
+    """
+    保存表情包描述（给 bili_stickers 看完图之后用）
+
+    Args:
+        items: JSON 数组字符串，每项形如
+               {"file":"doge.png","desc":"柴犬歪头，表情夸张","mood":["搞笑","认同"],
+                "fits":"附和吐槽","avoid":"严肃话题"}
+
+    Returns:
+        保存了几条、总共几条
+    """
+    try:
+        arr = json.loads(items) if isinstance(items, str) else items
+        if not isinstance(arr, list):
+            return json.dumps({"ok": False, "error": "items 要是数组"}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"ok": False, "error": f"items 不是合法 JSON：{e}"}, ensure_ascii=False)
+
+    idx = load_sticker_index()
+    n = 0
+    for it in arr:
+        if not isinstance(it, dict):
+            continue
+        name = str(it.get("file") or "").strip()
+        if not name:
+            continue
+        idx[name] = {
+            "desc": str(it.get("desc") or "").strip()[:200],
+            "mood": [str(x)[:16] for x in (it.get("mood") or []) if str(x).strip()][:6],
+            "fits": str(it.get("fits") or "").strip()[:200],
+            "avoid": str(it.get("avoid") or "").strip()[:200],
+        }
+        n += 1
+    save_sticker_index(idx)
+    return json.dumps({"ok": True, "saved": n, "total_indexed": len(idx)}, ensure_ascii=False)
 
 
 # ========== Tool: 看画面（抽关键帧拼图）==========
