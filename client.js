@@ -374,6 +374,19 @@ window.__ModuleLoader__.load({
         jget('/models').then((d) => setCatalog(d || { ok: false, error: '空' })).catch(() => setCatalog({ ok: false, error: '请求失败' }))
       }, [])
 
+      const onIndexStickers = async () => {
+        setStickerBusy(true)
+        try {
+          const r = await jpost('/stickers/index', {})
+          if (r?.started) {
+            say(`开始补描述：${r.pending} 张（跑完刷新一下列表）`, 'good')
+            setStickerView(null)
+          } else {
+            say(String(r?.error || '没起来'), 'warn')
+          }
+        } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setStickerBusy(false) }
+      }
+
       const onViewStickers = async () => {
         setStickerBusy(true)
         try {
@@ -749,6 +762,7 @@ window.__ModuleLoader__.load({
           h('div', { 'data-bd-row': '' },
             h('button', { 'data-bd-btn': '', disabled: stickerBusy, onClick: onViewStickers },
               stickerBusy ? '读索引…' : '看看索引里有什么'),
+            h('button', { 'data-bd-btn': '', disabled: stickerBusy, onClick: onIndexStickers }, '给新图补描述'),
             h('div', { 'data-bd-note': '' },
               stickerView && stickerView.ok
                 ? `${stickerView.total} 张，已描述 ${stickerView.indexed} 张 · ${stickerView.dir}`

@@ -733,6 +733,30 @@ export function apply(ctx, config) {
       + `  · 合集：调 bili_collection_videos(uid, sid, 20)，同样按 days_ago 筛。\n`
   }
 
+  /** 表情包：目录里有哪几张还没写描述（宿主只数文件，不解图） */
+  const stickerDirPath = () => {
+    const raw = String(cfg.stickersDir || '').trim()
+    return raw ? raw : join(stateDir, 'stickers')
+  }
+  const stickerPending = () => {
+    try {
+      const dir = stickerDirPath()
+      if (!existsSync(dir)) return []
+      const idx = readJson(join(dir, 'index.json'), {}) || {}
+      return readdirSync(dir)
+        .filter((f) => /\.(png|jpe?g|gif|webp|bmp)$/i.test(f) && !idx[f])
+        .slice(0, 20)
+    } catch { return [] }
+  }
+  /** 一轮开头点一句：有没描述的图就先补（否则永远不会被选中） */
+  const stickerHint = () => {
+    if (String(cfg.stickerMode || 'off') === 'off') return ''
+    const pending = stickerPending()
+    if (!pending.length) return ''
+    return `⚠️ 表情包目录里有 ${pending.length} 张新图还没描述（${pending.slice(0, 6).join('、')}${pending.length > 6 ? '…' : ''}）：`
+      + `发评论前先 \`bili_stickers\` → \`read_image\` → \`bili_sticker_save\` 补上，没描述的图不会被选中。\n`
+  }
+
   const promptFor = () => {
     // ⭐ 章程取哪一份：家里那份优先（ensureCharter 保证铺好；他改过的话就是他那份，升级的事由 ensureCharter 记账处理）
     const duty = charterPath(pluginDir, stateDir)
@@ -779,6 +803,7 @@ export function apply(ctx, config) {
         : `今天最多挑 ${quota} 条；`)
       + `关键词${kws.length ? `用这些：${kws.join('、')}` : '用章程里的默认那几组'}。`
       + subsHint()
+      + stickerHint()
       + `本地转写：${cfg.transcribe
         ? (asrReadyNow()
           ? '开着，而且装好了（没字幕的视频用家里那份 asr.py 转，命令见章程）'
@@ -1179,6 +1204,19 @@ export function apply(ctx, config) {
 每条一段：**标题 / UP / 链接 / 播放量 / 它到底讲了什么（画面+字幕）/ 值不值得占用使用者一次注意力**。
 哪条失败就记一笔继续下一条，别卡住。最后用一句话汇报。`
 
+  /** 「现在索引新图」：起一轮只干这件事的 headless */
+  const runStickerIndex = () => {
+    const pending = stickerPending()
+    if (!pending.length) return { started: false, error: '没有未描述的新图（都描述过了）' }
+    const prompt = `这一轮**只做一件事**：把表情包目录里还没描述的图补上描述。
+1) 调 \`bili_stickers\` 拿预览图（返回 unindexed 列表和 sheet 路径）
+2) 用 \`read_image\` 看那张 sheet，认清每张图的内容
+3) 调 \`bili_sticker_save\` 写下每张图的 {"file","desc","mood":[],"fits","avoid"}
+不要发评论、不要刷视频、不要写日报。做完用一句话汇报补了几张。`
+    log(`索引表情包：${pending.length} 张待描述`)
+    return { ...runDuty('sticker', prompt), pending: pending.length }
+  }
+
   const runWatch = (items) => {
     const bvids = [...new Set(String(items || '').match(/BV[0-9A-Za-z]{10}/g) || [])]
     if (!bvids.length) return { started: false, error: '没认出 BV 号 —— 粘 BV1xxxxxxxxx 或整条视频链接都行' }
@@ -1552,6 +1590,10 @@ export function apply(ctx, config) {
       const { clean, host } = await persistCfg(patch)
       log(`设置已更新：${JSON.stringify(clean)}（DSH 那边${host.ok ? '已同步' : '没写成：' + host.error}）`)
       return sendJson(res, 200, { ok: true, config: cfg, host })
+    }
+
+    if (req.method === 'POST' && path === '/api/bili-duty/stickers/index') {
+      return sendJson(res, 200, { ok: true, ...runStickerIndex() })
     }
 
     if (req.method === 'GET' && path === '/api/bili-duty/stickers') {
