@@ -240,10 +240,24 @@ function reportMeta() {
     dmMode: 'only', dmUid: 0,
     keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, favFolderId: 0,
   }
+  /**
+   * ⚠️ volatile 字段在运行时**不是标量**，而是 cosmokit 的冻结引用对象。
+   *   `@deepseek-ai/schemastery` 的 volatile 分支把每个标了 `.extra('volatile', true)` 的字段
+   *   包成 `{ get(), [Symbol.for('cosmokit.volatile.write')] }`（`lib/index.mjs` 里 `createVolatile`）——
+   *   宿主自己的 `describe()` 会先 `plainConfig()` 解包再给人看，但 **`apply(ctx, config)` 收到的
+   *   那份 `config` 没有解包**（实测 host：`typeof config.perDay === 'object'`）。
+   *   ⇒ 下面这段只认 `typeof === 'boolean'/'number'/'string'`，对象一个分支都不命中 ⇒
+   *     **整份配置静默回退 DEFAULTS**（`peakValley` 永远 false、`perDay` 永远 5、`pythonPath` 永远 'python'）。
+   *   在 2.0.0 里主路径已改用 `describe().value`（宿主解包过）绕过这一层，但 `loadCfg()` 的
+   *   `row.value` 兜底分支（拿不到行时退回 `config`）仍会把 observable 喂进来 ⇒ 仍然全量回退。
+   *   ⇒ 读之前先 `.get()` 解包；普通标量原样返回，老行为不变。
+   */
+  const VOLATILE_WRITE = Symbol.for('cosmokit.volatile.write')
+  const unwrap = (v) => (v !== null && typeof v === 'object' && typeof v.get === 'function' && VOLATILE_WRITE in v) ? v.get() : v
   const normalize = (src, base) => {
     const out = { ...base }
     for (const k of Object.keys(base)) {
-      const v = src?.[k]
+      const v = unwrap(src?.[k])
       if (v === undefined || v === null) continue
       if (Array.isArray(base[k])) { if (Array.isArray(v)) out[k] = v.filter((x) => typeof x === 'string') }
       else if (typeof base[k] === 'number') { const n = Number(v); if (Number.isFinite(n)) out[k] = n }
