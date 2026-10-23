@@ -14,10 +14,17 @@ B站数据采集 MCP 服务，支持 OpenClaw / Claude Code / Cursor / Cline
 #      ③ 登录成功后凭证**原子写**（先写 .tmp 再 os.replace）
 #      ④ `bili_comments` 把抓取异常带进返回（风控 -412 不再伪装成"这条视频 0 条评论"）
 #      ⑤ `bili_reply` 回执带上 `rpid` / `rpid_str` / `root` / `parent`（判重表与评论复核要用）
+#      ⑥ 评论配图（2026-10-23 加，默认关）：`_prepare_comment_pictures` / `_pick_meme` 从本机
+#         dsh-meme 表情包库或「额外配图目录」取图，交给 bilibili-api 原生 `picture=Picture` 上传；
+#         子评论（rpid≠0）B站 不收图 ⇒ 直接降级纯文本。详见文件里「评论配图」一节。
 import asyncio
 import json
 import base64
 import os
+import random
+import re
+import shutil
+import sqlite3
 import sys
 import tempfile
 from pathlib import Path
@@ -97,6 +104,262 @@ def get_cred() -> Credential:
     if not cred:
         raise Exception("未登录B站！请先调用 bili_login 工具获取登录二维码，让用户扫码登录。")
     return cred
+
+
+# ========== 评论配图（2026-10-23 加，默认关） ==========
+# B站 评论区可以带图（**只有顶层评论**；子评论带图会被拒 -400「子评论不能带图」）。
+# 本插件只做两件事：
+#   ① 从本机 dsh-meme 表情包库（或设置页填的「额外配图目录」）里挑图 —— 图源只读、不下载；
+#   ② 交给 bilibili-api 原生的 `pic=Picture` 上传（内部走 /x/dynamic/feed/draw/upload_bfs），
+#      不自己拼接口、不碰 WBI/csrf。
+# ⚠️ 上传会把图片发到 B站 图床 —— 所以默认关；宿主通过 env 下发开关与目录。
+_PICTURES_ENABLED = os.environ.get("BILI_COMMENT_PICTURES") == "1"
+_PICTURE_DIR_EXTRA = (os.environ.get("BILI_COMMENT_PICTURE_DIR") or "").strip()
+_PICTURE_MAX = 9
+_PICTURE_MAX_BYTES = 20 * 1024 * 1024
+_PICTURE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+
+_MEME_MOODS = {
+    "happy": ("happy", "like", "meow", "givemoney", "color"),
+    "angry": ("angry", "fool", "baka"),
+    "sad": ("sad", "sigh"),
+    "shy": ("shy",),
+    "confused": ("confused", "surprised", "see"),
+    "daily": ("daily", "sleep", "morning", "work", "cpu", "reply"),
+}
+
+
+def _home_dir() -> Path:
+    v = (os.environ.get("USERPROFILE") or os.environ.get("HOME") or "").strip()
+    return Path(v) if v else Path.home()
+
+
+def _dsh_home_dir() -> Path:
+    v = (os.environ.get("DSH_HOME") or "").strip()
+    return Path(v) if v else _home_dir() / ".dsh"
+
+
+def _meme_home_dir() -> Path:
+    v = (os.environ.get("DSH_MEME_HOME") or "").strip()
+    return Path(v) if v else _home_dir()
+
+
+def _meme_settings() -> dict:
+    """dsh-meme 的设置文件（读不到就当空 —— 配图只是可选功能）。"""
+    try:
+        with open(_meme_home_dir() / ".dsh" / "dsh-expression.json", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _meme_candidate_dirs() -> list[Path]:
+    """可能放着表情包库的目录：用户包 + 各 DSH profile 里 dsh-meme 自带的内置包。"""
+    dirs: list[Path] = [_meme_home_dir() / ".dsh" / "meme-packs"]
+    packs_dir = str(_meme_settings().get("packsDir") or "").strip()
+    if packs_dir:
+        dirs.append(Path(packs_dir))
+    profile = (os.environ.get("DSH_PROFILE_DIR") or "").strip()
+    if profile:
+        dirs.append(Path(profile) / "node_modules" / "dsh-meme" / "memes")
+    profiles = _dsh_home_dir() / "profiles"
+    try:
+        for p in sorted(profiles.iterdir()):
+            if p.is_dir():
+                dirs.append(p / "node_modules" / "dsh-meme" / "memes")
+    except OSError:
+        pass
+    return dirs
+
+
+def _looks_like_pack(d: Path) -> bool:
+    return d.is_dir() and ((d / "index.db").is_file() or (d / "memes").is_dir())
+
+
+def _meme_pack_roots() -> list[Path]:
+    """按 dsh-meme 的规矩找图库包：同 id 先出现者优先，enabledPacks 非空时过滤。"""
+    enabled = [str(x).strip() for x in (_meme_settings().get("enabledPacks") or []) if str(x).strip()]
+    found: list[tuple[str, Path]] = []
+    seen: set[str] = set()
+    for base in _meme_candidate_dirs():
+        candidates: list[Path] = []
+        if _looks_like_pack(base):
+            candidates.append(base)
+        try:
+            candidates.extend([c for c in base.iterdir() if c.is_dir()])
+        except OSError:
+            pass
+        for d in candidates:
+            if not _looks_like_pack(d) or d.name in seen:
+                continue
+            if enabled and d.name not in enabled:
+                continue
+            seen.add(d.name)
+            found.append((d.name, d))
+    if not found:
+        # enabledPacks 与现有包对不上时退回全量（跟 dsh-meme 一样：宁可多给，别一个都挑不到）
+        for base in _meme_candidate_dirs():
+            try:
+                for c in base.iterdir():
+                    if c.is_dir() and _looks_like_pack(c) and c.name not in seen:
+                        seen.add(c.name)
+                        found.append((c.name, c))
+            except OSError:
+                pass
+    return [p for _, p in found]
+
+
+def _meme_rows() -> list[dict]:
+    """读所有包的索引（SQLite 只读）；没索引/读坏了就退回扫目录。"""
+    rows: list[dict] = []
+    for pack in _meme_pack_roots():
+        db = pack / "index.db"
+        if db.is_file():
+            try:
+                conn = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True, timeout=1)
+                try:
+                    cur = conn.execute(
+                        "SELECT path, tag, file_name, caption, COALESCE(keywords,'') AS keywords FROM memes")
+                    for path, tag, fname, caption, keywords in cur.fetchall():
+                        rows.append({"pack": pack.name, "root": pack, "path": str(path),
+                                     "tag": str(tag or ""), "file_name": str(fname or ""),
+                                     "caption": str(caption or ""), "keywords": str(keywords or "")})
+                finally:
+                    conn.close()
+                continue
+            except sqlite3.Error:
+                pass
+        memes_dir = pack / "memes"
+        if memes_dir.is_dir():
+            for p in sorted(memes_dir.rglob("*")):
+                if not p.is_file() or p.suffix.lower() not in _PICTURE_EXT:
+                    continue
+                rows.append({"pack": pack.name, "root": pack,
+                             "path": p.relative_to(pack).as_posix(),
+                             "tag": p.parent.name, "file_name": p.name,
+                             "caption": p.stem, "keywords": ""})
+    return rows
+
+
+def _meme_abs(root: Path, stored: str) -> Path | None:
+    """把索引里的相对路径变成绝对路径（防 ../ 逃逸）。"""
+    try:
+        base = root.resolve()
+        p = (root / stored).resolve()
+        if p == base or base not in p.parents:
+            return None
+        return p if p.is_file() else None
+    except OSError:
+        return None
+
+
+def _meme_tokens(text: str) -> list[str]:
+    return [t for t in re.split(r"[\s,，、;；/|]+", str(text).lower()) if t]
+
+
+def _pick_meme(query: str, mood: str = "") -> Path:
+    """按关键词/情绪从表情包库里挑一张，返回绝对路径；挑不到抛人话异常。"""
+    rows = _meme_rows()
+    if not rows:
+        raise Exception("本机没找到 dsh-meme 表情包库（装 dsh-meme 或设置页填「额外配图目录」）")
+    tags = _MEME_MOODS.get(mood.lower()) if mood else None
+    pool = [r for r in rows
+            if not tags or r["tag"].lower() == mood.lower() or r["tag"].lower().startswith(tuple(tags))]
+    if not pool:
+        pool = rows
+    tokens = _meme_tokens(query)
+    if tokens:
+        scored = []
+        for r in pool:
+            hay = f"{r['tag']} {r['caption']} {r['keywords']} {r['file_name']}".lower()
+            hit = sum(1 for t in tokens if t in hay)
+            if hit:
+                scored.append((hit, r))
+        if not scored:
+            # 两字组合兜底（跟 dsh-meme 的 biGrams 一个思路）
+            grams = {query[i:i + 2] for i in range(len(query) - 1)}
+            for r in pool:
+                hay = f"{r['tag']} {r['caption']} {r['keywords']} {r['file_name']}".lower()
+                hit = sum(1 for g in grams if g in hay)
+                if hit:
+                    scored.append((hit, r))
+        if scored:
+            best = max(h for h, _ in scored)
+            pool = [r for h, r in scored if h == best]
+        else:
+            raise Exception(f"没有匹配「{query}」的图（可以换个词，比如 开心/无语/摸鱼/睡觉）")
+    random.shuffle(pool)
+    for r in pool:
+        abs_path = _meme_abs(r["root"], r["path"])
+        if abs_path is not None:
+            return abs_path
+    raise Exception(f"没有匹配「{query or mood}」的图（可以换个词，比如 开心/无语/摸鱼/睡觉）")
+
+
+class _UniqueTempPicture(Picture):
+    """每张图一个独立临时文件 —— bilibili-api 默认会复用共享的 test.png，并发上传会串图。"""
+
+    def __init__(self, path: str):
+        super().__init__()
+        self.__unique_path = path
+
+    def _to_biliapifile(self):
+        from bilibili_api.utils.network import BiliAPIFile
+        return BiliAPIFile(path=self.__unique_path, mime_type="image/png")
+
+
+def _allowed_picture_roots() -> list[Path]:
+    """允许作为配图的目录：表情包库 + 设置页填的「额外配图目录」。"""
+    roots: list[Path] = []
+    for d in _meme_pack_roots():
+        try:
+            roots.append(d.resolve())
+        except OSError:
+            pass
+    if _PICTURE_DIR_EXTRA:
+        try:
+            roots.append(Path(_PICTURE_DIR_EXTRA).expanduser().resolve())
+        except OSError:
+            pass
+    return roots
+
+
+def _prepare_comment_pictures(paths: list[str]) -> tuple[list[Picture], Path | None]:
+    """校验路径 + 统一转成 PNG（EXIF 摆正 / 缩到 768 / GIF 取首帧），返回 Picture 列表与临时目录。"""
+    try:
+        from PIL import Image, ImageOps
+    except ImportError:
+        raise Exception("缺 Pillow（重新跑一次插件依赖安装即可，它随 qrcode[pil] 一起装）")
+    allowed = _allowed_picture_roots()
+    tmp_dir = Path(tempfile.mkdtemp(prefix="bili-comment-pics-"))
+    pics: list[Picture] = []
+    for i, raw in enumerate(paths[:_PICTURE_MAX]):
+        p = Path(os.path.expanduser(str(raw).strip())).resolve()
+        if not p.is_file():
+            raise Exception(f"图片不存在：{p}")
+        try:
+            if p.stat().st_size > _PICTURE_MAX_BYTES:
+                raise Exception(f"图片太大（>20MB）：{p}")
+        except OSError as e:
+            raise Exception(f"图片读不了：{p}（{e}）")
+        if not any(p == root or root in p.parents for root in allowed):
+            raise Exception(f"图片不在允许的图源里：{p}（只允许表情包库或设置页「额外配图目录」里的图）")
+        out = tmp_dir / f"pic-{i}.png"
+        try:
+            with Image.open(p) as im:
+                try:
+                    im.seek(0)
+                except (EOFError, ValueError, AttributeError):
+                    pass
+                im = ImageOps.exif_transpose(im)
+                im = im.convert("RGBA")
+                im.thumbnail((768, 768))
+                im.save(out, "PNG", optimize=True)
+        except Exception as e:
+            raise Exception(f"图片转 PNG 失败：{p}（{e}）")
+        pics.append(_UniqueTempPicture(str(out)))
+    return pics, tmp_dir
 
 
 # ========== Tool: 扫码登录（生成二维码） ==========
@@ -521,7 +784,8 @@ async def bili_video_info(bvid: str) -> str:
 # ========== Tool 6: 回复评论 ==========
 
 @tool()
-async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0) -> str:
+async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0,
+                     pictures: list[str] | None = None, meme: str = "", meme_tag: str = "") -> str:
     """
     在B站视频下发表评论或回复某条评论
 
@@ -530,9 +794,12 @@ async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0) -> str:
         text: 评论/回复的文本内容
         rpid: 要回复的目标评论ID（0表示发表新评论）
         root: 楼层根评论ID（回复一级评论时不用填，回复楼中楼时填根评论ID）
-    
+        pictures: 配图的本机图片绝对路径（只能来自表情包库或插件设置里的「额外配图目录」；最多 9 张）
+        meme: 从本机 dsh-meme 表情包库按关键词挑一张图（如 无语 / 摸鱼）
+        meme_tag: 表情包情绪桶（happy/angry/sad/shy/confused/daily），可与 meme 合用
+
     Returns:
-        发表结果
+        发表结果（评论配图只在**顶层评论**上生效；子评论 B站 不收图，会按纯文本发）
     """
     _deny = _guard("bili_reply")
     if _deny: return _deny
@@ -541,7 +808,38 @@ async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0) -> str:
     info = await v.get_info()
     aid = info["aid"]
 
+    # ⭐ 评论配图（2026-10-23 加，默认关）：只有**顶层评论**能带图 —— B站 子评论带图会被拒
+    #    （实测 -400「子评论不能带图」）；关着/子评论时按纯文本发，并在回执里说明跳过原因。
+    pic_paths = [str(p).strip() for p in (pictures or []) if str(p).strip()]
+    if meme.strip():
+        try:
+            pic_paths.insert(0, str(_pick_meme(meme.strip(), meme_tag.strip())))
+        except Exception as e:
+            return json.dumps({"success": False, "stage": "prepare", "retry_safe": True,
+                               "error": f"表情包没找到：{e}", "hint": "换个关键词，或改用 pictures 传本机图片路径"},
+                              ensure_ascii=False)
+    pics: list[Picture] = []
+    pic_tmp = None
+    pic_skipped = ""
+    if pic_paths:
+        if rpid != 0:
+            pic_skipped = "bilibili_child_reply_no_images"
+            pic_paths = []
+        elif not _PICTURES_ENABLED:
+            pic_skipped = "comment_pictures_disabled"
+            pic_paths = []
+        elif len(pic_paths) > _PICTURE_MAX:
+            return json.dumps({"success": False, "stage": "prepare", "retry_safe": True,
+                               "error": f"一条评论最多带 {_PICTURE_MAX} 张图（收到 {len(pic_paths)} 张）"},
+                              ensure_ascii=False)
+
     try:
+        if pic_paths:
+            try:
+                pics, pic_tmp = _prepare_comment_pictures(pic_paths)
+            except Exception as e:
+                return json.dumps({"success": False, "stage": "prepare", "retry_safe": True,
+                                   "error": f"评论配图准备失败：{e}"}, ensure_ascii=False)
         if rpid == 0:
             # 发表新评论
             result = await comment.send_comment(
@@ -549,6 +847,7 @@ async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0) -> str:
                 oid=aid,
                 type_=comment.CommentResourceType.VIDEO,
                 credential=cred,
+                pic=pics or None,
             )
         else:
             # 回复评论
@@ -567,7 +866,10 @@ async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0) -> str:
         # ⭐ 把回执里的 rpid 带回去：判重表要靠它记「我们发过哪条」，宿主的评论复核
         #    （lib/verify.mjs）也要拿它去 B站 查公开可见性。只回 success 的话那条链是断的。
         #（2026-10-16 审查修：原实现把上面的 result 丢掉了）
-        out = {"success": True, "message": "评论发送成功"}
+        out = {"success": True, "message": "评论发送成功" + (f"（带 {len(pics)} 张图）" if pics else "")}
+        out["pictures"] = len(pics)
+        if pic_skipped:
+            out["pictures_skipped_reason"] = pic_skipped
         if isinstance(result, dict):
             for key in ("rpid", "rpid_str", "root", "parent"):
                 val = result.get(key)
@@ -575,7 +877,14 @@ async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0) -> str:
                     out[key] = val
         return json.dumps(out, ensure_ascii=False)
     except Exception as e:
-        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+        # stage=send：请求可能已经到 B站 那边了 —— 重试前必须先复核评论，别直接重发
+        return json.dumps({"success": False, "stage": "send", "retry_safe": False,
+                           "error": str(e),
+                           "hint": "发送阶段失败，结果可能未知：先 bili_comments 复核这条评论在不在，别直接重发"},
+                          ensure_ascii=False)
+    finally:
+        if pic_tmp:
+            shutil.rmtree(pic_tmp, ignore_errors=True)
 
 
 # ========== Tool 7: 批量采集 ==========

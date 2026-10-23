@@ -6,3 +6,6 @@ aiohttp>=3.9.0
 mcp>=1.0.0,<2
 # 插件用 Python 画登录二维码；不装就只能退回"只给 URL"
 qrcode[pil]>=8.0
+# ⭐ 评论配图（2026-10-23 加）：读图 / EXIF 摆正 / 转 PNG 用；qrcode[pil] 其实已经带了 Pillow，
+#    这里显式写一遍，免得哪天 qrcode 换依赖方式时配图静默坏掉
+pillow>=9.0

@@ -247,6 +247,8 @@ function WatchTab() {
       const [perDay, setPerDay] = React.useState(null)
       const [perRound, setPerRound] = React.useState(null)
       const [replyPer, setReplyPer] = React.useState(null)
+      const [picMax, setPicMax] = React.useState(null)     // 每条评论最多配几张图（本地草稿）
+      const [picDir, setPicDir] = React.useState(null)     // 额外配图目录（本地草稿）
       const [dmUid, setDmUid] = React.useState(null)        // 私信收件人 UID（本地草稿）
       const [dmWatch, setDmWatch] = React.useState(null)          // 私信双向开关
       const [dmMode, setDmMode] = React.useState(null)      // 投递方式：off / only / both
@@ -282,6 +284,8 @@ function WatchTab() {
         if (cfg && perDay === null) setPerDay(String(cfg.perDay ?? 5))
         if (cfg && perRound === null) setPerRound(String(cfg.commentPerRound ?? 1))
         if (cfg && replyPer === null) setReplyPer(String(cfg.replyPerRound ?? 1))
+        if (cfg && picMax === null) setPicMax(String(cfg.commentPictureMax ?? 1))
+        if (cfg && picDir === null) setPicDir(cfg.commentPictureDir || '')
         if (cfg && mention === null) setMention(cfg.mentionName || '')
         if (cfg && dmUid === null) setDmUid(cfg.dmUid ? String(cfg.dmUid) : '')
         if (cfg && dmMode === null) setDmMode(cfg.dmMode || 'only')
@@ -620,6 +624,34 @@ function WatchTab() {
                 value: perRound ?? '',
                 onChange: (e) => setPerRound(e.target.value),
                 onBlur: () => { const n = Math.max(0, Math.min(Number(perRound) || 0, 20)); setPerRound(String(n)); patch({ commentPerRound: n }, '每轮发几条评论') },
+              }))) : null,
+          // ⭐ 2026-10-23：评论配图（默认关 —— 会把图片上传到 B站 图床；图源只读表情包库和下面这个目录）
+          (dmMode === 'off' || dmMode === 'both') && sw('autoComment') ? h(ToggleRow, {
+            label: '评论配图（表情包）',
+            note: '默认关。开了以后评论可以带图：图只从本机 dsh-meme 表情包库或下面那个目录里取，先上传 B站 图床；只有顶层评论能带图，回复别人只能发文字',
+            on: sw('commentPictures'),
+            onChange: (v) => patch({ commentPictures: v }, '评论配图'),
+          }) : null,
+          (dmMode === 'off' || dmMode === 'both') && sw('autoComment') && sw('commentPictures') ? h('div', { 'data-bd-sub': '' },
+            h('div', { 'data-bd-row': '' },
+              h('div', { 'data-bd-grow': '' },
+                h('div', { 'data-bd-label': '' }, '每条评论最多配几张图'),
+                h('div', { 'data-bd-note': '' }, 'B站 接口上限 9 张；斗图一般 1 张正好')),
+              h('input', {
+                'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 1, max: 9,
+                value: picMax ?? '',
+                onChange: (e) => setPicMax(e.target.value),
+                onBlur: () => { const n = Math.max(1, Math.min(Number(picMax) || 1, 9)); setPicMax(String(n)); patch({ commentPictureMax: n }, '每条评论最多配几张图') },
+              })),
+            h('div', { 'data-bd-row': '' },
+              h('div', { 'data-bd-grow': '' },
+                h('div', { 'data-bd-label': '' }, '额外配图目录（可选）'),
+                h('div', { 'data-bd-note': '' }, '留空 = 只用表情包库；填了以后 pictures 还可以用这个目录里的图（填绝对路径）')),
+              h('input', {
+                'data-bd-input': '', value: picDir ?? '',
+                placeholder: '例如 D:/Pictures/bili',
+                onChange: (e) => setPicDir(e.target.value),
+                onBlur: () => { const v = String(picDir || '').trim(); setPicDir(v); patch({ commentPictureDir: v }, '配图目录') },
               }))) : null,
           (dmMode === 'off' || dmMode === 'both') ? h(ToggleRow, {
             label: '回复评论（只回楼中楼）',

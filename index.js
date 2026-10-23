@@ -56,6 +56,13 @@ export const Config = !z ? undefined : z.object({
   night: z.boolean().default(true).extra('volatile', true),
   /** 自动评论 @ 使用者（默认关 —— 会拿用户的号说话，必须他自己开） */
   autoComment: z.boolean().default(false).extra('volatile', true),
+  /** ⭐ 评论配图（默认关 —— 会往 B站 图床上传图片；图源只允许表情包库和下面那个目录） */
+  commentPictures: z.boolean().default(false).extra('volatile', true),
+  /** ⭐ 每条评论最多配几张图（B站 接口硬上限 9；**有效范围 1–9，口径见 clampPatch**）
+   *  ⚠️ 同样不写 `.max(9)`：schema 校验不过 ⇒ 整条插件不激活（见下面 commentPerRound 的注释） */
+  commentPictureMax: z.natural().default(1).extra('volatile', true),
+  /** ⭐ 额外的可配图目录（可选；留空 = 只用本机 dsh-meme 表情包库） */
+  commentPictureDir: z.string().default('').extra('volatile', true),
   /** ⭐ 私信投递：off=只发评论（现状）· only=只私信（完全不公开评论）· both=评论 + 私信 */
   dmMode: z.string().default('only').extra('volatile', true),
   /** ⭐ 私信发给谁的 UID（数字）。要在 dmMode 不是 off 时填 */
@@ -236,7 +243,7 @@ function reportMeta() {
   const DEFAULTS = {
     dmWatch: true, dmWatchMinutes: 1, dmReplyPerDay: 0, dmOwnerUid: 0,
     personaPrompt: '',
-    perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
+    perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, commentPictures: false, commentPictureMax: 1, commentPictureDir: '', transcribe: false, asrModel: 'small',
     dmMode: 'only', dmUid: 0,
     keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, favFolderId: 0,
   }
@@ -278,6 +285,9 @@ function reportMeta() {
     if ('replyPerRound' in p) p.replyPerRound = Math.max(1, Math.min(Number(p.replyPerRound) || 1, 10))
     if ('favFolderId' in p) p.favFolderId = Math.max(0, Math.floor(Number(p.favFolderId) || 0))
     if ('commentPerRound' in p) p.commentPerRound = Math.max(0, Math.min(Number(p.commentPerRound) || 0, 20))
+    if ('commentPictures' in p) p.commentPictures = Boolean(p.commentPictures)
+    if ('commentPictureMax' in p) p.commentPictureMax = Math.max(1, Math.min(Number(p.commentPictureMax) || 1, 9))
+    if ('commentPictureDir' in p) p.commentPictureDir = String(p.commentPictureDir || '').trim().slice(0, 600)
     return p
   }
 
@@ -470,7 +480,12 @@ function reportMeta() {
 
   let mcp = null
   let mcpKey = ''
-  const mcpKeyNow = () => `${cfg.pythonPath}|${join(stateDir, 'mcp_server.py')}`
+  /** MCP 子进程要知道"评论配图开没开、额外目录是哪个"（图片闸在 Python 那侧也得是硬的） */
+  const commentPictureEnv = () => ({
+    BILI_COMMENT_PICTURES: cfg.commentPictures ? '1' : '0',
+    ...(cfg.commentPictureDir ? { BILI_COMMENT_PICTURE_DIR: cfg.commentPictureDir } : {}),
+  })
+  const mcpKeyNow = () => `${cfg.pythonPath}|${join(stateDir, 'mcp_server.py')}|${cfg.commentPictures ? 1 : 0}|${cfg.commentPictureDir || ''}`
 
   const ensureMcp = async () => {
     if (mcp?.running && mcpKey === mcpKeyNow()) return mcp
@@ -484,7 +499,7 @@ function reportMeta() {
       cwd: stateDir,                     // 凭证落在家里 ✓
       // ⭐ 这个内置的 Python MCP 会往 stdout 打中文（ensure_ascii=False）；
       //    Windows 默认 GBK 的话，中文/emoji 一进管道就可能炸 ⇒ 钉死 UTF-8
-      env: uvEnv(),
+      env: uvEnv(commentPictureEnv()),
       log,
     })
     return mcp
@@ -577,14 +592,20 @@ function reportMeta() {
     name: 'bili_reply',
     description: '在视频下发评论（或回复某条评论）。这就是"@ 本人"那一下：短、干净、纯文本 @ 写在正文里。\n'
       + '🔴 安全闸：设置页的「自动评论并 @ 你」**默认是关的**；关着的时候这个工具会拒绝 —— '
-      + '除非本人当场让你发（那时传 force: true）。',
+      + '除非本人当场让你发（那时传 force: true）。\n'
+      + '🖼 可选配图（设置页「评论配图」默认关，开了才生效）：pictures（本机图片路径）/ meme（表情包关键词）二选一或合用，'
+      + '仅**顶层评论**可用；B站 子评论（rpid≠0）不能带图，回复时只传文本。',
     parameters: {
       bvid: { type: 'string', description: 'BV号' },
       text: { type: 'string', description: '评论正文（短、干净、纯文本 @；别写敏感词）' },
       rpid: { type: 'number', description: '要回复的评论 id（0/不填 = 发新评论）' },
+      pictures: { type: 'string', description: '配图的本机图片绝对路径，多张用换行/逗号分隔；只能来自设置里的配图目录或本机 dsh-meme 表情包库，最多 9 张' },
+      meme: { type: 'string', description: '从本机 dsh-meme 表情包库按关键词挑一张（如 无语、摸鱼、开心）' },
+      memeTag: { type: 'string', description: '表情包情绪桶：happy/angry/sad/shy/confused/daily（可与 meme 合用）' },
       force: { type: 'boolean', description: '本人当场让你发的，传 true 越过"自动评论关着"的闸' },
     },
     async execute(args) {
+      refreshCfg()   // 设置页刚改的「评论配图」要立刻生效
       // dmMode==='only' 时本轮根本不该发公开评论 —— 在工具层也一并挡掉（除非当场 force）
       const commentOn = Boolean(cfg.autoComment && cfg.mentionName && cfg.dmMode !== 'only')
       if (!commentOn && !args.force) {
@@ -596,10 +617,31 @@ function reportMeta() {
             : '要发评论得同时满足两条：设置里开着「自动评论并 @ 你」、并且填了「要 @ 谁」。或者本人当场让你发时传 force: true。',
         }
       }
+      const rpid = Number(args.rpid) || 0
+      const picPaths = String(args.pictures ?? '').split(/[\r\n,，;；]+/).map((s) => s.trim()).filter(Boolean)
+      const meme = String(args.meme ?? '').trim()
+      const memeTag = String(args.memeTag ?? '').trim()
+      const wantPics = picPaths.length + (meme ? 1 : 0)
+      const maxPics = Math.max(1, Math.min(Number(cfg.commentPictureMax) || 1, 9))
+      if (wantPics > 0) {
+        // B站 子评论不能带图（实测 -400「子评论不能带图」）—— 先挡掉，别让它白上传一张图再失败
+        if (rpid !== 0 && !args.force) {
+          return { ok: false, blocked: true, hint: 'B站 子评论（rpid≠0）不能带图。去掉 pictures / meme 只发文本；要配图就发顶层评论。' }
+        }
+        if (!cfg.commentPictures && !args.force) {
+          return { ok: false, blocked: true, hint: '评论配图没开：去 设置 → 刷B站 → 互动 打开「评论配图」，或本人当场让你发时传 force: true。' }
+        }
+        if (wantPics > maxPics && !args.force) {
+          return { ok: false, blocked: true, hint: `这条评论最多带 ${maxPics} 张图（设置页「每条评论最多配几张图」，上限 9）；要一次带 ${wantPics} 张就先把设置调大，或本人当场让你发时传 force: true。` }
+        }
+      }
       return call('bili_reply', {
         bvid: String(args.bvid ?? ''),
         text: String(args.text ?? ''),
-        rpid: Number(args.rpid) || 0,
+        rpid,
+        ...(picPaths.length ? { pictures: picPaths } : {}),
+        ...(meme ? { meme } : {}),
+        ...(memeTag ? { meme_tag: memeTag } : {}),
       })
     },
   })
@@ -627,6 +669,9 @@ function reportMeta() {
         }])),
         peakValley: cfg.peakValley,
         autoComment: cfg.autoComment,
+        commentPictures: cfg.commentPictures,
+        commentPictureMax: Number(cfg.commentPictureMax) || 1,
+        commentPictureDir: cfg.commentPictureDir || '',
         dmMode: cfg.dmMode,
         dmUid: Number(cfg.dmUid) || 0,
         transcribe: cfg.transcribe,
@@ -1055,6 +1100,12 @@ function reportMeta() {
         : (dmModeEff === 'only'
           ? '关着的 —— 当前是「**只私信**」模式：**这一轮一条公开评论都不许发**，改走私信'
           : '关着的（只写报告，别发评论）')}。`
+      + (commentOn && cfg.commentPictures
+        ? `评论配图：开着（每条最多 ${Math.max(1, Math.min(Number(cfg.commentPictureMax) || 1, 9))} 张）—— `
+          + `只在轻松 / 接梗 / 斗图的时候配，正经推荐别硬配；图用 bili_reply 的 meme="<关键词或情绪>" 从本机表情包库挑，`
+          + `或者 pictures="<本机图片绝对路径>"（只允许「额外配图目录」或表情包库里的图，多张换行分隔）；`
+          + `⚠️ 只有**顶层评论**能带图：回复别人（rpid≠0）一律纯文本；⚠️ 正文里不许写文件名 / 路径 / 图片占位符，也别另外补一条"图在楼下"的评论。`
+        : (commentOn ? `评论配图：关着（评论一律不带图）。` : ''))
       + (dmOn
         ? `⭐⭐ **私信投递**：用 bili_send_message 把这一轮的结果发到 UID **${dmUidEff}**。`
           + `内容**别照抄评论那套**：把本轮每条值得的写成 **标题 + 链接 + 一句话理由**`
@@ -1163,6 +1214,8 @@ function reportMeta() {
         '          - ' + yq(posix(script)),
         '        env:',
         '          BILI_MCP_TOOLS: ' + yq(mcpWhitelist().join(',')),
+        '          BILI_COMMENT_PICTURES: ' + yq(cfg.commentPictures ? '1' : '0'),
+        ...(cfg.commentPictureDir ? ['          BILI_COMMENT_PICTURE_DIR: ' + yq(cfg.commentPictureDir)] : []),
         '',
       )
     }
@@ -2176,7 +2229,7 @@ function reportMeta() {
       const body = await readBody(req)
       const patch = {}
       for (const k of ['perDay', 'peakValley', 'noon', 'night', 'autoComment', 'transcribe', 'asrModel',
-        'commentPerRound', 'mentionName', 'dmMode', 'dmUid',
+        'commentPerRound', 'commentPictures', 'commentPictureMax', 'commentPictureDir', 'mentionName', 'dmMode', 'dmUid',
         'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound', 'personaPrompt', 'dmWatch', 'dmWatchMinutes', 'dmReplyPerDay', 'dmOwnerUid']) {
         if (k in body) patch[k] = body[k]
       }

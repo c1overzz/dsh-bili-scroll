@@ -1,3 +1,17 @@
+## 未发布
+
+**评论区可以带图了（默认关）。** 之前 `bili_reply` 只能发纯文字；现在顶层评论可以带 1–9 张表情包图。
+
+### 🖼 新能力：评论配图（默认关）
+
+- `bili_reply` 新增三个参数：`pictures`（本机图片绝对路径，多张换行分隔）、`meme`（从本机 **dsh-meme** 表情包库按关键词/情绪挑一张）、`memeTag`（情绪桶 `happy/angry/sad/shy/confused/daily`）。
+- 设置页「互动」新增：**评论配图（表情包）** 开关（默认关）、**每条评论最多配几张图**（1–9，默认 1）、**额外配图目录**（可选，留空 = 只用 dsh-meme 图库）。
+- 走 `bilibili-api-python` 原生的 `pic=Picture` 链路：先上传 B站 图床（`/x/dynamic/feed/draw/upload_bfs`），再随评论提交 `pictures` + `gaia_source=main_web`，不自造接口。
+- 图源只读：只允许 dsh-meme 图库或设置里的「额外配图目录」；webp/gif 会在本机转成 png（gif 取首帧），单张 ≤20MB。
+- 安全：默认关；关着时工具层直接拒绝（本人当场 `force: true` 才放行）；**子评论（rpid≠0）B站 不允许带图** ⇒ 直接按纯文字发，回执带 `pictures_skipped_reason`。
+- 上传/发送分开报错：`stage=prepare`（可安全重试）/ `stage=send`（结果未知，先复核再重发）；每张图用独立临时文件上传，避免 bilibili-api 默认共享 `test.png` 并发串图。
+- 新增离线测试：`tests/comment-pictures.test.mjs`（6 项，宿主闸门/透传）+ `tests/test_comment_pictures.py`（13 项，图库挑图/图片准备/子评论/开关/错误语义）。
+
 ## 2.0.4 — 2026-10-23
 
 **这一版一次修完：两处安全、六条 bug。有人把源码读了一遍，逐条核实、逐条修。**
