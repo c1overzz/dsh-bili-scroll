@@ -1036,6 +1036,7 @@ function reportMeta() {
   // ⭐ 私信默认化（2026-10-21）：用户常常只填了「@ 谁」的昵称、没填 UID
   //    ⇒ 我们按昵称替他查一次 mid 并缓存；**查不到就降级回只发评论**（绝不能"默认私信"却一条都送不出去 ✗）
   let dmUidCache = 0
+  let dmWarmTriedAt = 0
   async function warmDmUid() {
     if (Number(cfg.dmUid) > 0) return Number(cfg.dmUid)
     if (cfg.dmMode === 'off') return 0
@@ -1386,12 +1387,17 @@ function reportMeta() {
     //    ⇒ overlay 里补一条 agent-default-model，**优先跟随用户当前选的模型**；拿不到就不写（保持原行为）✓
     // 本分支：插件设置里显式指定了模型时，优先用那个（没有再跟随上游的"当前选择"）
     if (String(cfg.headlessModel || '').trim()) {
-      const eff = String(cfg.headlessEffort || '').trim()
+      const modelNow = String(cfg.headlessModel).trim()
+      // ⚠️ 2026-10-25 实测：`deepseek-flash` **不支持 reasoningEffort** ——
+      //    overlay 里写 `reasoningEffort: medium` 会直接
+      //    `UNSUPPORTED_REASONING_EFFORT` ⇒ 那一轮 1.5 秒就 exit=1（定时/点名/私信回复全挂）。
+      //    所以这个模型一律不写 effort（跟随 provider 默认）。
+      const eff = /^deepseek-flash$/i.test(modelNow) ? '' : String(cfg.headlessEffort || '').trim()
       yml.push(
         '- id: agent-default-model',
         '  config:',
         '    provider: ' + String(cfg.headlessProvider || 'deepseek-official').trim(),
-        '    model: ' + String(cfg.headlessModel).trim(),
+        '    model: ' + modelNow,
         ...(eff ? ['    reasoningEffort: ' + eff] : []),
         '',
       )
@@ -1743,7 +1749,11 @@ function reportMeta() {
         const key = `${today}:${k}`
         if (st.windows?.[key]) continue
         bumpState({ windows: { ...(st.windows || {}), [key]: true }, count: roundsToday(now) + 1, lastRunAt: now.toISOString(), lastWhy: k })
-        runDuty(`window:${k}`)
+        const go = () => { try { runDuty(`window:${k}`) } catch (e) { log('起轮失败：' + String(e?.message ?? e)) } }
+        // ⭐ 私信投递：定时那一轮以前不预热 UID ⇒ 提示词里"发给 UID 0"，等于没发
+        if (String(cfg.dmMode || 'off') !== 'off' && !dmUidCache && String(cfg.mentionName || '').trim()) {
+          warmDmUid().catch(() => 0).finally(go)
+        } else go()
         return
       }
     } catch (e) {
@@ -1870,6 +1880,17 @@ function reportMeta() {
         try { writeFileSync(lockFile, JSON.stringify({ pid: process.pid, ts: Date.now() }), 'utf8') } catch { /* 写不了就算了 */ }
       }
       if (!cfg.dmWatch) return
+      // ⭐ 本分支修（2026-10-25）：昵称 → UID 的解析以前只在「手动跑一轮」里做，
+      //    监听循环从不预热 ⇒ uid-cache 一直空 ⇒ owner 回退成"登录账号自己"，
+      //    用户从另一个号发来的私信就被当成陌生人、永远不回 ✗
+      //    这里补上：没解析过就试一次（10 分钟内不重复试，避免一直打接口）
+      if (!dmUidCache && String(cfg.mentionName || '').trim() && String(cfg.dmMode || 'off') !== 'off') {
+        const nowMs = Date.now()
+        if (nowMs - dmWarmTriedAt > 10 * 60_000) {
+          dmWarmTriedAt = nowMs
+          try { await warmDmUid() } catch (e) { log('预热私信 UID 出错：' + String(e?.message ?? e)) }
+        }
+      }
       const cred = dmCred(stateDir)
       if (!cred) return
       // ⚠️ 不再用「@ 谁」的昵称去推断"谁是主人"（那可能是别人 ✗，2026-10-23 修的）
