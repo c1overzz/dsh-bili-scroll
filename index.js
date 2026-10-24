@@ -1827,7 +1827,12 @@ function reportMeta() {
     })()
     return (persona ? '（说话风格按这份人设来：\n' + persona + '\n）\n' : '')
       + '这是 B站 私信里、账号持有者本人发来的一句话：' + JSON.stringify(raw)
-      + (bv ? `\n里面有个视频 ${bv}：用 bili_subtitle 读一下它的字幕再回，说点具体的。` : '')
+      + (bv ? `\n里面是个视频 ${bv} —— 按「迷你点名看」走：`
+        + `\n  ① 先用 \`bili_video_info\` 拿标题/UP/播放；`
+        + `\n  ② \`bili_subtitle\` 读字幕原文（没字幕就跳过，别转写）；`
+        + (String(cfg.seeVideo ?? true) !== 'false' ? `\n  ③ \`bili_frames\` 抽一张关键帧，\`read_image\` 看一眼画面；` : '')
+        + `\n  ④ \`bili_comments\` 翻两三眼评论；`
+        + `\n  然后一句话说清：这视频在讲什么、值不值得看。**不要写文件、不要发公开评论**。` : '')
       + `\n用 bili_send_message 回他一句（uid=${Number(fromUid)}），100 字以内，像聊天。`
       + '\n⚠️ 只回纯文本：**不要 markdown 星号/加粗**、不要括号里写"（多少字…可继续发送…）"这类说明，不要复述这条要求。'
   }
