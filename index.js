@@ -1517,6 +1517,80 @@ function reportMeta() {
     } catch (e) { log(`补占位报告失败：${e?.message ?? e}`) }
   }
 
+  /* ── 值班会话的「隐形」处理 ──
+   * 🔴 2026-10-25（本人反馈）：每点一次「现在跑一轮」，左侧「未分组」就多一个对话。
+   *    原因：值班轮是 `dsh --profile bili-duty <prompt>` 起的**独立会话**，它不属于任何 workspace，
+   *    侧栏就把它列在「未分组」；而 `dsh headless --help` 只有 `--session-id`，**没有"不写 session"的开关**
+   *    ⇒ 会话一定会落盘，插件没法阻止。能做的只是**跑完立刻归档**：DSH 的 archivedSessionIds 是全局的，
+   *    侧栏默认不列已归档的会话，但对话记录还留着（要翻还能翻）。
+   *    ⚠️ 只动「桶名里带 bili-duty」的那些 session（值班轮自己的 cwd），绝不碰用户自己的会话。
+   */
+  const dutySessionBucket = () => {
+    try {
+      const root = join(dirname(stateDir), 'sessions')
+      const bucket = readdirSync(root).find((n) => n.includes('bili-duty'))
+      return bucket ? { dir: join(root, bucket) } : null
+    } catch { return null }
+  }
+  const archiveDutySessions = async (ids) => {
+    const reg = ctx.get('workspaceRegistry')
+    if (!reg?.archiveSession) { log('⚠️ 拿不到 workspaceRegistry ⇒ 值班会话没法自动归档'); return 0 }
+    let n = 0
+    for (const id of ids) {
+      try { await reg.archiveSession(id, {}); n += 1 } catch { /* 已经归档 / 不存在 ⇒ 跳过 */ }
+    }
+    return n
+  }
+  /** 归档桶里的 session；给了 since（毫秒）就只归档那之后动过的（= 刚跑完的这一轮）；
+   *  exclude 里的 id 不动（私信回复那条会话要留着续聊，不能一起归档掉） */
+  const archiveDutyBucket = (since = 0, exclude = new Set()) => {
+    try {
+      const b = dutySessionBucket()
+      if (!b) return 0
+      const ids = []
+      for (const n of readdirSync(b.dir)) {
+        if (!/^session-/.test(n)) continue
+        if (exclude.has(n)) continue
+        if (since > 0) {
+          try { if (statSync(join(b.dir, n)).mtimeMs < since) continue } catch { continue }
+        }
+        ids.push(n)
+      }
+      if (!ids.length) return 0
+      archiveDutySessions(ids)
+        .then((k) => {
+          if (k) log(`已归档 ${k} 个值班会话（不再出现在侧栏「未分组」）`)
+          else log(`⚠️ 有 ${ids.length} 个值班会话没归档成（workspaceRegistry 不认）⇒ 侧栏「未分组」可能还看得到`)
+        })
+        .catch(() => { /* 归档失败不影响这一轮 */ })
+      return ids.length
+    } catch { return 0 }
+  }
+
+  /**
+   * ⭐ 2026-10-25（本人反馈：「明明指定了工作区，能不能让它显示在工作区中」）：
+   *    DSH 侧栏按**会话的 cwd** 归工作区 —— cwd 在插件家（没登记成工作区）⇒ 显示成「未分组」。
+   *    设了 workspace 且目录在 ⇒ 值班轮的 cwd 就用它：会话落在那个工作区的桶里，侧栏自然归进去。
+   *    没设 / 目录不在 / 跑的是全工具的 headless（老回退路径）⇒ 仍用插件家，保持老行为。
+   *    ⚠️ 顺带确保这个目录是**已登记的工作区**（没登记的话侧栏还是没地方挂它）。
+   */
+  const dutyCwd = () => {
+    const want = String(cfg.workspace || '').trim()
+    if (!want) return stateDir
+    try { if (!statSync(want).isDirectory()) return stateDir } catch { return stateDir }
+    if (dutyProfileState !== 'ok') return stateDir
+    try {
+      const reg = ctx.get('workspaceRegistry')
+      if (reg?.resolveByPath) {
+        reg.resolveByPath(want).then((w) => {
+          if (w || !reg.create) return
+          reg.create(want).then(() => log('已把工作区登记进 DSH：' + want)).catch(() => { /* 登记失败就算了 */ })
+        }).catch(() => { /* 路径在但 realpath 失败：不影响这一轮 */ })
+      }
+    } catch { /* 拿不到注册表也不影响跑 */ }
+    return want
+  }
+
   // ⭐⭐ 2.0.4（第三方体检第 2 条）：**同一时间只允许一轮在跑**，并且**登记这个子进程**，
   //    关页面/卸载插件时能把它一起收掉（以前它没有锁、也不归 ctx.effect 管 ✗）。
   let dutyChild = null
@@ -1563,12 +1637,14 @@ function reportMeta() {
       const args = [...dsh.args, '--profile', effectiveProfile()]
     if (overlay) args.push('--patch', overlay)
     args.push(promptFor())
-    // ⭐ 这一轮的工作目录 = 使用者（或别的用户）的**工作区** —— 只有这样它的 `AGENTS.md` 才会自动加载。
-    // ⭐ 工作目录 = **插件家**：那一轮**被沙箱关着**，只写得了自己工作目录里的东西 ✗
-    //    （2026-10-14 教训：为了让它读工作区里的 AGENTS.md 把 cwd 改成工作区 ⇒
-    //      它写不了家目录里的 out/ 报告、整轮卡在"我是被沙箱关着的"上面打转 ✗；
-    //      现在改成"设定由插件读进来、内联进提示词" ✓，cwd 回到插件家 ✓）
-    const cwd = stateDir
+    // ⭐⭐ 2026-10-25（本人反馈：「明明指定了工作区，能不能让它显示在工作区中」）：
+    //    DSH 侧栏是按**会话的 cwd** 归属工作区的 —— cwd 在插件家 ⇒ 那个 cwd 没登记成工作区 ⇒ 「未分组」。
+    //    所以值班轮的工作目录改成**设置里的 workspace**（存在才用）：会话直接落在那个工作区的桶里，
+    //    侧栏就归到工作区下面，而不是「未分组」。
+    //    ⚠️ 以前不敢这么做是因为「被沙箱关着，写不了家目录里的 out/ 报告」——2.1.0 起值班轮用
+    //       最小权限 profile（**没有 fs 工具**），报告/判重表都走 MCP 的窄口工具（固定绝对路径），
+    //       跟 cwd 无关 ⇒ 这个顾虑没有了。退回到 headless（全工具）时仍用插件家，保持老行为。
+    const cwd = dutyCwd()
     log(`刷B站开跑（${why}）：${dsh.command} ${args.slice(0, 3).join(' ')} …  cwd=${cwd}`)
     const child = spawn(dsh.command, args, {
       cwd,
@@ -1607,8 +1683,14 @@ function reportMeta() {
     dutyWatchdog = setTimeout(() => killDuty(`超过 ${dutyTimeoutMin()} 分钟没跑完`), dutyTimeoutMin() * 60_000)
     dutyWatchdog.unref?.()
     child.on('exit', (code) => {
+      const startedAt = dutyStartedAt
       if (dutyChild === child) dutyClear()
       log(`刷B站结束（${why}，code=${code}）`)
+      // ⭐ 2026-10-25：这一轮刚生成的会话，稍等它落盘后归档 —— 别让它占着侧栏「未分组」
+      try {
+        const t = setTimeout(() => { archiveDutyBucket(startedAt - 5000) }, 1200)
+        t.unref?.()
+      } catch { /* 忽略 */ }
       stubReportIfMissing(code)   // ⭐ 没写报告就补一份占位 —— 别让使用者什么都看不到
     // ⭐ 2026-10-20：这一轮跑成了、并且使用者选了收藏夹 ⇒ 把挑中的存进去（后台做，别拖住收尾）
     if (code === 0 && Number(cfg.favFolderId) > 0) {
@@ -3083,4 +3165,13 @@ function reportMeta() {
   if (dutyProfileState === 'ok') log('值班轮用最小权限 profile：bili-duty（无文件系统 / 无命令 / 无联网）')
   else log('⚠️ 最小权限 profile 不可用（' + dutyProfileState + '）⇒ 值班轮仍用 headless（这一轮能力偏大）')
   log(`已挂载（家=${stateDir}，python=${cfg.pythonPath}，峰谷=${cfg.peakValley ? '开' : '关'}）`)
+  // ⭐ 2026-10-25：历史清理 —— 以前每轮留下的值班会话也归档掉（只碰 bili-duty 桶）。
+  //    延迟几秒：workspaceRegistry 服务未必比这个插件先就绪。
+  try {
+    const t = setTimeout(() => {
+      const dmSid = (() => { try { return String(readDmSession() || '') } catch { return '' } })()
+      archiveDutyBucket(0, new Set(dmSid ? [dmSid] : []))
+    }, 5000)
+    t.unref?.()
+  } catch { /* 忽略 */ }
 }
