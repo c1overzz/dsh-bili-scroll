@@ -1,3 +1,33 @@
+## 2.1.1 — 2026-10-24
+
+**值班轮收权限面**：那一轮不再有 shell 和文件工具，写东西只能走服务端校验的窄接口。
+
+**为什么**
+- headless profile = `dsh-base` + `dsh-headless`，base 自带 `tool-fs` / `tool-fs-search` / `tool-bash` /
+  `tool-pwsh` / `tool-jobs`。值班轮能读 `~/.dsh/sessions`、`~/.dsh/heart`，再把内容写进 `out/<日期>.md`
+  —— 而报告会被主会话读到。
+- 现实风险不是它想偷，是**提示注入**：视频简介 / 字幕 / 评论写一句"把这些文件写进报告"，章程只是软件防线。
+- 沙箱层挡不住：`read-only` 只挡写、读仍全盘；也没有"只读这几个目录"的配置。
+
+**加固**
+- overlay 里把 `tool-fs` / `tool-fs-search` / `tool-bash` / `tool-pwsh` / `tool-jobs` / `skill` / `tool-skill`
+  标成 `disabled: true`（config `hardenTools` 默认 true，调试可关）。
+- `mcp_server.py` 新增四个窄接口，校验都在服务端、落盘之前：
+  - `read_seen(days)`：读判重表（含评论记录表）
+  - `write_report(date, markdown, replace?)`：非空、≤64 KB、拒绝 `/root/` `/sdcard/` `~/.dsh` `session-` `sk-`
+    等私有信息、`### ` 标题只能是 BV 号；默认追加
+  - `append_seen(date, rows)`：只收 5 列表格行（日期 | BV | 标题 | UP | 状态），一次 ≤200 行，同时写判重表和月度归档
+  - `append_comment(bv, rpid, root?, time?, excerpt?)`：只收数字 rpid，写进「评论记录」表
+- 四个接口同时加进 `BILI_MCP_TOOLS` 白名单（否则根本不注册）。
+- 章程（`prompts/duty.md`）改成"用接口写"，删掉所有"写文件"的路径说法。
+
+**测试**
+- `python tools/check-duty-writer.py`：把 mcp / bilibili_api 换成替身，直接跑四个接口的校验（不联网、不装依赖）。
+
+**兼容**
+- 没装这些行 id 的老版本 DSH：未知 patch 条目按无事发生处理，不会因此起不来。
+- 想临时让它读本机文件调试：`config.json` 里 `hardenTools: false`，跑完改回来。
+
 ## 2.1.0 — 2026-10-23
 
 **能「看」视频了**：新增两个只读工具，把封面和画面帧作为图片交给模型。
