@@ -380,8 +380,15 @@ function reportMeta() {
     ])
     // ⭐ 2026-10-19：把"插件这份和 DSH 原生设置那份不一样、且以插件为准"的键记下来 ——
     //   只记不吵（每台机器每种组合只写一行日志），`/status` 里也能看到，排查时一眼够用
+    // ⭐⭐ 2026-10-25（本人反馈：「把工作区改了，标签还在旧工作区」）：
+    //    **面板里没有入口的键**不能走"本地优先" —— 用户只能去 DSH 原生设置页改它们，
+    //    而 touched 的判据（config.json 和默认值不同 / 曾被工具写过）会让那份旧值一直赢 ✗
+    //    实测：把 workspace 从 D:\hajimi 改成 D:\dafeiyu，原生设置页显示改了、插件仍读旧值 ⇒
+    //    「刷过的视频」tab 还挂在旧工作区。⇒ 这两个键只要有原生 user 层值，就以**原生**为准。
+    const NATIVE_FIRST_KEYS = new Set(['workspace', 'headlessProfile'])
     const diff = []
     for (const k of Object.keys(DEFAULTS)) {
+      if (NATIVE_FIRST_KEYS.has(k) && user[k] !== undefined) { out[k] = user[k]; continue }   // 只在原生页能改 ⇒ 听原生
       if (touched.has(k)) { out[k] = saved[k]; continue }        // 我们这边管 ⇒ 不再被宿主压回
       if (user[k] !== undefined) { out[k] = user[k]; continue }  // 用户在 DSH 原生页改的 ⇒ 听他的
       out[k] = saved[k]

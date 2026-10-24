@@ -47,6 +47,20 @@ window.__ModuleLoader__.load({
       body: JSON.stringify(body || {}),
     }))
 
+    /* ⭐ 2026-10-25（本人反馈：「把工作区改了，标签还在旧工作区」）：
+       「刷过的视频」tab 是按「会话属于哪个工作区」动态注册的，结果缓存在这里。
+       以前缓存**永不过期、也不失效** ⇒ 改了工作区设置之后，老会话的旧结论一直留着，
+       tab 就还挂在旧工作区。
+       现在：缓存带 TTL；设置保存、窗口重新获得焦点、每 15 秒兜底轮询都会 `bumpScope()`
+       —— 清缓存 + 让所有探针重查（一次本地 GET，很便宜）。 */
+    const scopeCache = new Map()          // sessionId -> { v: boolean, at: number }
+    const SCOPE_TTL = 20_000
+    const scopeSubs = new Set()           // 探针注册的"请重查"回调
+    const bumpScope = () => {
+      scopeCache.clear()
+      for (const fn of [...scopeSubs]) { try { fn() } catch { /* 单个探针报错不影响别的 */ } }
+    }
+
     const CSS = `
 [data-bd-page]{display:flex;flex-direction:column;gap:18px;padding:2px 2px 8px;max-width:640px;}
     [data-bd-page][data-bd-wide]{max-width:none;width:100%;}
@@ -328,6 +342,8 @@ function WatchTab() {
         try {
           const r = await jpost('/config', p)
           if (r?.config) setSt((old) => ({ ...old, config: r.config }))
+          // ⭐ 2026-10-25：保存后让「刷过的视频」tab 重查工作区（改 workspace 时 tab 要跟着挪）
+          try { bumpScope() } catch { /* 忽略 */ }
           // ⭐ DSH 原生设置页里显式设过的键由宿主说了算 ⇒ 我们这份也得写进去；写失败要说出来，别假装"已保存"
           if (r?.host && r.host.ok === false) say(`${what || '设置'}：插件自己那份存了，但 DSH 设置页那份没写进去（${r.host.error}）`, 'warn')
           else say(what ? `${what}：已保存` : '已保存', 'good')
@@ -923,6 +939,17 @@ function WatchTab() {
         document.head.appendChild(style)
         ctx.effect(() => () => style.remove(), 'dsh-bili-scroll: 设置页样式')
 
+        // ⭐ 2026-10-25：窗口回到前台就重查「这个会话在哪个工作区」——
+        //    用户在设置里改了工作区后，不用刷新整页，切回来一会儿 tab 就跟着挪。
+        const bumpOnFocus = () => { try { bumpScope() } catch { /* 忽略 */ } }
+        const bumpOnVisible = () => { if (!document.hidden) bumpOnFocus() }
+        window.addEventListener('focus', bumpOnFocus)
+        document.addEventListener('visibilitychange', bumpOnVisible)
+        ctx.effect(() => () => {
+          window.removeEventListener('focus', bumpOnFocus)
+          document.removeEventListener('visibilitychange', bumpOnVisible)
+        }, 'dsh-bili-scroll: 工作区缓存失效')
+
         // ⭐ 进「设置」：label 就是左侧导航里那一项（抄 dsh-meme 的写法）
         const slots = (typeof ctx.get === 'function' ? ctx.get('slots') : undefined) || ctx.slots
         if (!slots) return
@@ -942,7 +969,6 @@ function WatchTab() {
   //      · 是 ⇒ 注册「刷过的视频」；不是 ⇒ 立刻撤销（tab 跟着消失）。
   //    这样：hajimi 工作区里的会话有 tab，别的会话（比如 default-workspace）没有。
   try {
-    const scopeCache = new Map()          // sessionId -> true/false（属于刷B站工作区）
     let viewOff = null
     let viewSlotReady = false
     const dropView = () => {
@@ -970,29 +996,43 @@ function WatchTab() {
       return () => { viewSlotReady = false; dropView() }
     })
     const ScopeProbe = ({ sessionId }) => {
+      const [nonce, setNonce] = React.useState(0)
+      // 订阅 bumpScope：设置变了 / 窗口回到前台 / 15 秒兜底轮询 ⇒ 重查一次
+      React.useEffect(() => {
+        const fn = () => setNonce((n) => n + 1)
+        scopeSubs.add(fn)
+        return () => { scopeSubs.delete(fn) }
+      }, [])
+      React.useEffect(() => {
+        const t = setInterval(() => bumpScope(), 15_000)
+        t.unref?.()
+        return () => clearInterval(t)
+      }, [])
       React.useEffect(() => {
         const sid = String(sessionId || '')
         // 拿不到 sessionId（槽位没给 / 老版本）：退回老行为 —— 照常显示，别把 tab 弄没了
         if (!sid) { lastInScope = true; ensureView(); return () => {} }
-        const known = scopeCache.get(sid)
-        if (known === true) { ensureView(); return () => {} }
-        if (known === false) { dropView(); return () => {} }
-        // 没缓存过：先收起来（宁可晚一帧出现，也别让 tab 在别的会话上闪），再问宿主
+        const hit = scopeCache.get(sid)
+        if (hit && Date.now() - hit.at < SCOPE_TTL) {
+          if (hit.v) { lastInScope = true; ensureView() } else dropView()
+          return () => {}
+        }
+        // 没缓存 / 缓存过期：先收起来（宁可晚一帧出现，也别让 tab 在别的会话上闪），再问宿主
         dropView()
         let alive = true
         jget('/session-scope?session=' + encodeURIComponent(sid))
           .then((r) => {
             if (!alive) return
             // 老宿主没有这个接口（r.ok 不是 true）⇒ 退回老行为，别静默把 tab 藏掉
-            if (!r || r.ok !== true) { lastInScope = true; scopeCache.set(sid, true); ensureView(); return }
+            if (!r || r.ok !== true) { lastInScope = true; scopeCache.set(sid, { v: true, at: Date.now() }); ensureView(); return }
             const inScope = Boolean(r.match)
             lastInScope = inScope
-            scopeCache.set(sid, inScope)
+            scopeCache.set(sid, { v: inScope, at: Date.now() })
             if (inScope) ensureView(); else dropView()
           })
-          .catch(() => { if (alive) { lastInScope = true; scopeCache.set(sid, true); ensureView() } })
+          .catch(() => { if (alive) { lastInScope = true; scopeCache.set(sid, { v: true, at: Date.now() }); ensureView() } })
         return () => { alive = false }
-      }, [sessionId])
+      }, [sessionId, nonce])
       // 探针被卸载（切到没有会话的首页 / 别的面板）⇒ 把 tab 收起来
       React.useEffect(() => () => { dropView() }, [])
       return h('span', { 'data-bd-probe': '', style: { display: 'none' } })
