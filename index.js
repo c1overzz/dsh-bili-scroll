@@ -101,6 +101,8 @@ export const Config = !z ? undefined : z.object({
   replyToComments: z.boolean().default(false).extra('volatile', true),
   /** 每轮最多回几条 */
   replyPerRound: z.number().default(1).extra('volatile', true),
+  /** 值班会话复用几轮后换一个新的（1 = 每轮都新开）。默认 10 */
+  sessionRotateRounds: z.natural().default(10).extra('volatile', true),
   /** 自动收藏：0 = 不收藏；>0 = 目标收藏夹 fid（设置页下拉选）。动作在宿主侧完成，模型拿不到这只手 */
   favFolderId: z.number().default(0).extra('volatile', true),
 })
@@ -241,7 +243,7 @@ function reportMeta() {
     personaPrompt: '',
     perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
     dmMode: 'only', dmUid: 0,
-    keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, favFolderId: 0,
+    keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, sessionRotateRounds: 10, favFolderId: 0,
   }
   const normalize = (src, base) => {
     const out = { ...base }
@@ -1083,7 +1085,7 @@ function reportMeta() {
     } catch (e) { log('查私信 UID 出错：' + String(e?.message ?? e)); return 0 }
   }
 
-  const promptFor = () => {
+  const promptFor = (opts = {}) => {
     // ⭐ 章程取哪一份：家里那份优先（ensureCharter 保证铺好；他改过的话就是他那份，升级的事由 ensureCharter 记账处理）
     const duty = charterPath(pluginDir, stateDir)
     // ⭐ 2026-10-19（issue #36）：这里以前是**在路径字符串上**做 split('<家目录>') —— 空操作 ✗
@@ -1161,7 +1163,22 @@ function reportMeta() {
     if (dmDegraded) log('⚠️ 选的是「只私信」，但不知道发给谁（没填 UID、也没填「@ 谁」，或查不到）⇒ 这一轮降级成只发评论')
     const commentOn = Boolean(cfg.autoComment && cfg.mentionName && dmModeEff !== 'only')
     const dmOn = Boolean(dmModeEff !== "off" && dmUidEff > 0)
-    return `你是这个账号的 B站 助手。`
+    // ⭐ 2026-10-19：会话复用（--session-id）时只发一句「继续」——章程已经在这个会话的上下文里了，
+    //    再把整份章程灌一遍既烧 token 也会把上下文顶旧。
+    if (opts.resume) {
+      return `【B站值班 · ${dayKey()} · 第 ${Number(opts.group) || 1} 组】继续`
+        + `（本会话第 ${Number(opts.round) || 2} 轮 / 满 ${Number(opts.rotate) || 10} 轮换新会话）\n\n`
+        + `继续按上面的章程再刷一轮 B站，报告照旧追加到 ${join(outDir, `${dayKey()}.md`)}。`
+        + `今天已挑 ${already} 条、上限 ${quota} 条（这一轮最多再挑 ${left} 条；额度满了就 0 条、如实写）。`
+        + `关键词用这些：${kws.length ? kws.join('、') : '章程里的默认那几组'}。`
+        + `判重表 = ${join(stateDir, 'seen.md')}；归档追加到 ${join(digestDir, `${dayKey().slice(0, 7)}.md`)}。`
+        + (dmOn ? `私信照旧发到 UID ${Number(dmUidEff)}（一轮一条，500 字以内）。` : '')
+        + `最后用一句话汇报你挑到了什么。`
+    }
+    // ⭐ 2026-10-19：新会话的**第一条消息**决定侧栏里的自动标题 —— 开头先给一行正经名字，
+    //    别让会话名变成被截断的提示词（原来是「你是这个账号的 B站 助手。下」）。
+    const titleHead = `【B站值班 · ${dayKey()} · 第 ${Number(opts.group) || 1} 组】\n\n`
+    return titleHead + `你是这个账号的 B站 助手。`
       + `下面是使用者的设定（如果有）—— **按它来**，别用你默认那套人格。`
       + ownerDoc
       + (ownerDoc
@@ -1285,6 +1302,107 @@ function reportMeta() {
     const want = String(cfg.headlessProfile || '').trim()
     if (want && want !== 'headless' && want !== 'bili-duty') return want
     return dutyProfileState === 'ok' ? 'bili-duty' : (want || 'headless')
+  }
+
+  /* ─────────────── 会话目录 / 工作区对账（2026-10-19，issue #29） ───────────────
+   * 值班轮是独立 dsh 进程建的会话：宿主不会替它 attachSession，所以永远落在「未分组」；
+   * 而 DSH 的工作区成员资格 = 会话 cwd 严格等于工作区 path，也没有跨工作区移动的 API。
+   * 这里两件事：① 跑完自己挂进「path === 插件家」的工作区；② 挂载后扫一遍所有工作区自愈历史漂移。
+   */
+  const sessionsDirOf = (dir) => {
+    const root = join(dirname(stateDir), 'sessions')
+    const slug = '--' + String(dir).replace(/:/g, '').replace(/[\\/]/g, '-') + '--'
+    const exact = join(root, slug)
+    if (existsSync(exact)) return exact
+    try {
+      const tail = String(dir).split(/[\\/]/).filter(Boolean).pop()
+      const hit = readdirSync(root).find((n) => n.toLowerCase().includes(String(tail).toLowerCase()))
+      if (hit) return join(root, hit)
+    } catch { /* 找不到就用精确名 */ }
+    return exact
+  }
+  const latestDutySessionId = (since = 0) => {
+    try {
+      const dir = sessionsDirOf(stateDir)
+      if (!existsSync(dir)) return null
+      const cands = readdirSync(dir)
+        .filter((n) => existsSync(join(dir, n, 'session.v4.jsonl.zstd')))
+        .map((n) => ({ id: n, t: statSync(join(dir, n)).mtimeMs }))
+        .filter((x) => x.t >= Number(since || 0) - 5000)
+        .sort((a, b) => b.t - a.t)
+      return cands.length ? cands[0].id : null
+    } catch { return null }
+  }
+  const registryOf = () => (typeof ctx.get === 'function' ? ctx.get('workspaceRegistry') : null) || ctx.workspaceRegistry
+  const attachDutySessions = async ({ onlyNewest = false } = {}) => {
+    const out = { ok: false, hasRegistry: false, attached: [], workspaces: [], error: null }
+    try {
+      const reg = registryOf()
+      out.hasRegistry = Boolean(reg)
+      if (!reg || typeof reg.list !== 'function') { out.error = 'no workspaceRegistry'; return out }
+      const list = reg.list()
+      out.workspaces = list.map((w) => w.path)
+      const norm = (p) => String(p || '').replace(/[\\/]+$/, '').toLowerCase()
+      const ws = list.find((w) => norm(w.path) === norm(stateDir))
+      if (!ws) { out.error = 'no workspace whose path === stateDir'; return out }
+      out.workspace = ws.title || ws.path
+      const dir = sessionsDirOf(stateDir)
+      if (!existsSync(dir)) { out.error = 'no sessions dir: ' + dir; return out }
+      const ids = readdirSync(dir).filter((n) => existsSync(join(dir, n, 'session.v4.jsonl.zstd')))
+      const known = new Set(ws.sessionIds || [])
+      const archived = new Set((reg.archivedSessionIds || []).map(String))
+      let todo = ids.filter((id) => !known.has(id) && !archived.has(id))
+      if (onlyNewest && todo.length > 1) {
+        todo = [todo.map((id) => ({ id, t: statSync(join(dir, id)).mtimeMs })).sort((a, b) => b.t - a.t)[0].id]
+      }
+      for (const id of todo) {
+        try { await ws.attachSession(id); out.attached.push(id) } catch (e) { out.error = (out.error ? out.error + ' | ' : '') + id + ': ' + (e?.message ?? e) }
+      }
+      out.ok = true
+      if (out.attached.length) log(`已把 ${out.attached.length} 个值班会话挂进「${out.workspace}」`)
+    } catch (e) { out.error = String(e?.message ?? e) }
+    return out
+  }
+  /** 工作区对账：cwd 对得上某个工作区、却还没归属的会话补挂回去（跳过已归档 / 子代理） */
+  const syncWorkspaces = async ({ dryRun = false } = {}) => {
+    const out = { ok: false, attached: [], errors: [], workspaces: [] }
+    try {
+      const reg = registryOf()
+      if (!reg || typeof reg.list !== 'function') { out.error = 'no workspaceRegistry'; return out }
+      const list = reg.list()
+      const archived = new Set((reg.archivedSessionIds || []).map(String))
+      const owned = new Set()
+      for (const w of list) for (const id of (w.sessionIds || [])) owned.add(id)
+      for (const ws of list) {
+        out.workspaces.push(ws.path)
+        const dir = sessionsDirOf(ws.path)
+        if (!existsSync(dir)) continue
+        for (const id of readdirSync(dir)) {
+          if (!/^session-/.test(id) || owned.has(id) || archived.has(id)) continue
+          if (!existsSync(join(dir, id, 'session.v4.jsonl.zstd'))) continue
+          if (dryRun) { out.attached.push(id); continue }
+          try { await ws.attachSession(id); owned.add(id); out.attached.push(id) } catch (e) { out.errors.push(id + ': ' + (e?.message ?? e)) }
+        }
+      }
+      out.ok = true
+      if (out.attached.length) log(`工作区对账：补挂 ${out.attached.length} 条会话`)
+    } catch (e) { out.error = String(e?.message ?? e) }
+    return out
+  }
+  /** 跑完记一笔：这一轮用的是哪个会话、本会话第几轮、第几组 */
+  const recordDutySession = ({ reuseId, startedAt, rotate }) => {
+    try {
+      const st = readJson(dutyStateFile, {})
+      const id = reuseId || latestDutySessionId(startedAt)
+      if (!id) return null
+      const reused = Boolean(reuseId) && id === reuseId
+      const rounds = (reused ? Number(st.dutyRounds) || 0 : 0) + 1
+      const prevGroup = Number(st.dutyGroup) || 0
+      const group = reused ? (prevGroup || 1) : prevGroup + 1
+      bumpState({ dutySessionId: id, dutyRounds: rounds, dutyGroup: group, dutyLastRoundAt: Date.now() })
+      log(`会话记账：${id}（第 ${group} 组 · 本会话第 ${rounds}/${rotate} 轮）`)
+      return id
+    } catch (e) { log(`会话记账失败（不影响这一轮）：${e?.message ?? e}`); return null }
   }
 
   const ensureOverlay = () => {
@@ -1425,9 +1543,17 @@ function reportMeta() {
       return { started: false, why, error: msg }
     }
     const overlay = ensureOverlay()
+      const st0 = readJson(dutyStateFile, {})
+      const rotate = Math.max(1, Number(cfg.sessionRotateRounds) || 10)
+      const done = Number(st0.dutyRounds) || 0
+      const groupNo = Number(st0.dutyGroup) || 0
+      const reuseId = (st0.dutySessionId && done > 0 && done < rotate) ? String(st0.dutySessionId) : ''
+      const startedAt = Date.now()
+      if (reuseId) log(`沿用值班会话 ${reuseId}（本会话第 ${done + 1}/${rotate} 轮）`)
       const args = [...dsh.args, '--profile', effectiveProfile()]
-    if (overlay) args.push('--patch', overlay)
-    args.push(promptFor())
+      if (overlay) args.push('--patch', overlay)
+      if (reuseId) args.push('--session-id', reuseId)
+      args.push(promptFor({ resume: Boolean(reuseId), round: done + 1, rotate, group: reuseId ? (groupNo || 1) : groupNo + 1 }))
     // ⭐ 这一轮的工作目录 = 使用者（或别的用户）的**工作区** —— 只有这样它的 `AGENTS.md` 才会自动加载。
     // ⭐ 工作目录 = **插件家**：那一轮**被沙箱关着**，只写得了自己工作目录里的东西 ✗
     //    （2026-10-14 教训：为了让它读工作区里的 AGENTS.md 把 cwd 改成工作区 ⇒
@@ -1468,6 +1594,15 @@ function reportMeta() {
     child.stderr?.on('data', pick)
     child.on('exit', (code) => {
       log(`刷B站结束（${why}，code=${code}）`)
+      // ⭐ 2026-10-19：会话复用记账；沿用失败就清掉记录，下一轮自动重开新会话
+      if (reuseId && code !== 0) {
+        bumpState({ dutySessionId: '', dutyRounds: 0 })
+        log('沿用值班会话没跑成（code≠0）⇒ 下一轮改用新会话')
+      } else {
+        Promise.resolve(recordDutySession({ reuseId, startedAt, rotate })).catch(() => {})
+      }
+      // ⭐ 2026-10-19：这一轮的会话别留在「未分组」—— 自己挂进值班工作区
+      Promise.resolve(attachDutySessions({ onlyNewest: true })).catch(() => {})
       stubReportIfMissing(code)   // ⭐ 没写报告就补一份占位 —— 别让使用者什么都看不到
     // ⭐ 2026-10-20：这一轮跑成了、并且使用者选了收藏夹 ⇒ 把挑中的存进去（后台做，别拖住收尾）
     if (code === 0 && Number(cfg.favFolderId) > 0) {
@@ -1620,7 +1755,7 @@ function reportMeta() {
     } catch { return '' }
   }
 
-  function dmPromptFor(fromUid, text) {
+  function dmPromptFor(fromUid, text, opts = {}) {
     const raw = String(text || '').slice(0, 600)
     const bv = (raw.match(/BV[0-9A-Za-z]{10}/) || [])[0] || ''
     // ⭐ 2.0.4（issue #74）：私信回复以前是独立拼的提示词 ⇒ **不读人设**，还爱带 markdown 和"（28 字…）"尾巴 ✗
@@ -1634,7 +1769,9 @@ function reportMeta() {
         return existsSync(p) ? readFileSync(p, 'utf8').slice(0, 4000) : ''
       } catch { return '' }
     })()
-    return (persona ? '（说话风格按这份人设来：\n' + persona + '\n）\n' : '')
+    // dmTitleHead：新私信会话的第一条消息带标题行（侧栏标题取这个）
+    const titleHead = opts.title ? `【B站私信 · ${dayKey()} · 第 ${Number(opts.group) || 1} 组】\n\n` : ''
+    return titleHead + (persona ? '（说话风格按这份人设来：\n' + persona + '\n）\n' : '')
       + '这是 B站 私信里、账号持有者本人发来的一句话：' + JSON.stringify(raw)
       + (bv ? `\n里面有个视频 ${bv}：用 bili_subtitle 读一下它的字幕再回，说点具体的。` : '')
       + `\n用 bili_send_message 回他一句（uid=${Number(fromUid)}），100 字以内，像聊天。`
@@ -1652,7 +1789,7 @@ function reportMeta() {
       if (dmReplyRunning) { log('私信回复：上一条还在跑 ⇒ 这条等下一跳'); return { ok: false, busy: true } }
       dmReplyRunning = true
       const savedSid = readDmSession()
-      const args = savedSid ? [...base, '--session-id', savedSid, dmPromptFor(fromUid, text)] : [...base, dmPromptFor(fromUid, text)]
+      const args = savedSid ? [...base, '--session-id', savedSid, dmPromptFor(fromUid, text, { title: !savedSid })] : [...base, dmPromptFor(fromUid, text, { title: !savedSid })]
       log(`私信回复开跑：来自 uid=${fromUid}` + (savedSid ? '（续会话 ' + savedSid.slice(0, 20) + '…）' : '（开新会话）'))
       const startedAt = Date.now()
       const child = spawn(dsh.command, args, {
@@ -1666,6 +1803,8 @@ function reportMeta() {
       child.on('exit', (code) => {
         dmReplyRunning = false
         log(`私信回复结束（code=${code}）`)
+        // dm-attach: 私信会话也挂进工作区（否则堆在「未分组」）
+        Promise.resolve(attachDutySessions({ onlyNewest: true })).catch(() => {})
         rotateLogIfBig()
         // ① 本来没有会话 id：跑完把它开出来的那个认领下来，下一条就能接着聊
         if (!savedSid && code === 0) {
@@ -2343,7 +2482,23 @@ function reportMeta() {
       })(),
       // 2026-10-18：这几项"本地存了、但没能同步到 DSH 原生设置" ⇒ 设置页要告诉用户
       // （DSH 0.2.1 某些启动方式会拒写：profile reload requires the root Include entry）
-      notSynced: Object.keys(readOverride()),
+
+      // ⚠️ 2026-10-19：不能直接拿 local-override.json 的键当判据 —— persistCfg 是**无条件** markOverride 的，
+      //    那个文件只增不减 ⇒ 只要从插件面板存过一次，就永久挂在提示里 ✗
+      //    ⇒ 改成真正比对一次：宿主里没有这个值，或它跟插件生效值不一致，才算没同步 ✓
+      notSynced: (() => {
+        try {
+          const user = settingsDesc()?.user || {}
+          return Object.keys(readOverride()).filter((k) => {
+            const host = user[k]
+            if (host === undefined || host === null) return true
+            const local = cfg[k]
+            if (Array.isArray(local)) return JSON.stringify(local) !== JSON.stringify(host)
+            if (local !== null && typeof local === 'object') return true
+            return String(host) !== String(local)
+          })
+        } catch { return [] }
+      })(),
       // ⭐ 2026-10-19：把"这一轮会用哪个 dsh"显示出来 —— 桌面版排查全靠它（空字符串 = 没找到）
       dshCli: dshCliCached(),
       installFailed: !installing && !venvReadyNow() && (() => { try { return readFileSync(installLogFile, 'utf8').length > 0 } catch { return false } })(),
@@ -2451,6 +2606,11 @@ function reportMeta() {
     }
 
     // 建 venv + 装依赖（**不等它**：几分钟的活，进度写 install.log）
+
+    // 2026-10-19：会话补挂 / 工作区对账（调试与补历史用）
+    if (req.method === 'POST' && path === '/api/bili-duty/attach') return sendJson(res, 200, await attachDutySessions())
+    if (req.method === 'POST' && path === '/api/bili-duty/workspace-sync') return sendJson(res, 200, await syncWorkspaces({ dryRun: /[?&]dryRun=1/.test(url.search) }))
+
     if (req.method === 'POST' && path === '/api/bili-duty/install') {
       return sendJson(res, 200, runInstall())
     }
@@ -2852,5 +3012,9 @@ function reportMeta() {
   try { ensureDutyProfile() } catch { /* 上面已记日志 */ }
   if (dutyProfileState === 'ok') log('值班轮用最小权限 profile：bili-duty（无文件系统 / 无命令 / 无联网）')
   else log('⚠️ 最小权限 profile 不可用（' + dutyProfileState + '）⇒ 值班轮仍用 headless（这一轮能力偏大）')
+
+  // ⭐ 2026-10-19：挂载后对一次账 —— cwd 对得上某个工作区、却还没归属的会话补挂回去（自愈）
+  const syncTimer = setTimeout(() => { Promise.resolve(syncWorkspaces()).catch(() => {}) }, 5000)
+  try { syncTimer.unref?.() } catch { /* ignore */ }
   log(`已挂载（家=${stateDir}，python=${cfg.pythonPath}，峰谷=${cfg.peakValley ? '开' : '关'}）`)
 }
