@@ -1146,8 +1146,14 @@ function reportMeta() {
         ? `日报写成薄版：每条一两行（值不值得 + 链接）就够，别写长摘要。`
         : cfg.reportLevel === 'off'
           ? `这一轮不要写日报文件，也别生成任何报告；只有真发了评论就一句话记下。`
-          : `用 write_report(date="${dayKey()}", markdown=报告正文) 落盘（默认追加到当天报告末尾）。`)
-      + (cfg.reportLevel === 'off' ? '' : `⚠️ 今天那份报告里可能已经有上一轮写的东西 —— write_report 默认就是追加；**别用 replace=true 覆盖**（配额按全天算）。`)
+          : (cfg.overlayMcp
+            ? `用 write_report(date="${dayKey()}", markdown=报告正文) 落盘（默认追加到当天报告末尾）。`
+            : `把报告写到 ${join(outDir, `${dayKey()}.md`)}。`))
+      + (cfg.reportLevel === 'off'
+        ? ''
+        : (cfg.overlayMcp
+          ? `⚠️ 今天那份报告里可能已经有上一轮写的东西 —— write_report 默认就是追加；**别用 replace=true 覆盖**（配额按全天算）。`
+          : `⚠️ 今天那份报告里可能已经有上一轮写的东西 —— 有就**追加到末尾**，别覆盖（配额按全天算）。`))
       + (cfg.reportLevel === 'off' ? '' : '⭐ 报告里**每挑中一条**，第一行写成 `### BV号`（例：`### BV1xxxxxxx`）—— 宿主**就数这些标题行**算今天挑了几条：漏写当成没挑中，给只是提到 / 跳过的视频加上标题则当成挑中。')
       + (already > 0
         ? `今天已经挑过 ${already} 条了 ⇒ **这一轮最多再挑 ${left} 条**（「每天最多 ${quota} 条」是全天总量，不是每轮）；`
@@ -1159,12 +1165,17 @@ function reportMeta() {
           : '**开着、但依赖没装好** ⇒ 这一轮没字幕的视频只能跳过')
         : '关着（没字幕的视频就跳过）'}；`
       + `⭐ 不管哪种情况，**报告里都要写一行「因无字幕跳过 N 条」**（N=0 也写）—— 别让它悄悄少几条。`
-      + `⭐ 这一轮**没有 shell、没有文件读写工具**（安全加固：只给你 B站工具 + read_seen / write_report / append_seen）—— `
-      + `不要尝试 ls / cat / python 脚本；要读判重表用 read_seen，要写报告 / 记判重用 write_report / append_seen。`
-      + `判重表用 read_seen(days=30) 读；`
-      + `⚠️ 它读不出来、或者 append_seen 被拒，**必须在报告里明说** —— 那一轮宁可不发评论，也别当成"没有记录"重发一遍。`
-      + `⭐ 这一轮**看过的每一条视频（挑中的和跳过的都算）**都用 append_seen(date="${dayKey()}", rows=[...]) 追加，`
-      + `一行一条，格式 \`| 日期 | BV号 | 标题 | UP | 状态 |\`（跳过的那条在状态里写理由）；它同时写判重表和月度归档。`
+      + (cfg.overlayMcp
+        ? `⭐ 这一轮**没有 shell、没有文件读写工具**（安全加固：只给你 B站工具 + read_seen / write_report / append_seen / append_comment）—— `
+          + `不要尝试 ls / cat / python 脚本；要读判重表用 read_seen，要写报告 / 记判重用 write_report / append_seen。`
+          + `判重表用 read_seen(days=30) 读；`
+          + `⚠️ 它读不出来、或者 append_seen 被拒，**必须在报告里明说** —— 那一轮宁可不发评论，也别当成"没有记录"重发一遍。`
+          + `⭐ 这一轮**看过的每一条视频（挑中的和跳过的都算）**都用 append_seen(date="${dayKey()}", rows=[...]) 追加，`
+          + `一行一条，格式 \`| 日期 | BV号 | 标题 | UP | 状态 |\`（跳过的那条在状态里写理由）；它同时写判重表和月度归档。`
+        : `判重表 = ${join(stateDir, 'seen.md')}（**就是这个绝对路径**）；`
+          + `⚠️ 它读不出来或写不进去，**必须在报告里明说** —— 那一轮宁可不发评论，也别当成"没有记录"重发一遍。`
+          + `⭐ 另外把这一轮**看过的每一条视频（挑中的和跳过的都算）**追加进归档：${join(digestDir, `${dayKey().slice(0, 7)}.md`)}`
+          + ` —— 一行一条：日期 · BV 号 · 标题 · UP · 一句话结论 · 链接（跳过的那条在后面注明理由）；`)
       + `这是**给以后检索用**的（报告是给人看的，判重表/归档是给"回头翻"用的），别省略、也别只写挑中的。`
       + `自动评论并 @ ${cfg.mentionName || '（还没填要 @ 谁）'} 是${commentOn
         ? `开着的（每轮最多 ${cfg.commentPerRound} 条评论，每条在正文里纯文本 @ ${cfg.mentionName}，150 字内）`
@@ -1256,7 +1267,8 @@ function reportMeta() {
     //    `/root/.dsh/sessions`、`~/.dsh/heart` 再写进报告，而报告会被主会话读到 ⇒ 提示注入 = 数据外带。
     //    沙箱层挡不住（read-only 只挡写，读仍然全盘；也没有"只读这几个目录"的配置）。
     //    ⇒ 在这一层禁用；老版本没有这些 id 会被当无事发生（不会因此起不来）。
-    if (cfg.hardenTools !== false) {
+    //    ⚠️ 只在挂了 MCP 的时候才禁：没有 MCP 就没有 read_seen / write_report，再禁掉 fs 那一轮什么都写不了。
+    if (cfg.overlayMcp && cfg.hardenTools !== false) {
       for (const id of ['tool-fs', 'tool-fs-search', 'tool-bash', 'tool-pwsh', 'tool-jobs', 'skill', 'tool-skill']) {
         yml.push('- id: ' + id, '  disabled: true', '')
       }
