@@ -310,7 +310,8 @@ function reportMeta() {
     if ('frameHeight' in p) p.frameHeight = [480, 720, 1080].includes(Number(p.frameHeight)) ? Number(p.frameHeight) : 480
     if ('frameCount' in p) p.frameCount = Math.max(4, Math.min(Number(p.frameCount) || 9, 16))
     if ('frameAudio' in p) p.frameAudio = ['auto', 'always'].includes(String(p.frameAudio)) ? String(p.frameAudio) : 'auto'
-    if ('headlessEffort' in p) p.headlessEffort = ['', 'low', 'medium', 'high', 'max'].includes(String(p.headlessEffort ?? '')) ? String(p.headlessEffort ?? '') : ''
+    // 适配器（dsh-llm-deepseek）只认 off/low/high/max —— medium 会被判 UNSUPPORTED_REASONING_EFFORT
+    if ('headlessEffort' in p) p.headlessEffort = ['', 'off', 'low', 'high', 'max'].includes(String(p.headlessEffort ?? '')) ? String(p.headlessEffort ?? '') : ''
     if ('headlessModel' in p) p.headlessModel = String(p.headlessModel ?? '').trim().slice(0, 60)
     if ('headlessProvider' in p) p.headlessProvider = String(p.headlessProvider ?? '').trim().slice(0, 40) || 'deepseek-official'
     if ('subs' in p) p.subs = (Array.isArray(p.subs) ? p.subs : []).map((x) => String(x ?? '').trim()).filter(Boolean).slice(0, 30)
@@ -1388,11 +1389,11 @@ function reportMeta() {
     // 本分支：插件设置里显式指定了模型时，优先用那个（没有再跟随上游的"当前选择"）
     if (String(cfg.headlessModel || '').trim()) {
       const modelNow = String(cfg.headlessModel).trim()
-      // ⚠️ 2026-10-25 实测：`deepseek-flash` **不支持 reasoningEffort** ——
-      //    overlay 里写 `reasoningEffort: medium` 会直接
-      //    `UNSUPPORTED_REASONING_EFFORT` ⇒ 那一轮 1.5 秒就 exit=1（定时/点名/私信回复全挂）。
-      //    所以这个模型一律不写 effort（跟随 provider 默认）。
-      const eff = /^deepseek-flash$/i.test(modelNow) ? '' : String(cfg.headlessEffort || '').trim()
+      // ⚠️ 2026-10-25 实测：适配器（dsh-llm-deepseek）支持的只有 off / low / high / max，
+      //    写 `medium` 会直接 `UNSUPPORTED_REASONING_EFFORT` ⇒ 那一轮 1.5 秒 exit=1。
+      //    所以这里只下发合法的四个值；其它（含旧配置里的 medium）一律不写，跟随 provider 默认。
+      const effRaw = String(cfg.headlessEffort || '').trim()
+      const eff = ['off', 'low', 'high', 'max'].includes(effRaw) ? effRaw : ''
       yml.push(
         '- id: agent-default-model',
         '  config:',
