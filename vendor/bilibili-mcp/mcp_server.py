@@ -20,9 +20,11 @@ import asyncio
 import json
 import base64
 import os
+import re
 import struct
 import sys
 import tempfile
+from datetime import datetime, timedelta
 from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ImageContent, TextContent
@@ -88,6 +90,272 @@ def load_credential() -> Credential:
         buvid3=data.get("buvid3") or "",
         dedeuserid=data.get("dedeuserid", ""),
     )
+
+
+# ========== Tool: 值班轮的「窄接口」（读判重表 / 写报告 / 追加判重） ==========
+
+# ⭐⭐ 2026-10-24 安全加固（值班轮权限面）：
+#    值班那一轮**不再有 shell 和文件工具**（overlay 里把 tool-fs / tool-bash 这些行禁用），
+#    读判重表、写报告、追加归档只能走下面三个接口 —— **校验在服务端做、落盘之前拦**。
+#    · 路径一律服务端拼，参数里不接受路径（没有 date 之外的路径参数）
+#    · 拒绝本机私有信息（/root/、/sdcard/、~/.dsh、会话 id、密钥、凭证文件名）
+#    · 报告 ≤ 64 KB；标题行只能是「### BV号」（宿主靠它数今天挑了几条）
+#    · 判重表一次最多追加 200 行，只接受表格行
+_ROOT = Path(__file__).parent
+_REPORT_DIR = _ROOT / "out"
+_SEEN_FILE = _ROOT / "seen.md"
+_DIGEST_DIR = _ROOT / "digest"
+_MAX_REPORT_BYTES = 64 * 1024
+_MAX_ROWS = 200
+_MAX_SEEN_LINES = 2000
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_BV_RE = re.compile(r"BV[0-9A-Za-z]{8,}")
+_BV_HEAD_RE = re.compile(r"^###\s*BV[0-9A-Za-z]{8,}\s*$")
+_ROW_COLS = 5  # | 日期 | BV | 标题 | UP | 状态 |
+_PRIVATE = [
+    (re.compile(r"/root/", re.I), "本机绝对路径 /root/"),
+    (re.compile(r"/sdcard/", re.I), "本机绝对路径 /sdcard/"),
+    (re.compile(r"\.dsh", re.I), "DSH 数据目录"),
+    (re.compile(r"session-[0-9a-f]{8}", re.I), "会话 id"),
+    (re.compile(r"sk-[A-Za-z0-9_-]{12,}", re.I), "密钥"),
+    (re.compile(r"bili_credential", re.I), "凭证文件名"),
+]
+
+
+def _reject_private(text: str) -> str:
+    """内容里出现本机私有信息就拒；返回拒绝原因，没问题返回空串。"""
+    for rx, label in _PRIVATE:
+        if rx.search(text):
+            return f"拒绝：内容里出现{label}（{rx.pattern}）—— 报告/归档不许带本机私有信息"
+    return ""
+
+
+def _checkReport(text: str) -> str:
+    if not str(text).strip():
+        return "拒绝：报告是空的"
+    size = len(str(text).encode("utf-8"))
+    if size > _MAX_REPORT_BYTES:
+        return f"拒绝：报告太大（{size} 字节，上限 {_MAX_REPORT_BYTES // 1024} KB）"
+    bad = _reject_private(str(text))
+    if bad:
+        return bad
+    for line in str(text).splitlines():
+        if line.startswith("### ") and not _BV_HEAD_RE.match(line.strip()):
+            return f"拒绝：标题行只能写「### BV号」，不许多加别的 ### 标题（宿主靠它数挑中几条）：{line[:60]}"
+    return ""
+
+
+def _checkRows(rows) -> str:
+    if not isinstance(rows, list):
+        return "拒绝：rows 必须是字符串数组，一行一条"
+    if not rows:
+        return "拒绝：rows 是空的"
+    if len(rows) > _MAX_ROWS:
+        return f"拒绝：一次最多追加 {_MAX_ROWS} 行（给了 {len(rows)} 行）"
+    for raw in rows:
+        line = str(raw).strip()
+        if not line.startswith("|") or not line.endswith("|"):
+            return f"拒绝：只接受表格行（| 日期 | BV号 | 标题 | UP | 状态 |）：{line[:60]}"
+        cols = [c.strip() for c in line.strip("|").split("|")]
+        if len(cols) != _ROW_COLS:
+            return f"拒绝：表格行要有 {_ROW_COLS} 列（日期/BV号/标题/UP/状态），这行有 {len(cols)} 列：{line[:60]}"
+        if not _DATE_RE.match(cols[0]):
+            return f"拒绝：第一列必须是日期 YYYY-MM-DD：{line[:60]}"
+        if not _BV_RE.search(cols[1]):
+            return f"拒绝：第二列必须是 BV 号：{line[:60]}"
+    bad = _reject_private("\n".join(str(r) for r in rows))
+    if bad:
+        return bad
+    return ""
+
+
+def _atomicWrite(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+@tool()
+async def read_seen(days: int = 30) -> str:
+    """
+    读判重表（含「评论记录」那张表）。值班轮没有文件工具，判重只能走这里。
+
+    Args:
+        days: 只把多少天内的视频表格行带上（评论记录表整段带上）；默认 30，上限 365
+
+    Returns:
+        包含 lines 与 text 的 JSON；text 是判重表原文（表头 + 近期视频行 + 评论记录）
+    """
+    try:
+        d = max(1, min(365, int(days or 30)))
+    except (TypeError, ValueError):
+        d = 30
+    cutoff = (datetime.now() - timedelta(days=d)).strftime("%Y-%m-%d")
+    if not _SEEN_FILE.exists():
+        return json.dumps({"ok": True, "lines": 0, "text": "", "note": "判重表还不存在（第一次跑）"}, ensure_ascii=False)
+    try:
+        raw = _SEEN_FILE.read_text(encoding="utf-8")
+    except OSError as e:
+        return json.dumps({"ok": False, "error": f"判重表读不出来：{e}"}, ensure_ascii=False)
+    lines = raw.splitlines()
+    kept = []
+    comment_section = False
+    for ln in lines:
+        stripped = ln.strip()
+        if stripped.startswith("## "):
+            comment_section = "评论记录" in stripped
+            kept.append(ln)
+            continue
+        if not stripped.startswith("|"):
+            kept.append(ln)
+            continue
+        if comment_section:
+            kept.append(ln)
+            continue
+        first = stripped.strip("|").split("|")[0].strip()
+        if _DATE_RE.match(first):
+            if first >= cutoff:
+                kept.append(ln)
+        else:
+            kept.append(ln)   # 表头 / 分隔行
+    kept = kept[-_MAX_SEEN_LINES:]
+    text = "\n".join(kept).strip("\n")
+    return json.dumps({"ok": True, "days": d, "cutoff": cutoff, "text": text}, ensure_ascii=False)
+
+
+@tool()
+async def append_seen(date: str, rows: list) -> str:
+    """
+    往判重表和归档里追加记录（挑中的、跳过的都写）。值班轮没有文件工具，只能走这里。
+
+    Args:
+        date: 今天，YYYY-MM-DD
+        rows: 字符串数组，一行一条，格式 `| 日期 | BV号 | 标题 | UP | 状态 |`
+              例：`["| 2026-10-24 | BV1abc12345 | 某个标题 | 某UP | 挑中 · 值得看 |"]`
+
+    Returns:
+        JSON：写了几行、写到哪两个文件；被拒时 ok=false 并说明原因
+    """
+    day = str(date or "").strip()
+    if not _DATE_RE.match(day):
+        return json.dumps({"ok": False, "error": f"拒绝：date 必须是 YYYY-MM-DD，收到 {day!r}"}, ensure_ascii=False)
+    err = _checkRows(rows)
+    if err:
+        return json.dumps({"ok": False, "error": err}, ensure_ascii=False)
+    body = "".join(str(r).strip() + "\n" for r in rows)
+    try:
+        _SEEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        if not _SEEN_FILE.exists():
+            _atomicWrite(_SEEN_FILE, "# 刷B站的判重表\n\n## 看过的视频\n\n| 日期 | BV号 | 标题 | UP | 状态 |\n|---|---|---|---|---|\n" + body)
+        else:
+            try:
+                cur = _SEEN_FILE.read_text(encoding="utf-8")
+            except OSError:
+                cur = ""
+            # 表头缺就补一次（宿主预建的文件里，「看过的视频」下面一开始没有表头）
+            if "| 日期 | BV号" not in cur:
+                with open(_SEEN_FILE, "a", encoding="utf-8") as f:
+                    f.write("| 日期 | BV号 | 标题 | UP | 状态 |\n|---|---|---|---|---|\n")
+            with open(_SEEN_FILE, "a", encoding="utf-8") as f:
+                f.write(body)
+        digest = _DIGEST_DIR / f"{day[:7]}.md"
+        if not digest.exists():
+            _atomicWrite(digest, f"# 刷B站的归档 · {day[:7]}\n\n（看过的每一条都在这里，只为留档）\n\n" + body)
+        else:
+            with open(digest, "a", encoding="utf-8") as f:
+                f.write(body)
+    except OSError as e:
+        return json.dumps({"ok": False, "error": f"写不进去：{e}"}, ensure_ascii=False)
+    return json.dumps({"ok": True, "rows": len(rows), "seen": str(_SEEN_FILE), "digest": str(digest)}, ensure_ascii=False)
+
+
+@tool()
+async def append_comment(bv: str, rpid: str, root: str = "", time: str = "", excerpt: str = "") -> str:
+    """
+    把「发出去的评论」记进判重表的「评论记录」表（宿主复核要认 rpid）。值班轮没有文件工具，只能走这里。
+
+    Args:
+        bv: 视频 BV 号，如 BV1abc12345
+        rpid: bili_reply 返回里的 rpid（数字）；拿不到就传空串，服务端会写「未取到」
+        root: 回复楼中楼时，被回复那条根评论的 rpid；不是楼中楼就留空
+        time: 时间，随便写，如 2026-10-24 18:20
+        excerpt: 正文前 20 字
+
+    Returns:
+        JSON：写没写进去；被拒时 ok=false（要在报告里如实写"被拒"）
+    """
+    b = str(bv or "").strip()
+    if not re.fullmatch(r"BV[0-9A-Za-z]{8,}", b):
+        return json.dumps({"ok": False, "error": f"拒绝：bv 不像 BV 号：{b!r}"}, ensure_ascii=False)
+    r = str(rpid or "").strip()
+    if r and not r.isdigit():
+        return json.dumps({"ok": False, "error": f"拒绝：rpid 必须是数字（拿不到就传空串，别编）：{r!r}"}, ensure_ascii=False)
+    rt = str(root or "").strip()
+    if rt and not rt.isdigit():
+        return json.dumps({"ok": False, "error": f"拒绝：root 必须是数字或空：{rt!r}"}, ensure_ascii=False)
+    tm = " ".join(str(time or "").split())[:40]
+    ex = " ".join(str(excerpt or "").split())[:60]
+    bad = _reject_private(" ".join([b, r, rt, tm, ex]))
+    if bad:
+        return json.dumps({"ok": False, "error": bad}, ensure_ascii=False)
+    row = f"| {b} | {r or '未取到 rpid'} | {rt or ''} | {tm} | {ex} |\n"
+    header = "## 评论记录（BV | rpid | root（楼中楼才填） | 时间 | 正文前 20 字）\n\n| BV | rpid | root（楼中楼才填） | 时间 | 正文前 20 字 |\n| --- | --- | --- | --- | --- |\n"
+    try:
+        _SEEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        if not _SEEN_FILE.exists():
+            _atomicWrite(_SEEN_FILE, "# 刷B站的判重表\n\n" + header + row + "\n## 看过的视频\n\n")
+        else:
+            lines = _SEEN_FILE.read_text(encoding="utf-8").splitlines(keepends=True)
+            at = -1
+            for i, ln in enumerate(lines):
+                if ln.strip().startswith("| BV | rpid"):
+                    at = i + 2  # 表头 + 分隔行之后
+                    break
+            if at < 0:
+                with open(_SEEN_FILE, "a", encoding="utf-8") as f:
+                    f.write("\n" + header + row)
+            else:
+                lines.insert(at, row)
+                _atomicWrite(_SEEN_FILE, "".join(lines))
+    except OSError as e:
+        return json.dumps({"ok": False, "error": f"写不进去：{e}"}, ensure_ascii=False)
+    return json.dumps({"ok": True, "bv": b, "rpid": r or "未取到 rpid", "root": rt, "seen": str(_SEEN_FILE)}, ensure_ascii=False)
+
+
+@tool()
+async def write_report(date: str, markdown: str, replace: bool = False) -> str:
+    """
+    写当天的日报（out/<日期>.md）。值班轮没有文件工具，写报告只能走这里。
+    服务端会校验：非空、≤64 KB、不许带本机私有信息、`### ` 标题只能是 BV 号。
+
+    Args:
+        date: 今天，YYYY-MM-DD
+        markdown: 报告正文（每条挑中的视频第一行写 `### BV号`）
+        replace: true = 覆盖整天；默认 false = 追加到已有报告末尾（配额按全天算）
+
+    Returns:
+        JSON：落盘路径与字节数；被拒时 ok=false 并说明原因（要如实写进报告）
+    """
+    day = str(date or "").strip()
+    if not _DATE_RE.match(day):
+        return json.dumps({"ok": False, "error": f"拒绝：date 必须是 YYYY-MM-DD，收到 {day!r}"}, ensure_ascii=False)
+    text = str(markdown or "")
+    err = _checkReport(text)
+    if err:
+        return json.dumps({"ok": False, "error": err}, ensure_ascii=False)
+    path = _REPORT_DIR / f"{day}.md"
+    try:
+        if path.exists() and not replace:
+            old = path.read_text(encoding="utf-8").rstrip("\n")
+            text = old + "\n\n" + text.strip() + "\n"
+        else:
+            text = text.strip() + "\n"
+        _atomicWrite(path, text)
+    except OSError as e:
+        return json.dumps({"ok": False, "error": f"写不进去：{e}"}, ensure_ascii=False)
+    return json.dumps({"ok": True, "file": str(path), "bytes": len(text.encode("utf-8")), "replaced": bool(replace)}, ensure_ascii=False)
 
 
 # ========== 登录会话（进程级缓存） ==========
