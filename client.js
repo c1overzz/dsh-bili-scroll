@@ -178,59 +178,6 @@ window.__ModuleLoader__.load({
 
     /* ────────────── 设置页正文 ────────────── */
 
-/* ────────────── 会话头那个 tab：它刷过的视频（最小实验版）────────────── */
-function WatchTab() {
-  const PAGE = 30
-  const onOpenUrl = (u) => { jpost('/open', { what: 'url', u }).catch(() => {}) }
-  const [rows, setRows] = React.useState(null)
-  const [st, setSt] = React.useState('')      // '' | picked | skipped | commented
-  const [tier, setTier] = React.useState('')  // '' | 值得看 / 可以看 / 不值当
-  const [offset, setOffset] = React.useState(0)
-  const [total, setTotal] = React.useState(0)
-  const load = (s, t, off) => {
-    setRows(null)
-    const q = `/watched?limit=${PAGE}&offset=${off}` + (s ? '&state=' + s : '') + (t ? '&tier=' + encodeURIComponent(t) : '')
-    jget(q).then((r) => {
-      if (!r || !r.ok) { setRows([]); return }
-      setRows(r.rows || [])
-      setTotal(Number(r.total) || 0)
-    }).catch(() => setRows([]))
-  }
-  React.useEffect(() => { load("", "", 0) }, [])
-  const pick = (kind, v) => {
-    const next = (kind === 'state' ? st : tier) === v ? '' : v
-    if (kind === 'state') setSt(next); else setTier(next)
-    setOffset(0)
-    load(kind === 'state' ? next : st, kind === 'tier' ? next : tier, 0)
-  }
-  const go = (d) => { const n = Math.max(0, Math.min(offset + d, Math.max(0, total - 1))); setOffset(n); load(st, tier, n) }
-  const chip = (label, on, active) => h('button', { 'data-bd-chip': '', 'aria-selected': active ? 'true' : 'false', onClick: on }, label)
-  return h('div', { 'data-bd-page': '', 'data-bd-wide': '' },
-    h('div', { 'data-bd-row': '' },
-      chip('全部', () => pick('state', ''), st === ''),
-      chip('挑了', () => pick('state', 'picked'), st === 'picked'),
-      chip('跳过', () => pick('state', 'skipped'), st === 'skipped'),
-      chip('发给你了', () => pick('state', 'commented'), st === 'commented'),
-      h('div', { 'data-bd-note': '' }, rows === null ? '读取中…' : `共 ${total} 条`)),
-    h('div', { 'data-bd-row': '' },
-      chip('值得看', () => pick('tier', '值得看'), tier === '值得看'),
-      chip('可以看', () => pick('tier', '可以看'), tier === '可以看'),
-      chip('不值当', () => pick('tier', '不值当'), tier === '不值当')),
-    rows && rows.length ? h('div', { 'data-bd-list': '' },
-      rows.map((x, i) => h('div', { key: x.day + x.bvid, 'data-bd-item': '', 'data-bd-clickable': '', title: '在浏览器打开', onClick: () => onOpenUrl(x.url) },
-        i < 30 ? h('img', { 'data-bd-cover': '', src: API + '/cover?bv=' + x.bvid, loading: 'lazy', alt: '' }) : null,
-        h('div', { 'data-bd-item-body': '' },
-          h('div', { 'data-bd-item-t': '' }, x.title),
-          h('div', { 'data-bd-item-n': '' }, `${x.day} · ${x.up} · `, x.picked ? '挑中了' : '跳过', (x.delivered || x.commented) ? ' · 已发给你' : '',
-            x.tier ? h('span', { 'data-bd-tier': x.tier }, ' · ' + x.tier) : null),
-          x.why ? h('div', { 'data-bd-item-why': '' }, x.why) : null))))
-      : h('div', { 'data-bd-note': '' }, rows === null ? '' : '这一类还没有记录 —— 跑一轮之后就有了'),
-    total > PAGE ? h('div', { 'data-bd-row': '' },
-      h('button', { 'data-bd-btn': '', disabled: offset <= 0, onClick: () => go(-PAGE) }, '上一页'),
-      h('div', { 'data-bd-note': '' }, `${offset + 1}–${Math.min(offset + PAGE, total)} / ${total}`),
-      h('button', { 'data-bd-btn': '', disabled: offset + PAGE >= total, onClick: () => go(PAGE) }, '下一页')) : null)
-}
-
     function Panel() {
       const [st, setSt, fails] = useStatus(5000)
       const [busy, setBusy] = React.useState('')
@@ -824,17 +771,6 @@ function WatchTab() {
           { name: 'settings.section', id: 'bili-scroll', order: 30, label: '刷B站' },
           () => h(Panel),
         ))
-
-  // ⭐ 2026-10-20 实验：会话头第三个 tab（0.2.1 里这个槽位真实存在；老版本没有就静默跳过）
-  try {
-    slots.inject('conversation.view', () => slots.register({
-      name: 'conversation.view',
-      id: 'bili-watched',
-      order: 20,
-      label: '刷过的视频',
-      scope: 'session',
-    }, () => h(WatchTab)))
-  } catch (e) { /* 没有这个槽位就算了 */ }
       },
     }
   },
