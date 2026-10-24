@@ -65,6 +65,44 @@ dsh plugin --profile web add github:c1overzz/dsh-bili-scroll
 
 ⚠️ 装完**必须重启一次 dsh**（bundle 层要重启才组装）。然后进 **设置 → 刷B站**。
 
+### 从分支装、或者自己改代码：小心「重启后版本回退」
+
+**现象**：直接替换 `profiles/<名字>/node_modules/dsh-bili-scroll/` 里的文件，重启一次就被打回旧版。
+
+**原因**：DSH 每次启动都会按 profile 里的 `pnpm-lock.yaml` 核对依赖，而 lockfile **认死一个 commit**：
+
+```yaml
+dsh-bili-scroll:
+  specifier: github:sugar-zero/dsh-bili-scroll#dev
+  version: https://codeload.github.com/sugar-zero/dsh-bili-scroll/tar.gz/8e10c3b8…   ← 钉在这儿
+```
+
+`#dev` 只在**安装那一刻**解析成具体 commit 写进 lockfile。之后 dev 分支再往前走，lockfile 也不会自己跟；
+所以「手动换 node_modules 里的文件」和「lockfile 里那个 commit」对不上时，重启就会按 lockfile 重装 → 看起来像回退。
+
+**三种正确的做法**：
+
+```bash
+# ① 正常升级（会重新解析 #dev 并更新 lockfile）
+dsh plugin --profile desktop add github:sugar-zero/dsh-bili-scroll#dev
+# 然后重启 dsh
+
+# ② 只跟随、不想重装：装完先看看 lockfile 里是不是最新 commit
+grep -A2 'dsh-bili-scroll:' ~/.dsh/profiles/desktop/pnpm-lock.yaml
+
+# ③ 本地开发 / 自己改了代码：用 link 指向本机仓库（改完重启就生效，不用再拷文件）
+dsh plugin --profile desktop add link:/绝对路径/到/dsh-bili-scroll
+```
+
+改完可以自检一句（应该秒回 `Already up to date`，说明 package.json 与 lockfile 已经一致）：
+
+```bash
+cd ~/.dsh/profiles/desktop && pnpm install --frozen-lockfile --offline
+```
+
+> 顺带一提：**正常安装（①）的人不会遇到回退** —— 他们的 lockfile 和装上的那份天然一致。
+> 只有「手动替换 node_modules」或者「拿旧 lockfile 配新代码」才会。
+
 ## 装不上 / 卡住时，先看这五条（都是用户实测撞过的）
 
 1. **桌面版（DSH NEXT / 0.2.x）上"自动跑"会卡住** —— 有用户反馈：它起那一轮用的是
