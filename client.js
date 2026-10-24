@@ -47,6 +47,20 @@ window.__ModuleLoader__.load({
       body: JSON.stringify(body || {}),
     }))
 
+    /* ⭐ 2026-10-25（本人反馈：「把工作区改了，标签还在旧工作区」）：
+       「刷过的视频」tab 是按「会话属于哪个工作区」动态注册的，结果缓存在这里。
+       以前缓存**永不过期、也不失效** ⇒ 改了工作区设置之后，老会话的旧结论一直留着，
+       tab 就还挂在旧工作区。
+       现在：缓存带 TTL；设置保存、窗口重新获得焦点、每 15 秒兜底轮询都会 `bumpScope()`
+       —— 清缓存 + 让所有探针重查（一次本地 GET，很便宜）。 */
+    const scopeCache = new Map()          // sessionId -> { v: boolean, at: number }
+    const SCOPE_TTL = 20_000
+    const scopeSubs = new Set()           // 探针注册的"请重查"回调
+    const bumpScope = () => {
+      scopeCache.clear()
+      for (const fn of [...scopeSubs]) { try { fn() } catch { /* 单个探针报错不影响别的 */ } }
+    }
+
     const CSS = `
 [data-bd-page]{display:flex;flex-direction:column;gap:18px;padding:2px 2px 8px;max-width:640px;}
     [data-bd-page][data-bd-wide]{max-width:none;width:100%;}
@@ -70,6 +84,14 @@ window.__ModuleLoader__.load({
   border:1px solid var(--dsw-alias-bg-layer-3,rgba(255,255,255,.14));
   background:var(--dsw-alias-bg-layer-4,rgba(128,128,128,.12));color:inherit;font-family:inherit;}
 [data-bd-input]:focus{outline:none;border-color:#3b82f6;}
+/* ⭐ 2026-10-23（本人反馈：「设置的菜单在深色模式下是白的，看不见字」）：
+   原生 <select> 展开的那个**弹出菜单**不走页面的深色主题 —— 它按浏览器/系统的浅色调色板画白底，
+   而选项文字继承的是页面颜色（深色主题下是白的）⇒ **白底白字，看不见** ✗。
+   光给 select 设 background 不够（弹出层不看它），必须把 option / optgroup 的底色和字色都钉死；
+   值成对取主题变量（拿不到就退回浅底深字，两边主题都可读）。 */
+select[data-bd-input]{color-scheme:light dark;}
+select[data-bd-input] option,select[data-bd-input] optgroup{
+  background-color:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);}
 [data-bd-num]{width:88px;text-align:center;}
 [data-bd-btn]{padding:7px 12px;border-radius:8px;font-size:12px;cursor:pointer;font-family:inherit;white-space:nowrap;
   border:1px solid var(--dsw-alias-bg-layer-3,rgba(255,255,255,.16));
@@ -111,7 +133,7 @@ window.__ModuleLoader__.load({
     [data-bd-tabs]{display:flex;gap:4px;padding:4px;border-radius:10px;background:var(--dsw-alias-bg-layer-2,rgba(127,127,127,.08));}
     [data-bd-tab]{flex:1;min-width:0;cursor:pointer;font:inherit;font-size:13px;padding:7px 10px;border:0;border-radius:8px;background:transparent;color:var(--dsw-alias-label-secondary,inherit);}
     [data-bd-tab]:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.1));}
-    [data-bd-tab][aria-selected=true]{background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,inherit);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.12);}
+    [data-bd-tab][aria-selected=true]{background:var(--dsw-alias-bg-layer-1,rgba(127,127,127,.18));color:var(--dsw-alias-label-primary,inherit);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.12);}
     [data-bd-away]{display:none !important;}
     [data-bd-chip]{cursor:pointer;white-space:nowrap;font:inherit;font-size:12px;padding:3px 10px;border-radius:999px;
       border:1px solid var(--dsw-alias-bg-layer-3,rgba(127,127,127,.22));background:transparent;
@@ -239,6 +261,7 @@ function WatchTab() {
       const [kws, setKws] = React.useState(null)
       const [favFolders, setFavFolders] = React.useState(null)   // 收藏夹列表（下拉用，null = 还没读）
       const [favId, setFavId] = React.useState(null)             // 选中的收藏夹 fid（字符串）
+      const [modelList, setModelList] = React.useState(null)     // 可选模型（null = 还没读；[] = 读到了但没有）
       const [persona, setPersona] = React.useState(null)   // 人设提示词草稿
       const [rl, setRl] = React.useState(null)
       const [newVer, setNewVer] = React.useState('')       // 发现的新版本号（空 = 没发现）          // 日报形态：full / brief / off
@@ -251,6 +274,8 @@ function WatchTab() {
       const [dmWatch, setDmWatch] = React.useState(null)          // 私信双向开关
       const [dmMode, setDmMode] = React.useState(null)      // 投递方式：off / only / both
       const [mention, setMention] = React.useState(null)
+      const [mProv, setMProv] = React.useState(null)      // 手填模型的 provider（只在读不到模型列表时露出来）
+      const [mName, setMName] = React.useState(null)      // 手填模型的 model id
       const [login, setLogin] = React.useState(null)
       const [runNote, setRunNote] = React.useState(null)
       const [report, setReport] = React.useState(null)        // 非 null = 报告已展开   // 顶部那行状态（跑一轮/装依赖的反馈原来在最底下，看不见）
@@ -283,6 +308,8 @@ function WatchTab() {
         if (cfg && perRound === null) setPerRound(String(cfg.commentPerRound ?? 1))
         if (cfg && replyPer === null) setReplyPer(String(cfg.replyPerRound ?? 1))
         if (cfg && mention === null) setMention(cfg.mentionName || '')
+        if (cfg && mProv === null) setMProv(cfg.modelProvider || '')
+        if (cfg && mName === null) setMName(cfg.modelName || '')
         if (cfg && dmUid === null) setDmUid(cfg.dmUid ? String(cfg.dmUid) : '')
         if (cfg && dmMode === null) setDmMode(cfg.dmMode || 'only')
         if (cfg && dmWatch === null) setDmWatch(cfg.dmWatch !== false)   // 2.0 起默认开
@@ -296,6 +323,13 @@ function WatchTab() {
           .catch(() => { if (alive.current) setFavFolders([]) })
       }, [favFolders])
 
+      // ⭐ 2026-10-23：可选模型列表（宿主从 llm 服务里问出来）—— 同样只读一次
+      React.useEffect(() => {
+        if (modelList !== null) return
+        jget('/models').then((r) => { if (alive.current) setModelList(r && r.ok ? (r.providers || []) : []) })
+          .catch(() => { if (alive.current) setModelList([]) })
+      }, [modelList])
+
       const win = { ...DEFAULT_WINDOWS, ...(st?.windows || {}) }
 
       const say = (text, tone) => {
@@ -308,6 +342,8 @@ function WatchTab() {
         try {
           const r = await jpost('/config', p)
           if (r?.config) setSt((old) => ({ ...old, config: r.config }))
+          // ⭐ 2026-10-25：保存后让「刷过的视频」tab 重查工作区（改 workspace 时 tab 要跟着挪）
+          try { bumpScope() } catch { /* 忽略 */ }
           // ⭐ DSH 原生设置页里显式设过的键由宿主说了算 ⇒ 我们这份也得写进去；写失败要说出来，别假装"已保存"
           if (r?.host && r.host.ok === false) say(`${what || '设置'}：插件自己那份存了，但 DSH 设置页那份没写进去（${r.host.error}）`, 'warn')
           else say(what ? `${what}：已保存` : '已保存', 'good')
@@ -457,7 +493,9 @@ function WatchTab() {
         setBusy('run')
         try {
           const r = await jpost('/run', {})
-          say(r?.started ? '已经在后台跑一轮了，报告会写在 out/ 里' : '没起来，看 duty.log', r?.started ? 'good' : 'warn')
+          // ⭐ 2026-10-23：宿主现在会挡"上一轮还在跑"，把它的原话显示出来，别一概说"没起来"
+          if (r?.started) say('已经在后台跑一轮了，报告会写在 out/ 里', 'good')
+          else say(r?.error || '没起来，看 duty.log', 'warn')
         } catch (e) { say(String(e?.message ?? e), 'warn') }
         finally { setBusy('') }
       }
@@ -527,6 +565,31 @@ function WatchTab() {
 
       const sw = (k) => Boolean(cfg[k])
 
+      /* ⭐ 2026-10-23：模型下拉 —— 值用 `provider|model` 拼成一个字符串，
+       *    这样「跟随当前会话」（空值）和"钉死某一个"用同一个 select 就能表达。
+       *    ⚠️ 前端也再筛一遍：万一接的是旧版宿主（/models 还是把所有 provider 都吐出来），
+       *       至少下拉里不会出现必然 NO_ADAPTER 的那些。 */
+      const USABLE_PROVIDERS = ['deepseek-account', 'deepseek-official', 'google-antigravity']
+      const usableList = (modelList || []).filter((p) => USABLE_PROVIDERS.includes(p.id))
+      const modelOptions = []
+      for (const p of usableList) for (const m of (p.models || [])) modelOptions.push(p.id + '|' + m.id)
+      const modelValue = (cfg.modelProvider && cfg.modelName) ? String(cfg.modelProvider) + '|' + String(cfg.modelName) : ''
+      /* ⭐ 分组标题上写清楚这条路怎么用：deepseek-official 要 API key，账号登录的机器选它跑不起来 */
+      const providerLabel = (p) => p.id === 'deepseek-account' ? p.name + ' · 账号登录'
+        : p.id === 'deepseek-official' ? p.name + ' · 需要 API key'
+        : p.id === 'google-antigravity' ? p.name + ' · Antigravity 订阅'
+        : p.name
+      const pickModel = (v) => {
+        if (!v) { patch({ modelProvider: '', modelName: '' }, '模型'); return }
+        const i = v.indexOf('|')
+        if (i < 0) return
+        patch({ modelProvider: v.slice(0, i), modelName: v.slice(i + 1) }, '模型')
+      }
+      /* ⭐ 2026-10-23：现在这一轮已经跑了多久（宿主挡并发 + 超时自动收） */
+      const runMinutes = (st && st.running)
+        ? Math.max(0, Math.round((Date.now() - Number(st.runningSince || Date.now())) / 60_000))
+        : 0
+
       return h('div', { 'data-bd-page': '' },
 
         /* ── 今天 ── */
@@ -535,8 +598,14 @@ function WatchTab() {
           h('span', { 'data-bd-badge': '' }, '环境' + (st.venvReady ? '已就绪' : (st.installing ? '正在装' : '未装'))),
           h('span', { 'data-bd-badge': '' }, st.loggedIn ? 'B站已登录' : 'B站未登录'),
             h('span', { 'data-bd-badge': '' }, 'v' + (st.version || '?')),
+          // ⭐ 2026-10-23：正在跑的时候把"跑了多久"摆出来 —— 以前连点两次会并行两轮，现在宿主会挡
+          st.running ? h('span', { 'data-bd-badge': '' }, '正在跑 ' + runMinutes + ' 分钟') : null,
           h('div', { 'data-bd-grow': '' }),
-          h('button', { 'data-bd-btn': '', disabled: busy === 'run', onClick: onRun }, '现在跑一轮')),
+          h('button', {
+            'data-bd-btn': '', disabled: busy === 'run' || Boolean(st.running),
+            title: st.running ? '上一轮还没跑完；卡住了会在 ' + (st.runTimeoutMinutes || 20) + ' 分钟时自动收掉' : undefined,
+            onClick: onRun,
+          }, st.running ? '跑着…' : '现在跑一轮')),
           runNote ? h('div', { 'data-bd-msg': '', 'data-good': runNote.tone === 'good' ? '' : undefined,
             'data-warn': runNote.tone === 'warn' ? '' : undefined }, runNote.t) : null,
 
@@ -581,6 +650,59 @@ function WatchTab() {
               onBlur: () => { const n = Math.max(0, Math.min(Number(perDay) || 0, 50)); setPerDay(String(n)); patch({ perDay: n }, '每天挑几条') },
             })),
           st.lastRunAt ? h('div', { 'data-bd-note': '' }, `上次跑：${new Date(st.lastRunAt).toLocaleString('zh-CN')}`) : null),
+
+        /* ── 用哪个模型跑 ── */
+        h('div', { 'data-bd-sec': '', 'data-bd-group': 'daily', 'data-bd-away': tab === 'daily' ? undefined : '' },
+          h('div', { 'data-bd-h': '' }, '用哪个模型跑'),
+          h('select', {
+            'data-bd-input': '', value: modelValue,
+            onChange: (e) => pickModel(e.target.value),
+          },
+            h('option', { value: '' }, '跟随当前会话选的模型（默认）'),
+            (modelValue && modelOptions.indexOf(modelValue) < 0)
+              ? h('option', { value: modelValue }, modelValue.replace('|', ' / ') + '（当前设置）') : null,
+            ...usableList.map((p) => h('optgroup', { key: p.id, label: providerLabel(p) },
+              (p.models || []).map((m) => h('option', { key: p.id + '|' + m.id, value: p.id + '|' + m.id },
+                (m.name && m.name !== m.id) ? m.name + '（' + m.id + '）' : m.id))))),
+          h('div', { 'data-bd-note': '' },
+            '它每轮是另起一个 headless 会话跑的 —— 默认用你在会话里选的那个模型；'
+            + '想让它固定用某个（比如更省 / 更强），就在这里选。改完下一轮生效，不用重启。'),
+          h('div', { 'data-bd-note': '' },
+            '⚠️ 这里只列「这一轮那个 profile 里装了的」provider。2.1.0 起值班轮默认跑最小权限的 `bili-duty` profile，'
+            + '里面只有 DeepSeek 两条路由；Antigravity 只在老的 `headless` profile 里，所以默认不出现。'),
+          st.model && st.model.ignored ? h('div', { 'data-bd-msg': '', 'data-warn': '' },
+            '你指定的 ' + st.model.ignored.provider + ' / ' + st.model.ignored.model
+            + ' 刷B站这一轮用不了（headless 里没有这个适配器）⇒ 已自动改回'
+            + (st.model.source === 'session' ? '跟随当前会话：' + st.model.provider + ' / ' + st.model.model
+              : ' DeepSeek 兜底：' + st.model.provider + ' / ' + st.model.model)
+            + '。换一个上面列表里的，或把「跟随当前会话」留空。') : null,
+          st.model && st.model.source === 'fallback' ? h('div', { 'data-bd-msg': '', 'data-warn': '' },
+            '你当前会话用的模型'
+            + (st.model.sessionIgnored ? ' ' + st.model.sessionIgnored.provider + ' / ' + st.model.sessionIgnored.model : '')
+            + ' 刷B站这一轮用不了（headless 里没有这个适配器）⇒ 这一轮会改用 '
+            + st.model.provider + ' / ' + st.model.model + ' 跑，不会白跑。'
+            + '想固定它的话，在上面选一个。') : null,
+          modelList === null ? h('div', { 'data-bd-note': '' }, '模型列表读取中…') : null,
+          (modelList && usableList.length === 0)
+            ? h('div', { 'data-bd-note': '' }, '没读到可用的模型 —— 宿主里没列出 deepseek-account / deepseek-official。仍然可以「跟随当前会话」。') : null,
+          (modelList && usableList.length === 0) ? h('div', { 'data-bd-sub': '' },
+            h('div', { 'data-bd-note': '' }, '也可以直接手填（只认这一轮 profile 里装了的：deepseek-account / deepseek-official；两个都填才生效，留空 = 跟随当前会话）：'),
+            h('div', { 'data-bd-row': '' },
+              h('input', {
+                'data-bd-input': '', placeholder: 'provider（如 deepseek-account）', value: mProv ?? '',
+                onChange: (e) => setMProv(e.target.value),
+                onBlur: () => patch({ modelProvider: String(mProv || '').trim(), modelName: String(mName || '').trim() }, '模型'),
+              }),
+              h('input', {
+                'data-bd-input': '', placeholder: 'model（如 deepseek-flash）', value: mName ?? '',
+                onChange: (e) => setMName(e.target.value),
+                onBlur: () => patch({ modelProvider: String(mProv || '').trim(), modelName: String(mName || '').trim() }, '模型'),
+              }))) : null,
+          st.model ? h('div', { 'data-bd-note': '' },
+            '下一轮会用：' + st.model.provider + ' / ' + st.model.model
+            + (st.model.source === 'plugin' ? '（这里指定的）'
+              : st.model.source === 'fallback' ? '（兜底，见上面的提示）'
+                : '（跟随当前会话）')) : null),
 
         /* ── 发言与转写 ── */
         h('div', { 'data-bd-sec': '', 'data-bd-group': 'social', 'data-bd-away': tab === 'social' ? undefined : '' },
@@ -817,6 +939,17 @@ function WatchTab() {
         document.head.appendChild(style)
         ctx.effect(() => () => style.remove(), 'dsh-bili-scroll: 设置页样式')
 
+        // ⭐ 2026-10-25：窗口回到前台就重查「这个会话在哪个工作区」——
+        //    用户在设置里改了工作区后，不用刷新整页，切回来一会儿 tab 就跟着挪。
+        const bumpOnFocus = () => { try { bumpScope() } catch { /* 忽略 */ } }
+        const bumpOnVisible = () => { if (!document.hidden) bumpOnFocus() }
+        window.addEventListener('focus', bumpOnFocus)
+        document.addEventListener('visibilitychange', bumpOnVisible)
+        ctx.effect(() => () => {
+          window.removeEventListener('focus', bumpOnFocus)
+          document.removeEventListener('visibilitychange', bumpOnVisible)
+        }, 'dsh-bili-scroll: 工作区缓存失效')
+
         // ⭐ 进「设置」：label 就是左侧导航里那一项（抄 dsh-meme 的写法）
         const slots = (typeof ctx.get === 'function' ? ctx.get('slots') : undefined) || ctx.slots
         if (!slots) return
@@ -825,16 +958,91 @@ function WatchTab() {
           () => h(Panel),
         ))
 
-  // ⭐ 2026-10-20 实验：会话头第三个 tab（0.2.1 里这个槽位真实存在；老版本没有就静默跳过）
+  // ⭐⭐ 2026-10-23（本人反馈：这个 tab 在**每个**会话的头上都出现，应该只在工作区出现）：
+  //    `conversation.view` 是个 list 槽，壳子（ui-conversation 的 viewTabs()）对**每个注册项都画一个 tab**，
+  //    唯一的过滤是"开发者工具没开就不显示内置的 trajectory" —— **没有"按会话隐藏"的开关**。
+  //    ⇒ 只能**按当前会话动态注册/撤销**：
+  //      · 往 composer 左边栏（`conversation.input.left`，每个会话都渲染的 list 槽）塞一个**隐藏探针**，
+  //        它拿得到 `sessionId`；
+  //      · 探针问宿主 `GET /api/bili-duty/session-scope?session=…` —— 宿主查 workspaceRegistry，
+  //        回答这个会话是不是在「刷B站 设置里的 workspace」（默认 D:/hajimi）那个工作区里；
+  //      · 是 ⇒ 注册「刷过的视频」；不是 ⇒ 立刻撤销（tab 跟着消失）。
+  //    这样：hajimi 工作区里的会话有 tab，别的会话（比如 default-workspace）没有。
   try {
-    slots.inject('conversation.view', () => slots.register({
-      name: 'conversation.view',
-      id: 'bili-watched',
-      order: 20,
-      label: '刷过的视频',
-      scope: 'session',
-    }, () => h(WatchTab)))
-  } catch (e) { /* 没有这个槽位就算了 */ }
+    let viewOff = null
+    let viewSlotReady = false
+    const dropView = () => {
+      if (!viewOff) return
+      try { viewOff() } catch { /* 已经撤过了 */ }
+      viewOff = null
+    }
+    const ensureView = () => {
+      if (viewOff || !viewSlotReady) return
+      try {
+        viewOff = slots.register({
+          name: 'conversation.view',
+          id: 'bili-watched',
+          order: 20,
+          label: '刷过的视频',
+          scope: 'session',
+        }, () => h(WatchTab))
+      } catch (e) { viewOff = null }
+    }
+    // 槽位就绪之前 register 会被拒；inject 的回调就是"槽位已经在了"的信号
+    let lastInScope = false
+    slots.inject('conversation.view', () => {
+      viewSlotReady = true
+      if (lastInScope) ensureView()   // 探针比槽位先跑完的情况：补一次
+      return () => { viewSlotReady = false; dropView() }
+    })
+    const ScopeProbe = ({ sessionId }) => {
+      const [nonce, setNonce] = React.useState(0)
+      // 订阅 bumpScope：设置变了 / 窗口回到前台 / 15 秒兜底轮询 ⇒ 重查一次
+      React.useEffect(() => {
+        const fn = () => setNonce((n) => n + 1)
+        scopeSubs.add(fn)
+        return () => { scopeSubs.delete(fn) }
+      }, [])
+      React.useEffect(() => {
+        const t = setInterval(() => bumpScope(), 15_000)
+        t.unref?.()
+        return () => clearInterval(t)
+      }, [])
+      React.useEffect(() => {
+        const sid = String(sessionId || '')
+        // 拿不到 sessionId（槽位没给 / 老版本）：退回老行为 —— 照常显示，别把 tab 弄没了
+        if (!sid) { lastInScope = true; ensureView(); return () => {} }
+        const hit = scopeCache.get(sid)
+        if (hit && Date.now() - hit.at < SCOPE_TTL) {
+          if (hit.v) { lastInScope = true; ensureView() } else dropView()
+          return () => {}
+        }
+        // 没缓存 / 缓存过期：先收起来（宁可晚一帧出现，也别让 tab 在别的会话上闪），再问宿主
+        dropView()
+        let alive = true
+        jget('/session-scope?session=' + encodeURIComponent(sid))
+          .then((r) => {
+            if (!alive) return
+            // 老宿主没有这个接口（r.ok 不是 true）⇒ 退回老行为，别静默把 tab 藏掉
+            if (!r || r.ok !== true) { lastInScope = true; scopeCache.set(sid, { v: true, at: Date.now() }); ensureView(); return }
+            const inScope = Boolean(r.match)
+            lastInScope = inScope
+            scopeCache.set(sid, { v: inScope, at: Date.now() })
+            if (inScope) ensureView(); else dropView()
+          })
+          .catch(() => { if (alive) { lastInScope = true; scopeCache.set(sid, { v: true, at: Date.now() }); ensureView() } })
+        return () => { alive = false }
+      }, [sessionId, nonce])
+      // 探针被卸载（切到没有会话的首页 / 别的面板）⇒ 把 tab 收起来
+      React.useEffect(() => () => { dropView() }, [])
+      return h('span', { 'data-bd-probe': '', style: { display: 'none' } })
+    }
+    slots.inject('conversation.input.left', () => slots.register({
+      name: 'conversation.input.left',
+      id: 'bili-scope',
+      order: 5,
+    }, (props) => h(ScopeProbe, props || {})))
+  } catch (e) { /* 没有这些槽位就算了 */ }
       },
     }
   },
