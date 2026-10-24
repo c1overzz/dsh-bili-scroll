@@ -49,10 +49,16 @@ async def folders():
 
 async def add(bvid, fid):
     from bilibili_api import video as ba_video
+    # ⭐ 必须在 add() 里也 import favorite_list —— 它只在 folders() 里 import 过一次，
+    #    而两个函数各自是独立作用域，所以下面两行用法会 NameError：
+    #    「自动收藏永远失败」的根因就是这个（issue #76）。
+    #    报错信息长得像"收藏接口坏了"，但实际是这个名字根本没绑定。
+    from bilibili_api import favorite_list
     cred, _ = load()
     v = ba_video.Video(bvid=bvid, credential=cred)
     info = await v.get_info()
     aid = int(info['aid'])
+    # 保持原有行为：先取一次收藏夹信息（原代码就有，不要顺手删）
     res = await favorite_list.FavoriteList(aid, credential=cred).get_info()
     try:
         await favorite_list.FavoriteListResource(aid, type_=2, credential=cred).add(fid)
