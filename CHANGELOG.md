@@ -19,6 +19,7 @@
   - `append_seen(date, rows)`：只收 5 列表格行（日期 | BV | 标题 | UP | 状态），一次 ≤200 行，同时写判重表和月度归档
   - `append_comment(bv, rpid, root?, time?, excerpt?)`：只收数字 rpid，写进「评论记录」表
 - 四个接口同时加进 `BILI_MCP_TOOLS` 白名单（否则根本不注册）。
+- **私信收件人钉死**：overlay 下发 `BILI_DUTY_DM_UID`，`bili_send_message` 只许发给配置里的 UID（没填则退回旧行为）。
 - 章程（`prompts/duty.md`）改成"用接口写"，删掉所有"写文件"的路径说法。
 
 **测试**

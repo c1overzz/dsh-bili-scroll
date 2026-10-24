@@ -1243,6 +1243,12 @@ function reportMeta() {
     return list
   }
 
+  /**
+   * 私信允许发给谁：只认配置里的 dmUid / dmOwnerUid。
+   * 都没填就不下发 —— 服务端退回旧行为（但那也意味着发给谁不受限，所以界面上该填一个）。
+   */
+  const allowedDmUid = () => Number(cfg.dmUid) || Number(cfg.dmOwnerUid) || 0
+
   const ensureOverlay = () => {
     const file = join(stateDir, 'headless-overlay.yml')
     const script = join(stateDir, 'mcp_server.py')
@@ -1307,6 +1313,10 @@ function reportMeta() {
         '          - ' + yq(posix(script)),
         '        env:',
         '          BILI_MCP_TOOLS: ' + yq(mcpWhitelist().join(',')),
+        // ⭐ 2026-10-24（她提的“往外说话还开着”）：私信只许发给配置里的那个人 ——
+        //    白名单只能决定“这个工具在不在”，管不了“发给谁”；这里把允许的 UID 也下发给服务端，
+        //    bili_send_message 在发之前自己核一遍，被注入的提示词也没法把内容发给第三个人。
+        ...(allowedDmUid() ? ['          BILI_DUTY_DM_UID: ' + yq(String(allowedDmUid()))] : []),
         '',
       )
     }

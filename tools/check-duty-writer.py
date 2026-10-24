@@ -133,6 +133,12 @@ def main() -> int:
     seen_text = mod._SEEN_FILE.read_text(encoding="utf-8")
     check("| BV1abc123456 | 317831597441 |" in seen_text, "评论记录进了「评论记录」表")
 
+    print("[私信收件人]")
+    mod._DM_UIDS = {123456}
+    denied = call(mod.bili_send_message, 999, "hi")
+    check(denied.get("success") is False and "拒绝" in denied.get("error", ""), "不在名单里的收件人被拒", denied)
+    mod._DM_UIDS = set()
+
     print("[read_seen]")
     rout = call(mod.read_seen, 30)
     check(rout.get("ok") is True, "读得到", rout)

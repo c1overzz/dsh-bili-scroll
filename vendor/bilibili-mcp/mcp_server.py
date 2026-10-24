@@ -49,6 +49,15 @@ mcp = FastMCP("bilibili-mcp")
 #      模型那边等于根本不存在 —— 这才是真的闸门（光靠提示词说"别用"不算）✓
 _ALLOWED = {t.strip() for t in os.environ.get("BILI_MCP_TOOLS", "").split(",") if t.strip()}
 
+# ⭐ 2026-10-24：私信收件人白名单（宿主 overlay 下发 BILI_DUTY_DM_UID）。
+#    白名单只能决定"这个工具在不在"，管不了"发给谁" —— 被注入的提示词可以把报告内容私信给第三个人。
+#    宿主下发后就只允许发给这个 UID；没下发则保持旧行为。
+_DM_UIDS = set()
+for _x in os.environ.get("BILI_DUTY_DM_UID", "").split(","):
+    _x = _x.strip()
+    if _x.isdigit():
+        _DM_UIDS.add(int(_x))
+
 
 def tool():
     """@tool() 的替身：白名单里没有这个函数名，就原样返回、**不注册**。"""
@@ -1307,6 +1316,13 @@ async def bili_send_message(receiver_uid: int, text: str) -> str:
     """
     _deny = _guard("bili_send_message")
     if _deny: return _deny
+    # 🔒 收件人白名单：宿主下发了 BILI_DUTY_DM_UID 时，只许发给这里列的人。
+    #    被注入的提示词想"把报告发给别人"，到这一步就被拒。
+    if _DM_UIDS and int(receiver_uid) not in _DM_UIDS:
+        return json.dumps({
+            "success": False,
+            "error": f"拒绝：私信只允许发给配置里的 UID（{sorted(_DM_UIDS)}），不发给 {receiver_uid}",
+        }, ensure_ascii=False)
     cred = get_cred()
 
     if not text or not text.strip():
