@@ -277,7 +277,13 @@ async def bili_check_credential() -> str:
 # ========== Tool 1: 搜索视频 ==========
 
 @tool()
-async def bili_search(keyword: str, num: int = 10, order: str = "totalrank") -> str:
+async def bili_search(
+    keyword: str,
+    num: int = 10,
+    order: str = "totalrank",
+    time_start: str = "",
+    time_end: str = "",
+) -> str:
     """
     搜索B站视频
 
@@ -285,9 +291,15 @@ async def bili_search(keyword: str, num: int = 10, order: str = "totalrank") -> 
         keyword: 搜索关键词，如"AI Agent"、"大模型教程"
         num: 返回视频数量，默认10，最大50
         order: 排序方式 totalrank=综合 click=播放量 pubdate=最新 dm=弹幕
-    
+        time_start: 只要这个日期之后的（"YYYY-MM-DD"）；与 time_end 搭配，留空=不过滤
+        time_end: 只要这个日期之前的（"YYYY-MM-DD"）；与 time_start 搭配，留空=不过滤
+
     Returns:
         JSON格式的视频列表，包含标题、BV号、播放量、评论数、UP主等
+
+    ⚠️ 时间过滤为什么在这一层：B站 搜索结果不返回发布时间（字段只有 bvid/aid/title/
+        author/play/review/danmaku/duration/description）⇒ 本地没法按日期筛，
+        只能用 time_start/time_end 让 B站 在服务端筛（search_by_type 本来支持这两个参数）。
     """
     order_map = {
         "totalrank": search.OrderVideo.TOTALRANK,
@@ -297,11 +309,19 @@ async def bili_search(keyword: str, num: int = 10, order: str = "totalrank") -> 
     }
     order_enum = order_map.get(order, search.OrderVideo.TOTALRANK)
 
+    # 只把非空的传下去：实测给 None/空串都不如干脆不传这个 kwarg 稳。
+    extra = {}
+    if time_start:
+        extra["time_start"] = time_start
+    if time_end:
+        extra["time_end"] = time_end
+
     result = await search.search_by_type(
         keyword=keyword,
         search_type=search.SearchObjectType.VIDEO,
         page=1,
         order_type=order_enum,
+        **extra,
     )
 
     videos = []
@@ -319,7 +339,13 @@ async def bili_search(keyword: str, num: int = 10, order: str = "totalrank") -> 
             "description": item.get("description", "")[:200],
         })
 
-    return json.dumps({"keyword": keyword, "count": len(videos), "videos": videos}, ensure_ascii=False)
+    return json.dumps({
+        "keyword": keyword,
+        "count": len(videos),
+        "time_start": time_start,
+        "time_end": time_end,
+        "videos": videos,
+    }, ensure_ascii=False)
 
 
 # ========== Tool 2: 获取评论 ==========

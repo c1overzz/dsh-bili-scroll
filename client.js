@@ -245,6 +245,9 @@ function WatchTab() {
       // ⚠️ 输入框必须绑"本地草稿"：页面每 5 秒轮询 /status，服务端那份会把 config 盖掉
       //    ⇒ 直接绑 cfg 的话，用户打字打到一半就被冲没了 ✗（2026-10-14 陌生人验收时抓到）
       const [perDay, setPerDay] = React.useState(null)
+      const [sOrder, setSOrder] = React.useState(null)      // 搜索排序
+      const [sDays, setSDays] = React.useState(null)        // 只看最近几天（0=不过滤）
+      const [sNum, setSNum] = React.useState(null)          // 每次看多少条
       const [perRound, setPerRound] = React.useState(null)
       const [replyPer, setReplyPer] = React.useState(null)
       const [dmUid, setDmUid] = React.useState(null)        // 私信收件人 UID（本地草稿）
@@ -280,6 +283,9 @@ function WatchTab() {
         if (cfg && persona === null) setPersona(cfg.personaPrompt || '')
         if (cfg && rl === null) setRl(cfg.reportLevel || 'full')
         if (cfg && perDay === null) setPerDay(String(cfg.perDay ?? 5))
+        if (cfg && sOrder === null) setSOrder(cfg.searchOrder || 'totalrank')
+        if (cfg && sDays === null) setSDays(String(cfg.searchDays ?? 0))
+        if (cfg && sNum === null) setSNum(String(cfg.searchNum ?? 10))
         if (cfg && perRound === null) setPerRound(String(cfg.commentPerRound ?? 1))
         if (cfg && replyPer === null) setReplyPer(String(cfg.replyPerRound ?? 1))
         if (cfg && mention === null) setMention(cfg.mentionName || '')
@@ -681,6 +687,35 @@ function WatchTab() {
             'data-bd-input': '', rows: 5, placeholder: '一行一个关键词；留空用内置那几组',
             value: kws ?? '', onChange: (e) => setKws(e.target.value),
           }),
+          h('div', { 'data-bd-label': '' }, '按什么排序'),
+          h('select', {
+            'data-bd-input': '', value: sOrder ?? 'totalrank',
+            onChange: (e) => { setSOrder(e.target.value); patch({ searchOrder: e.target.value }, '搜索排序') },
+          },
+            h('option', { value: 'totalrank' }, '综合（默认）'),
+            h('option', { value: 'pubdate' }, '最新发布'),
+            h('option', { value: 'click' }, '播放量'),
+            h('option', { value: 'dm' }, '弹幕数')),
+          h('div', { 'data-bd-row': '' },
+            h('div', { 'data-bd-grow': '' },
+              h('div', { 'data-bd-label': '' }, '只看最近几天'),
+              h('div', { 'data-bd-note': '' }, '填 0 = 不过滤；由 B站 服务端筛（搜索结果本身不带发布时间）')),
+            h('input', {
+              'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 0, max: 365,
+              value: sDays ?? '',
+              onChange: (e) => setSDays(e.target.value),
+              onBlur: () => { const n = Math.max(0, Math.min(Number(sDays) || 0, 365)); setSDays(String(n)); patch({ searchDays: n }, '只看最近几天') },
+            })),
+          h('div', { 'data-bd-row': '' },
+            h('div', { 'data-bd-grow': '' },
+              h('div', { 'data-bd-label': '' }, '每次看多少条'),
+              h('div', { 'data-bd-note': '' }, '1–50（默认 10）；一轮里模型会换几组关键词搜')),
+            h('input', {
+              'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 1, max: 50,
+              value: sNum ?? '',
+              onChange: (e) => setSNum(e.target.value),
+              onBlur: () => { const n = Math.max(1, Math.min(Number(sNum) || 10, 50)); setSNum(String(n)); patch({ searchNum: n }, '每次看多少条') },
+            })),
           h('div', { 'data-bd-label': '' }, '它按什么说话（人设提示词，可留空）'),
           h('textarea', {
             'data-bd-input': '', rows: 6,
