@@ -40,6 +40,27 @@
   有用户反馈桌面版上会卡在那儿。**先确认 dsh 版本与 profile**，别硬跑；跑不起来就先只用手动「现在跑一轮」。
 - **别让用户自己去装环境** ✗：插件自带一份 uv 与依赖安装能力，先照上面第 1 条处理。
 
+## 已知环境差异（续：跑一轮时的模型路由）
+
+- ⭐⭐ **桌面版上"跑一轮就报 `NO_ADAPTER: no adapter registered for provider "…"`" —— 2026-10-24 起已修**：
+  headless 那份 profile 的 `llm-pi-ai` 是**零路由**（dsh-base 里只有空壳），供应商表只在桌面版那份
+  `cordis.patch.yml` 里 ⇒ 以前 overlay 只写 `provider/model` 就必然死在这儿。
+  现在 overlay 会把**宿主当前那条供应商定义**（baseURL / api / apiKeyEnv / models…）镜像进去；
+  设置 → 刷B站 → 高级 里也能**挑一个钉住**（默认「跟当前窗口」）。
+  ⇒ 用户报这个错，先让他升到含这条修复的版本；还不行就要 `duty.log` 里那几行（会写"找不到定义"）。
+
+- ⭐⭐ **改插件代码时：别手复制到 `profiles/*/node_modules/dsh-bili-scroll`**（2026-10-25 踩过）：
+  那个目录是 **pnpm 管的**，`profile/package.json` 里写着版本号（如 `"dsh-bili-scroll": "2.0.4"`）⇒
+  下一次 `pnpm install`（DSH 升级、装别的插件、一键升级都会触发）会**把 `index.js` 覆盖回 registry 那版** ✗
+  （现象：其它文件是你复制的、`index.js` 却退回旧版 ⇒ 改了等于没改）。
+  ⇒ 本机调试的正确装法是 `link:` 指向源码仓库：
+  ```
+  # profile/package.json 的 dependencies 里写：
+  "dsh-bili-scroll": "link:<插件仓库的绝对路径>"
+  # 然后 cd <profile> && pnpm install
+  ```
+  `link:` 是软链 ⇒ 改仓库代码**立刻**生效（客户端半端仍需刷新页面 / 重启 DSH）。
+
 ## 仓库结构（改代码时看这里）
 
 - `index.js` —— host 半端：13 个工具 + 谷时定时器 + HTTP 接口 + 配置（`config.json` 与 DSH 原生设置页**逐字段对账**：见 `loadCfg` / `saveCfgHost`）+ 值班轮的工具白名单（`mcpWhitelist` → `BILI_MCP_TOOLS`）

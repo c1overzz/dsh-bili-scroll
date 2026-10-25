@@ -82,6 +82,10 @@ export const Config = !z ? undefined : z.object({
   /** headless 那一轮用哪个 profile */
   // ⭐ 2.0.5：默认换成"最小权限 profile"（只有 B站 MCP + 窄口 IO，没有文件系统/命令/联网）
   headlessProfile: z.string().default('bili-duty').extra('volatile', true),
+  /** ⭐ 这一轮用哪个供应商（留空 = 跟着当前窗口选的模型走） */
+  modelProvider: z.string().default('').extra('volatile', true),
+  /** ⭐ 这一轮用哪个模型（留空 = 跟着当前窗口选的模型走） */
+  modelName: z.string().default('').extra('volatile', true),
   /** 给那一轮叠一份插件自己的 patch（把 B站 MCP 挂上）—— 用户 profile 一个字都不用改 */
   overlayMcp: z.boolean().default(true).extra('volatile', true),
   /** 跑 headless 时的工作目录 */
@@ -242,7 +246,7 @@ function reportMeta() {
     personaPrompt: '',
     perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
     dmMode: 'only', dmUid: 0,
-    keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, favFolderId: 0,
+    keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'bili-duty', modelProvider: '', modelName: '', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, favFolderId: 0,
   }
   const normalize = (src, base) => {
     const out = { ...base }
@@ -290,6 +294,18 @@ function reportMeta() {
     if ('replyPerRound' in p) p.replyPerRound = Math.max(1, Math.min(Number(p.replyPerRound) || 1, 10))
     if ('favFolderId' in p) p.favFolderId = Math.max(0, Math.floor(Number(p.favFolderId) || 0))
     if ('commentPerRound' in p) p.commentPerRound = Math.max(0, Math.min(Number(p.commentPerRound) || 0, 20))
+    // ⭐ 供应商/模型是**宿主那边的路由名**：只做清洗 + 限长，不做取值校验
+    //    （写错的名字宿主自己会报 NO_ADAPTER / 未知模型，比我们猜一个合法值更好排查）
+    //    ⚠️ 2026-10-24 审查修：必须**去掉控制字符**（换行/Tab 等）—— 这两个值会被拼进 YAML，
+    //       带换行即便转义了也会被折叠成空格、变成另一个模型名；不转义则能直接注入键。
+    //       路由名本来就不可能有空白以外的怪字符，清掉是零代价的 ✓
+    //    ⚠️ 2026-10-24 审查补：除 C0/DEL 外，**U+0085(NEL) / U+2028 / U+2029 也要剥** ——
+    //       YAML 1.1（PyYAML）会把 NEL 折成空格，路由名会被静默改名（实测过；DSH 用的是 YAML 1.2，不受影响，
+    //       但这两个值要喂给可能换解析器的下游，剥掉是零代价的 ✓）
+    const cleanRoute = (v, max) => String(v || '')
+      .replace(/[\u0000-\u001F\u007F\u0085\u2028\u2029]/g, '').trim().slice(0, max)
+    if ('modelProvider' in p) p.modelProvider = cleanRoute(p.modelProvider, 120)
+    if ('modelName' in p) p.modelName = cleanRoute(p.modelName, 200)
     return p
   }
 
@@ -1304,7 +1320,39 @@ function reportMeta() {
     return dutyProfileState === 'ok' ? 'bili-duty' : (want || 'headless')
   }
 
+
+  // ⭐ 2026-10-24：这一轮的 overlay 缺了供应商定义时，记下"会失败 + 怎么办"（只进日志；
+  //    报告侧交给上游的 lib/diagnose.mjs，别重复实现）
+  let routeWarning = ''
+  /* ⭐⭐ 2026-10-24 审查修（Duplicated Code + 只认 llm-pi-ai 两个问题一起解决）：
+   *    「宿主里哪条 llm-* 声明了这个 provider」这件事原来在三个地方各抄了一遍
+   *    （ensureOverlay 镜像、effortOk 查档位、hostModelRoutes 列清单），且**都只认 ns==='llm-pi-ai'** ——
+   *    可 profile 里还可能有 llm-deepseek 等别的适配器，那些路由永远查不到 ⇒ 下拉框只兑现了一半。
+   *    ⇒ 收成一个函数：扫**所有** ns 以 'llm' 开头的行，按 provider 名在 providers 字典里找 ✓
+   *    （不同适配器的 providers 形状可能不同 ⇒ 只取长得像 {models:[…]} 的那种，取不到就算没有）
+   */
+  const findProviderProfile = (provider) => {
+    const pid = String(provider || '')
+    if (!pid) return null
+    try {
+      const rows = ctx.settings?.describe?.() || []
+      for (const row of rows) {
+        const ns = String(row?.ns || '')
+        if (!ns.startsWith('llm')) continue
+        const provs = row?.value?.providers ?? row?.base?.providers ?? null
+        const prof = provs?.[pid]
+        if (prof && typeof prof === 'object') return prof
+      }
+    } catch { /* 拿不到就当没有 */ }
+    return null
+  }
+  // ⭐ 2026-10-24：这一轮的 overlay 最后钉的是哪条路由（设置页要显示"上一轮实际用的"）
+  //    ⚠️ 2026-10-24 审查修命名漂移：这个值在三个地方出现过三个名字（lastModel / lastRoundModel / lastRoundRoute）
+  //       ⇒ 统一叫 lastRoundModel（= state.json 里的键 = /status 的字段 = 这个变量）✓
+  let lastRoundModel = ''
   const ensureOverlay = () => {
+    lastRoundModel = ''
+    routeWarning = ''
     const file = join(stateDir, 'headless-overlay.yml')
     const script = join(stateDir, 'mcp_server.py')
     const posix = (p) => String(p).replace(/\\/g, '/')
@@ -1330,17 +1378,84 @@ function reportMeta() {
     //    ⇒ overlay 里补一条 agent-default-model，**优先跟随用户当前选的模型**；拿不到就不写（保持原行为）✓
     try {
       const sel = ctx.get('agentDefaultModel')?.currentSelection?.() ?? null
-      const selProvider = sel?.provider ?? sel?.providerId
-      const selModel = sel?.model ?? sel?.modelId
+      // ⭐ 2026-10-24：设置里显式钉了供应商/模型就以它为准（不钉 = 跟当前窗口走）
+      const pinProvider = String(cfg.modelProvider || '').trim()
+      const pinModel = String(cfg.modelName || '').trim()
+      const pinned = Boolean(pinProvider && pinModel)
+      const selProvider = pinned ? pinProvider : (sel?.provider ?? sel?.providerId)
+      const selModel = pinned ? pinModel : (sel?.model ?? sel?.modelId)
       if (selProvider && selModel) {
+        // ⭐⭐ 2026-10-24：**headless 那份 profile 默认没有桌面版那张供应商表**（dsh-base 里的
+        //    `llm-pi-ai` 是零路由）⇒ 只写 provider/model 会死在
+        //    `NO_ADAPTER: no adapter registered for provider "…"`（实测过）。
+        //    所以先把**宿主当前这条供应商定义**（baseURL / api / apiKeyEnv / models…）镜像进 overlay。
+        //    JSON 是 YAML 的子集 ⇒ 直接拼 JSON 片段，省掉自己写序列化 ✓
+        //    （拿不到就退回「只写 provider/model」，由 profile 自己那份 patch 兜底）
+        try {
+          const prof = findProviderProfile(selProvider)
+          if (prof) {
+            const frag = JSON.stringify({ providers: { [String(selProvider)]: prof } }, null, 2)
+              .split('\n').map((l) => '    ' + l).join('\n')
+            yml.push('- id: llm-pi-ai', '  config:', frag, '')
+          } else {
+            // ⚠️ 2026-10-24 审查修：**这里以前只 log 一句就降级** —— 而"只写路由名"正是原来
+            //    NO_ADAPTER 的死法 ⇒ 等于把必然失败伪装成"不影响跑"✗
+            //    现在：能问 profile 自己那份 patch 有没有这条路由，有就让它兜底（真没事），
+            //    没有就**明说这一轮大概率会失败**，并把话写进报告（用户至少知道为什么一条都没刷出来）。
+            const inProfile = (() => {
+              try {
+                // ⚠️ 别用 dshHomePath() —— 那是 ctx.get 提供的服务，不是本模块的函数（照抄会 ReferenceError）
+                //    stateDir 是 <DSH_HOME>/bili-duty ⇒ 往上两级就是 <DSH_HOME> ✓
+                // ⚠️ 用 effectiveProfile()：真正会跑的是它（2.0.5 起默认 bili-duty），不是 cfg 里那个原始值
+                const prof = join(stateDir, '..', 'profiles', effectiveProfile(), 'cordis.patch.yml')
+                if (!existsSync(prof)) return false
+                const t = readFileSync(prof, 'utf8')
+                return t.includes(String(selProvider))
+              } catch { return false }
+            })()
+            if (inProfile) {
+              log('供应商「' + String(selProvider) + '」不在宿主设置里，但 ' + effectiveProfile() + ' profile 自己声明了 ⇒ 靠它兜底')
+            } else {
+              routeWarning = '这一轮很可能失败：供应商「' + String(selProvider) + '」既不在 DSH 设置里，'
+                + effectiveProfile() + ' profile 也没声明它 ⇒ 会报 NO_ADAPTER。'
+                + '请在 设置 → 刷B站 → 高级 →「用哪个模型」里换一个，或先在 DSH 设置里加上这条供应商。'
+              log(routeWarning)
+            }
+          }
+        } catch (e) { log('镜像供应商定义失败（不影响跑）：' + String(e?.message ?? e)) }
+        // ⚠️ 2026-10-24 审查修：provider/model 现在**可能来自用户在设置页填的值**（cfg.modelProvider/modelName），
+        //    不再是只读的 currentSelection ⇒ 必须按 YAML 单引号规则转义。
+        //    否则 modelName 里塞一个换行就能往 overlay 里多塞键（实测：'x\n    apiKeyEnv: EVIL' 会真的生效）✗
+        // ⭐⭐ 2026-10-24 审查修（第二条，实测复现）：**reasoningEffort 不能无脑跟着窗口走** ——
+        //    窗口里选的是「支持 max 档的模型」，钉到「只声明 off/low/medium/high」的模型上就死：
+        //    `UNSUPPORTED_REASONING_EFFORT: provider "<供应商>" model "<模型>" does not support reasoning effort "max"`。
+        //    ⇒ 只有**该模型确实声明了这个档位**时才带上它（查镜像进来的那条 provider 定义）。
+        //      查不到（没镜像）就沿用老行为：不钉时才带窗口那个 effort。
+        const effortOk = (() => {
+          const e = sel?.reasoningEffort
+          if (!e) return false
+          try {
+            const prof = findProviderProfile(selProvider)
+            const model = (prof?.models || []).find((m) => String(m?.id ?? m?.model ?? '') === String(selModel))
+            if (!model) return false                       // 模型都不在这条路由里 ⇒ 不带 effort，让宿主用默认
+            const levels = model.reasoningEfforts
+            if (levels === false) return false              // 非推理模型
+            if (!levels || typeof levels !== 'object') return !pinned   // 没声明 ⇒ 不钉时沿用老行为
+            return Object.prototype.hasOwnProperty.call(levels, String(e))
+          } catch { return !pinned }
+        })()
         yml.push(
           '- id: agent-default-model',
           '  config:',
-          '    provider: ' + String(selProvider),
-          '    model: ' + String(selModel),
-          ...(sel.reasoningEffort ? ['    reasoningEffort: ' + String(sel.reasoningEffort)] : []),
+          '    provider: ' + yq(selProvider),
+          '    model: ' + yq(selModel),
+          ...(effortOk ? ['    reasoningEffort: ' + yq(sel.reasoningEffort)] : []),
           '',
         )
+        if (sel?.reasoningEffort && !effortOk) {
+          log(`这一轮不带 reasoningEffort：${String(selModel)} 没声明「${String(sel.reasoningEffort)}」这一档（带上会被宿主拒）`)
+        }
+        lastRoundModel = String(selProvider) + ' / ' + String(selModel) + (pinned ? '（设置里钉的）' : '（跟当前窗口）')
       }
     } catch { /* 老版本没有这个服务 —— 不写就退回原行为 */ }
     if (cfg.overlayMcp) {
@@ -1575,10 +1690,12 @@ function reportMeta() {
     child.on('close', () => { if (dutyChild === child) dutyChild = null })
     dutyChild = child
     dutyStartedAt = Date.now()
+    // spawn 成功之后才记「这一轮用的模型」——以前记在 spawn 之前，spawn 抛异常时会留下假的记录
+    if (lastRoundModel) { try { bumpState({ lastModel: lastRoundModel }) } catch { /* 记不上不影响跑 */ } }
     child.on('error', (e) => { releaseRunLock(); log(`刷B站起不来：${e?.message ?? e}`) })
     // ⭐ 起不来/被杀掉也要把锁放开，否则之后每一轮都会被判成'上一轮还没结束' ✗
     child.on('close', () => { if (dutyChild === child) dutyChild = null })
-    return { started: true, why, profile: cfg.headlessProfile, cwd, log: logFile }
+    return { started: true, why, profile: effectiveProfile(), cwd, log: logFile }
    } catch (e) {
     log(`刷B站开跑失败（${why}）：${e?.stack ?? e}`)
     return { started: false, why, error: String(e?.message ?? e) }
@@ -1732,6 +1849,9 @@ function reportMeta() {
       const dsh = resolveDsh()
       if (dsh.missing) { log('私信回复没跑：找不到 dsh（' + dsh.hint + '）'); return { ok: false } }
       const overlay = ensureOverlay()
+      // ⚠️ 2026-10-24 审查点出的 Out-parameter：ensureOverlay 会顺带写 lastRoundModel，
+      //    而**私信回复这一轮不消费它**（只有 runDuty 记"上一轮用的模型"）⇒ 清掉，别让侧信道留脏值 ✓
+      lastRoundModel = ''
       const base = [...dsh.args, '--profile', effectiveProfile()]
       if (overlay) base.push('--patch', overlay)
       if (dmReplyRunning) { log('私信回复：上一条还在跑 ⇒ 这条等下一跳'); return { ok: false, busy: true } }
@@ -2396,6 +2516,63 @@ function reportMeta() {
 
   let updateCache = null            // { at, latest } —— 检查更新的结果缓存
 
+  /* ⭐ 2026-10-24：宿主里**已经声明过**的供应商/模型清单 —— 设置页那个下拉框用它，
+   *    用户就不用自己背 provider / model 的名字（写错名字那一轮会死在 NO_ADAPTER）。
+   *    来源：ctx.settings.describe() 里**所有 llm-* 行**的 providers（value 优先，退 base）——
+   *    2026-10-24 审查修：以前只认 llm-pi-ai，llm-deepseek 等适配器的路由进不了下拉框 ✗
+   *    ⚠️ describe() 要扫所有条目 ⇒ 缓存 30 秒（设置页 5 秒轮询一次 /status） */
+  let routesCache = { at: 0, rows: [] }
+  const noModelsLogged = new Set()   // 见 hostModelRoutes：同一条「没写 models」只记一次（被 /status 5 秒轮询）
+  const hostModelRoutes = () => {
+    const t = Date.now()
+    if (t - routesCache.at < 30_000) return routesCache.rows
+    const rows = []
+    try {
+      const all = ctx.settings?.describe?.() || []
+      // ⭐ 2026-10-24 审查修：扫**所有** llm-* 行（不再只认 llm-pi-ai）——
+      //    否则 llm-deepseek 等适配器声明的路由永远进不了下拉框
+      const merged = {}
+      for (const row of all) {
+        if (!String(row?.ns || '').startsWith('llm')) continue
+        const provs = row?.value?.providers ?? row?.base?.providers ?? null
+        for (const [pid, prof] of Object.entries(provs || {})) {
+          if (!merged[pid] && prof && typeof prof === 'object') merged[pid] = prof
+        }
+      }
+      for (const [pid, prof] of Object.entries(merged)) {
+        const models = Array.isArray(prof?.models) ? prof.models : []
+        for (const m of models) {
+          const mid = String(m?.id ?? m?.model ?? '').trim()
+          if (!mid) continue
+          rows.push({ provider: String(pid), model: mid, label: String(pid) + ' / ' + String(m?.name || mid) })
+        }
+        // ⭐ 2026-10-24 审查修：**modelOverrides 里的模型也要列出来** ——
+        //    它们是对 models[] 里某条 id 的**覆盖**（改 contextWindow / maxTokens / 档位等），
+        //    以前只读 models[] ⇒ 只写在 overrides 里的模型"能钉但选不到" ✗
+        //    注意：overrides 的 key 是模型 id，值里可能只有部分字段 ⇒ 名字退回 key ✓
+        for (const [mid, ov] of Object.entries(prof?.modelOverrides || {})) {
+          const id = String(mid || '').trim()
+          if (!id) continue
+          if (models.some((m) => String(m?.id ?? m?.model ?? '') === id)) continue   // models[] 里已有，别重复
+          rows.push({ provider: String(pid), model: id, label: String(pid) + ' / ' + String(ov?.name || id) })
+        }
+        // ⚠️ 2026-10-24 审查修：**没写 models 的路由不要列进下拉框** ——
+        //    选中它只会写进 modelProvider、modelName 仍是空 ⇒ pinned 永远为假、那一轮根本不生效（死选项）✗
+        //    ⚠️ 2026-10-24 审查再修：**这里不能每跳都写日志** —— hostModelRoutes 被 /status 每 5 秒调一次
+        //       （30 秒缓存），日志会被刷爆。记一份"已经说过哪些"，同一条只记一次 ✓
+        const hasOverrides = Object.keys(prof?.modelOverrides || {}).length > 0
+        if (!models.length && !hasOverrides) {
+          if (!noModelsLogged.has(pid)) {
+            noModelsLogged.add(pid)
+            log('供应商「' + String(pid) + '」既没写 models 也没写 modelOverrides ⇒ 不进模型下拉框（选了也不会生效）')
+          }
+        }
+      }
+    } catch (e) { log('读宿主的供应商清单失败（不影响跑）：' + String(e?.message ?? e)) }
+    routesCache = { at: t, rows }
+    return rows
+  }
+
   const status = () => {
     refreshCfg()
     const st = readJson(dutyStateFile, {})
@@ -2412,6 +2589,10 @@ function reportMeta() {
       lastWhy: st.lastWhy || null,
       // ⭐ 2.0.4：界面上"它会认谁当主人"那行用这个（用小号登录、大号聊天的会看错）
       ownerInfo: ownerInfo(),
+      // ⭐ 2026-10-24：上一轮实际钉的模型路由（设置页「它跑那一轮用哪个模型」那一行用）
+      lastRoundModel: st.lastModel || '',
+      // ⭐ 这一轮能选哪些模型（宿主里已经声明过的，设置页下拉框用）
+      modelRoutes: (() => { try { return hostModelRoutes() } catch { return [] } })(),
       loggedIn: hasCredential(),
       venvReady: venvReadyNow(),
       version: myVersion(),
@@ -2502,7 +2683,7 @@ function reportMeta() {
       const patch = {}
       for (const k of ['perDay', 'peakValley', 'noon', 'night', 'autoComment', 'transcribe', 'asrModel',
         'commentPerRound', 'mentionName', 'dmMode', 'dmUid',
-        'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound', 'personaPrompt', 'dmWatch', 'dmWatchMinutes', 'dmReplyPerDay', 'dmOwnerUid']) {
+        'keywords', 'pythonPath', 'dshBin', 'headlessProfile', 'modelProvider', 'modelName', 'workspace', 'reportLevel', 'replyToComments', 'replyPerRound', 'personaPrompt', 'dmWatch', 'dmWatchMinutes', 'dmReplyPerDay', 'dmOwnerUid']) {
         if (k in body) patch[k] = body[k]
       }
       // ⭐⭐ 2.0.4（issue #83）：**服务端空值保护** —— 前端某次自动保存会把空字符串/空数组推上来，

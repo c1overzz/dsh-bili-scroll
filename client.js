@@ -47,6 +47,15 @@ window.__ModuleLoader__.load({
       body: JSON.stringify(body || {}),
     }))
 
+    /* ⭐ 2026-10-24：模型下拉框用。宿主给的清单是 [{provider, model, label}]，
+     *    值里用 \u0001 分隔（provider/model 里都不可能出现这个字符）。 */
+    const routeInList = (st, provider, model) => {
+      const list = (st && Array.isArray(st.modelRoutes)) ? st.modelRoutes : []
+      const pv = String(provider || '').trim()
+      const md = String(model || '').trim()
+      return list.some((x) => String(x.provider) === pv && String(x.model) === md)
+    }
+
     const CSS = `
 [data-bd-page]{display:flex;flex-direction:column;gap:18px;padding:2px 2px 8px;max-width:640px;}
     [data-bd-page][data-bd-wide]{max-width:none;width:100%;}
@@ -251,6 +260,9 @@ function WatchTab() {
       const [dmWatch, setDmWatch] = React.useState(null)          // 私信双向开关
       const [dmMode, setDmMode] = React.useState(null)      // 投递方式：off / only / both
       const [mention, setMention] = React.useState(null)
+      const [mProvider, setMProvider] = React.useState(null)   // 这一轮钉的供应商（空 = 跟当前窗口）
+      const [mModel, setMModel] = React.useState(null)         // 这一轮钉的模型
+      const [modelPick, setModelPick] = React.useState(null)   // 下拉框选中的值（'provider\u0001model'）
       const [login, setLogin] = React.useState(null)
       const [runNote, setRunNote] = React.useState(null)
       const [report, setReport] = React.useState(null)        // 非 null = 报告已展开   // 顶部那行状态（跑一轮/装依赖的反馈原来在最底下，看不见）
@@ -283,6 +295,21 @@ function WatchTab() {
         if (cfg && perRound === null) setPerRound(String(cfg.commentPerRound ?? 1))
         if (cfg && replyPer === null) setReplyPer(String(cfg.replyPerRound ?? 1))
         if (cfg && mention === null) setMention(cfg.mentionName || '')
+        if (cfg && mProvider === null) setMProvider(cfg.modelProvider || '')
+        if (cfg && mModel === null) setMModel(cfg.modelName || '')
+        // ⚠️ 2026-10-24 审查修：以前只在 modelPick === null 时同步一次 ⇒ 在**别处**改了模型
+        //    （另一个窗口的设置页 / bili_config 工具）后，这个下拉框会一直显示旧值 ✗
+        //    ⇒ 现在只要服务端那份**和本地草稿不一样**就跟上；正在保存（busy）时不动。
+        if (cfg && modelPick === null) {
+          const pv = String(cfg.modelProvider || '').trim()
+          const md = String(cfg.modelName || '').trim()
+          setModelPick(pv && md ? pv + '\u0001' + md : '')
+        } else if (cfg && modelPick !== null && !busy) {
+          const pv = String(cfg.modelProvider || '').trim()
+          const md = String(cfg.modelName || '').trim()
+          const want = pv && md ? pv + '\u0001' + md : ''
+          if (want !== modelPick) { setModelPick(want); setMProvider(pv); setMModel(md) }
+        }
         if (cfg && dmUid === null) setDmUid(cfg.dmUid ? String(cfg.dmUid) : '')
         if (cfg && dmMode === null) setDmMode(cfg.dmMode || 'only')
         if (cfg && dmWatch === null) setDmWatch(cfg.dmWatch !== false)   // 2.0 起默认开
@@ -788,6 +815,43 @@ function WatchTab() {
           (Array.isArray(st.missingDeps) && st.missingDeps.length)
             ? h('div', { 'data-bd-note': '' }, '还缺这几项：' + st.missingDeps.join(' / ') + '（qrcode = 画登录二维码用的）—— 点一次「重装主依赖」就会补上')
             : null,
+
+        /* ── 这一轮用哪个模型 ── */
+        h('div', { 'data-bd-sec': '', 'data-bd-group': 'adv', 'data-bd-away': tab === 'adv' ? undefined : '' },
+          h('div', { 'data-bd-h': '' }, '它跑那一轮用哪个模型'),
+          h('div', { 'data-bd-note': '' },
+            '默认「跟当前窗口」—— 你在这儿选了什么模型，它下一轮就用什么。',
+            h('br'),
+            '想让它固定用一个（比如刷 B站 用便宜的），就在下面挑一个。列表里只有你 profile 里已经声明过的路由。'),
+          h('div', { 'data-bd-row': '' },
+            h('div', { 'data-bd-grow': '' }, h('div', { 'data-bd-label': '' }, '用哪个模型')),
+            h('select', {
+              'data-bd-input': '', value: modelPick ?? '',
+              onChange: (e) => {
+                const v = e.target.value
+                setModelPick(v)
+                // ⚠️ 服务端有「空值不覆盖已有值」的保护（issue #83）⇒ 想清空必须显式带 clear，
+                //    否则选回「跟当前窗口」会被静默忽略、下拉框下次轮询又弹回旧值 ✗
+                if (!v) { setMProvider(''); setMModel(''); patch({ modelProvider: '', modelName: '', clear: ['modelProvider', 'modelName'] }, '模型'); return }
+                const [pv, md] = v.split('\u0001')
+                setMProvider(pv); setMModel(md || '')
+                patch({ modelProvider: pv, modelName: md || '' }, '模型')
+              },
+            },
+              h('option', { value: '' }, '跟当前窗口（默认）'),
+              (Array.isArray(st.modelRoutes) ? st.modelRoutes : []).map((x) => h('option', {
+                key: x.provider + '\u0001' + x.model,
+                value: x.provider + '\u0001' + x.model,
+              }, x.label))),
+          ),
+          // ⚠️ 选中的那条如果**已经不在**宿主清单里了（换过 profile / 手改过配置），下拉框会显示空白
+          //    ⇒ 明说出来，别让用户以为没保存
+          (String(mProvider || '').trim() && String(mModel || '').trim() && !routeInList(st, mProvider, mModel))
+            ? h('div', { 'data-bd-note': '' },
+              '现在钉的是 ' + String(mProvider).trim() + ' / ' + String(mModel).trim()
+                + ' —— 但它不在当前 profile 的供应商清单里，那一轮可能会报 NO_ADAPTER。改成上面列表里的一个，或者选「跟当前窗口」。')
+            : null,
+          st.lastRoundModel ? h('div', { 'data-bd-note': '' }, '上一轮实际用的：' + st.lastRoundModel) : null),
 
         /* ── 它是怎么干活的（给他看的） ── */
         h('div', { 'data-bd-sec': '', 'data-bd-group': 'adv', 'data-bd-away': tab === 'adv' ? undefined : '' },

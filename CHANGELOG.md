@@ -1,3 +1,33 @@
+## 未发布 — 2026-10-24
+
+**「它跑那一轮用哪个模型」可以在设置页自己挑了。**
+
+以前那一轮（headless / 后来的 bili-duty profile）用的是「当前窗口选的模型」；换过 profile 就死在
+`NO_ADAPTER: no adapter registered for provider "…"` —— 因为那两份 profile 的
+`llm-pi-ai` 是**零路由**（dsh-base 里只有空壳），供应商表只写在桌面版那份 patch 里。
+
+**新增**
+- 设置 → 刷B站 → 高级 → **用哪个模型**：下拉框列出**你 profile 里已经声明过**的每条路由
+  （读 `ctx.settings.describe()` 里**所有 `llm-*` 适配器**的 `providers`），默认「跟当前窗口」。
+  选了就钉住，下一轮照它跑；随时能改回「跟当前窗口」。
+- `/status` 多两个字段：`modelRoutes`（可选清单）、`lastRoundModel`（上一轮实际用的）。
+
+**修复**
+- 那一轮把**宿主当前那条供应商定义**（baseURL / api / apiKeyEnv / models…）镜像进 overlay，
+  不再指望用户 profile 里刚好有那张表。实测两个不同供应商下的模型（一个普通模型、一个带分组前缀的）都能跑通。
+- 选回「跟当前窗口」时显式带 `clear`（否则被服务端的空值保护静默忽略、下拉框弹回旧值）。
+- **钉住的模型若没声明窗口里那个 reasoningEffort 档位，就不再带它** —— 否则会死在
+  `UNSUPPORTED_REASONING_EFFORT: … does not support reasoning effort "max"`（实测复现）。
+- 用户填的 provider/model 进 YAML 前先剥控制字符 + 按单引号规则转义（原先可直接注入键）。
+- 「没写 models」的路由不再进下拉框（选了也不会生效）；但 **modelOverrides 里的模型现在会列出来**
+  （以前只读 models[]，只写在 overrides 里的模型"能钉但选不到"）。
+- 供应商查找不再只认 `llm-pi-ai` 一行 —— **扫所有 `llm-*` 适配器**，llm-deepseek 等声明的路由
+  也能进下拉框；三处重复的查找逻辑收成一个 `findProviderProfile()`。
+- 镜像拿不到供应商定义时**不再静默降级**：会查 profile 自己那份 patch，真没有就把
+  "这一轮很可能失败 + 怎么办"写进报告开头（以前只 log 一句，用户只看到"卡在工具上"）。
+
+---
+
 ## 2.2.0 — 2026-10-25
 
 **两件事：看得更广，说得更像人。**

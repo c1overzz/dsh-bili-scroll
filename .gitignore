@@ -16,3 +16,8 @@ log/
 __pycache__/
 *.pyc
 style-probe-*/
+
+# 排查/审查时临时抠出来的宿主源码、一次性脚本 —— 别进仓库
+# （2026-10-24 审查点名：.tmp_llm.js 有 128KB，git add -A 会把宿主源码提交进来）
+.tmp*
+tmp-*
