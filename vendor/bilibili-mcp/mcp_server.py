@@ -552,7 +552,7 @@ def _asr_segments(bvid: str, model: str = "small", timeout: int = 900):
         return []
 
 
-async def _frame_lines(bvid: str, times: list, duration: float):
+async def _frame_lines(bvid: str, times: list, duration: float, allow_asr: bool = True):
     """把每个抽帧时刻前后的话对齐出来 → [(第几帧, 时刻, 台词)]"""
     segs = await _sub_body(bvid)
     src = "bilibili-subtitle"
@@ -562,7 +562,7 @@ async def _frame_lines(bvid: str, times: list, duration: float):
             cfg = json.loads(cfgp.read_text())
         except Exception:
             cfg = {}
-        if cfg.get("transcribe") and duration and duration <= 1200:
+        if allow_asr and cfg.get("transcribe") and duration and duration <= 1200:
             segs = _asr_segments(bvid, str(cfg.get("asrModel") or "small"))
             src = "local-asr"
         else:
@@ -1616,7 +1616,7 @@ def frame_settings() -> dict:
 
 
 @tool()
-async def bili_frames(bvid: str, n: int = 0, height: int = 0) -> str:
+async def bili_frames(bvid: str, n: int = 0, height: int = 0, t_from: str = "", t_to: str = "", audio: int = -1) -> str:
     """
     把视频画面抽成一张「关键帧拼图」，返回图片路径 —— 之后用 read_image 真正"看"它。
 
@@ -1626,6 +1626,8 @@ async def bili_frames(bvid: str, n: int = 0, height: int = 0) -> str:
         bvid: 视频BV号，如"BV1awJX6HEDM"
         n: 抽几帧（0 = 用设置页里的，默认 9；最多 16）
         height: 清晰度 480/720/1080（0 = 用设置页里的，默认 480）
+        t_from / t_to: 只看这一段（秒或 mm:ss）—— 长视频先概览、再挑关键的一两分钟细看
+        audio: 本地转写开关：-1=跟设置（默认）/ 0=不转（快，对话场景用这个）/ 1=强制转
 
     Returns:
         JSON：sheet=拼图绝对路径（拿去 read_image）、duration、pubdate、days_ago、
@@ -1665,12 +1667,19 @@ async def bili_frames(bvid: str, n: int = 0, height: int = 0) -> str:
         transcribe_on = False
 
     args = [sys.executable, str(FRAMES_SCRIPT), bvid, "--n", str(n), "--height", str(h)]
+    if str(t_from).strip() or str(t_to).strip():
+        args += ["--from", str(t_from).strip() or "0", "--to", str(t_to).strip() or "0"]
     if cfg["cookie"]:
         args.append("--cookie")
-    if cfg.get("audio") == "always":
+    # ⭐ 2026-10-25：私信里回一条无字幕视频会顺带跑本地转写（几分钟）⇒ 撞工具超时。
+    #    所以给一个 audio 开关：对话场景传 0 只要画面，快得多。
+    if audio == 0:
+        pass
+    elif audio == 1:
+        args += ["--audio", "--asr-model", cfg.get("asrModel") or "small"]
+    elif cfg.get("audio") == "always":
         args += ["--audio", "--asr-model", cfg.get("asrModel") or "small"]
     elif (not has_sub) and transcribe_on:
-        # 没字幕轨 + 开了转写 ⇒ 让 frames.py 顺手把音频转出来（长视频它自己只转帧附近的片段）
         args += ["--audio", "--asr-model", cfg.get("asrModel") or "small"]
 
     def run():
@@ -1696,7 +1705,7 @@ async def bili_frames(bvid: str, n: int = 0, height: int = 0) -> str:
 
     # ⭐ 帧对齐台词：画面上写的可能是规避写法，这里给的是**那几秒他嘴里说的**
     try:
-        lines, srcname = await _frame_lines(bvid, out.get("times") or [], float(out.get("duration") or 0))
+        lines, srcname = await _frame_lines(bvid, out.get("times") or [], float(out.get("duration") or 0), allow_asr=(audio != 0))
         out["lines"] = lines
         out["line_source"] = srcname
         if lines:

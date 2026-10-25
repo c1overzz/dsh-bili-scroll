@@ -654,6 +654,7 @@ function reportMeta() {
       height: { type: 'number', description: '清晰度 480/720/1080（不填 = 跟设置页）' },
       from: { type: 'string', description: '只看这一段：起点（秒或 mm:ss）—— 长视频先概览再挑一段细看' },
       to: { type: 'string', description: '只看这一段：终点（秒或 mm:ss）' },
+      audio: { type: 'number', description: '要不要本地转写：0=不要（快）1=要；不填跟设置' },
     },
     async execute(args) {
       const raw = String(args?.bvid ?? '')
@@ -664,6 +665,7 @@ function reportMeta() {
       if (Number(args?.height) > 0) a.height = Number(args.height)
       if (args?.from) a.t_from = String(args.from)
       if (args?.to) a.t_to = String(args.to)
+      if (args?.audio === 0 || args?.audio === 1) a.audio = Number(args.audio)
       return call('bili_frames', a)
     },
   })
@@ -1834,7 +1836,9 @@ function reportMeta() {
       + (bv ? `\n里面是个视频 ${bv} —— 按「迷你点名看」走：`
         + `\n  ① 先用 \`bili_video_info\` 拿标题/UP/播放；`
         + `\n  ② \`bili_subtitle\` 读字幕原文（没字幕就跳过，别转写）；`
-        + (String(cfg.seeVideo ?? true) !== 'false' ? `\n  ③ \`bili_frames\` 抽一张关键帧，\`read_image\` 看一眼画面；` : '')
+        + (String(cfg.seeVideo ?? true) !== 'false'
+          ? `\n  ③ \`bili_frames("${bv}", n=6, audio=0)\` 抽一张关键帧（**audio=0：对话里不跑本地转写**，否则要几分钟），再 \`read_image\` 看一眼画面；`
+          : '')
         + `\n  ④ \`bili_comments\` 翻两三眼评论；`
         + `\n  然后一句话说清：这视频在讲什么、值不值得看。**不要写文件、不要发公开评论**。`
         + `\n  ⚠️ \`bili_frames\` 可能要 **30~90 秒**（长视频要分段下），所以：**不要和别的工具并发调用它**，`
