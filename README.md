@@ -75,6 +75,10 @@ dsh plugin --profile web add github:c1overzz/dsh-bili-scroll
    插件会用那一份、跳过下载。
 4. **「本地转写」是两段式的** —— 只打开开关**不够**，还得点它下面那个「**装转写依赖**」。
    没装的时候，没字幕的视频会被**跳过**（报告里现在会写「**因无字幕跳过 N 条**」，你能一眼看出漏了几条）。
+   · **升级到 2.2.1+ 后要手动补一次**：`node <插件目录>/patch-asr.mjs`
+     —— 2.2.1 修了 `lib/asr.py` 的拉音频链路（yt-dlp 失败 ⇒ playurl；CDN 域名不通 ⇒ 换 `backup_url`；
+     TLS 直连失败 ⇒ aiohttp），但这个文件会被 `ensureHomeFiles` 按包内版本覆盖，
+     所以从老版本升上来、或每次 `pnpm add` 升级后，跑一下这个脚本就补上了（幂等，`--dry` 可预览）。
 5. ⭐ **桌面版：装完设置页里根本不出现「刷B站」，日志只有一句 `1 entry did not activate … failed to import`** ——
    这是 0.1.3 及以前在桌面版上的一个真 bug：插件宿主半 import 的两个包是 *optional peer*，
    而桌面版 profile（`autoInstallPeers: false`）**不会装它们** ⇒ 插件整条不激活。

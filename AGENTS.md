@@ -50,6 +50,12 @@
 - `selfcheck.mjs` + `tools/` —— 本地预检：`node selfcheck.mjs`（**现在不用解析钩子了**；`tools/register.mjs` 那条还留着当备份）
   · `tools/check-vision.py` —— 看图纯函数的回归检查（不联网）。动了 `_https` / `_cover_url` / `_snapshot_entries` / `_crop_tile` 就跑一次：
     `<家目录>/.venv/Scripts/python.exe tools/check-vision.py`（用插件自己的 venv，里面才有 Pillow）
+- `patch-asr.mjs` —— 给 `lib/asr.py` 打补丁（2.2.1 起的拉音频链路修复）。
+  · ⚠️ **必须两边都打**：`lib/state.mjs:70` 的 `ensureHomeFiles` 启动时会用**包内** `lib/asr.py`
+    覆盖家目录那份（旧的备份成 `.bak-<时间戳>`）⇒ 只改家目录没用，只改包内下次 `pnpm add` 又会被冲掉。
+    这脚本一次把**包内 + 家目录**都改掉，幂等，`--dry` 预览 / `--force` 重打。
+  · 改完自检：`<家目录>/.venv-asr/Scripts/python.exe -c "import ast;ast.parse(open(r'lib/asr.py',encoding='utf-8').read())"`，
+    再随便转一条没字幕的视频看能不能出字。
 
 ## 约定
 

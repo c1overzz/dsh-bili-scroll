@@ -1,3 +1,31 @@
+## 2.2.1 — 2026-10-25
+
+**本地转写（asr.py）在这台机器上从不成功 —— 三个原因一起修。**
+
+`bili_subtitle` 只能拿 AI 字幕；没字幕的视频要靠 `asr.py` 现转。但这台机器上它从来没走通过：
+
+- **① `yt-dlp` 解析 B站 页面经常失败**（前端改版 / 风控），`fetch_audio` 直接抛错
+  ⇒ 改成走 `bilibili_api` 的 **playurl 接口**（带登录凭证，不解析网页），yt-dlp 降级为兜底。
+  绕开 bilibili_api 17.4.2 的 `register_client` 未注册 bug。
+- **② 音频 CDN 直连会 `SSL: UNEXPECTED_EOF_WHILE_READING`**
+  ⇒ 下载改走 `aiohttp`（urllib 留作第二档），并带上 UA / Referer。
+- **③ CDN 域名是随机分配的**，某些节点（如 `*.edge.mountaintoys.cn:4483`）整个连不上
+  ⇒ 把 playurl 返回的 `backup_url` 也收集进来（每条流通常带 2~3 个备用域名），
+  一个域名不通就换下一个，全部失败才抛错。
+
+另外：`.m4s` 后缀 faster-whisper 按扩展名不认，转写前先用 **PyAV** 解码成 16kHz 单声道再喂给它。
+
+**给已安装用户**
+
+这个修复要改 `lib/asr.py`，而它会被 `ensureHomeFiles` 覆盖，所以**升级后需要手动补一次**：
+
+```
+node <插件目录>/patch-asr.mjs      # 或从仓库根跑
+```
+
+脚本会自己找到 profile 里的插件包、打好补丁（幂等，重复跑无副作用），并同步家目录那份。
+加 `--dry` 只看会改什么，`--force` 强制重打。
+
 ## 2.2.0 — 2026-10-25
 
 **两件事：看得更广，说得更像人。**
