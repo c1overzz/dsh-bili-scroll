@@ -72,7 +72,12 @@ if (loaded.id !== pkg.name) fail(`client.js 的 id（${loaded.id}）必须等于
 if (typeof loaded.factory !== 'function') fail('client.js 的 load({...}) 里没有 factory 函数')
 
 const fakeReact = {
-  createElement: (...a) => ({ tag: a[0], props: a[1] }),
+  createElement: (tag, props, ...children) => {
+    // Invoke function components for the focused render smoke test below,
+    // while keeping host elements as inert JSON-shaped nodes.
+    if (typeof tag === 'function') return tag({ ...(props || {}), children })
+    return { tag, props: props || {}, children }
+  },
   useState: (v) => [v, () => {}],
   useEffect: () => {},
   Fragment: 'Fragment',
@@ -101,7 +106,10 @@ try {
     effect: (fn) => { try { return fn() } catch { return undefined } },
     slots: {
       inject: (name, fn) => { fn() },
-      register: (opts, Component) => { slotsReg.push({ ...opts, hasComponent: typeof Component === 'function' }); return {} },
+      register: (opts, Component) => {
+        slotsReg.push({ ...opts, component: Component, hasComponent: typeof Component === 'function' })
+        return {}
+      },
     },
   })
 } catch (e) {
@@ -114,6 +122,11 @@ if (!slotsReg.length) fail('client.js 的 apply 没有往任何 slot 注册组�
 if (!styleNodes.length) fail('client.js 的 apply 没有把样式挂上（页面会没样子）')
 console.log(`✓ client 半端 OK：id=${loaded.id}  注入=${JSON.stringify(clientMod.inject)}`)
 for (const s of slotsReg) console.log(`    slot ${s.name}  id=${s.id}  order=${s.order}  组件=${s.hasComponent ? '有' : '无 ✗'}`)
+
+const watchedSlot = slotsReg.find((s) => s.id === 'bili-watched')
+if (!watchedSlot) fail('client.js 没有注册刷过的视频会话页')
+try { watchedSlot.component() } catch (e) { fail('刷过的视频会话页渲染失败（共享列表组件可能断了）', e) }
+console.log('✓ client 会话页渲染烟测 OK')
 
 try { rmSync(SANDBOX_HOME, { recursive: true, force: true }) } catch { /* 留着也无所谓 */ }
 console.log(`\n（预检不碰真家目录：host 用 ${SANDBOX_HOME}）`)
