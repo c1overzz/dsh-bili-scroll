@@ -178,9 +178,82 @@ window.__ModuleLoader__.load({
 
     /* ────────────── 设置页正文 ────────────── */
 
+/* ────────────── 已刷视频：共享数据查询和视图部件 ────────────── */
+const WATCH_PAGE = 30
+const WATCH_STATES = [['', '全部'], ['picked', '挑了'], ['skipped', '跳过'], ['commented', '发给你了']]
+const WATCH_TIERS = ['值得看', '可以看', '不值当']
+
+function watchedQuery(state, tier, offset) {
+  return `/watched?limit=${WATCH_PAGE}&offset=${offset}`
+    + (state ? '&state=' + state : '')
+    + (tier ? '&tier=' + encodeURIComponent(tier) : '')
+}
+
+function WatchedFilters({ state, tier, onPick, summary, compact = false }) {
+  const chip = (label, kind, value, active) => h('button', {
+    'data-bd-chip': '',
+    'aria-selected': active ? 'true' : 'false',
+    onClick: () => onPick(kind, value),
+  }, label)
+  const stateChips = WATCH_STATES.map(([value, label]) => chip(label, 'state', value, state === value))
+  const tierChips = WATCH_TIERS.map((value) => chip(value, 'tier', value, tier === value))
+  if (compact) {
+    return h('div', { 'data-bd-row': '' },
+      ...stateChips,
+      ...tierChips,
+      summary ? h('div', { 'data-bd-note': '' }, summary) : null)
+  }
+  return h('div', null,
+    h('div', { 'data-bd-row': '' },
+      ...stateChips,
+      summary ? h('div', { 'data-bd-note': '' }, summary) : null),
+    h('div', { 'data-bd-row': '' },
+      ...tierChips))
+}
+
+function WatchedCards({ rows, onOpen, coverLimit = 40 }) {
+  if (!rows || !rows.length) return null
+  return h('div', { 'data-bd-list': '' }, rows.map((x, i) => {
+    const props = { key: x.day + x.bvid, 'data-bd-item': '' }
+    if (onOpen) {
+      props['data-bd-clickable'] = ''
+      props.title = '在浏览器打开'
+      props.onClick = () => onOpen(x.url)
+    }
+    return h('div', props,
+      i < coverLimit ? h('img', {
+        'data-bd-cover': '',
+        src: API + '/cover?bv=' + x.bvid,
+        loading: 'lazy',
+        alt: '',
+      }) : null,
+      h('div', { 'data-bd-item-body': '' },
+        h('div', { 'data-bd-item-t': '' }, onOpen
+          ? x.title
+          : h('a', { href: x.url, target: '_blank', rel: 'noreferrer' }, x.title)),
+        h('div', { 'data-bd-item-n': '' },
+          `${x.day} · ${x.up} · `,
+          x.picked ? '挑中了' : '跳过',
+          (x.delivered || x.commented) ? ' · 已发给你' : '',
+          x.tier ? h('span', { 'data-bd-tier': x.tier }, ' · ' + x.tier) : null),
+        x.why ? h('div', { 'data-bd-item-why': '' }, x.why) : null))
+  }))
+}
+
+function WatchedPagination({ offset, total, onPage }) {
+  if (total <= WATCH_PAGE) return null
+  return h('div', { 'data-bd-row': '' },
+    h('button', { 'data-bd-btn': '', disabled: offset <= 0, onClick: () => onPage(-WATCH_PAGE) }, '上一页'),
+    h('div', { 'data-bd-note': '' }, `${offset + 1}–${Math.min(offset + WATCH_PAGE, total)} / ${total}`),
+    h('button', {
+      'data-bd-btn': '',
+      disabled: offset + WATCH_PAGE >= total,
+      onClick: () => onPage(WATCH_PAGE),
+    }, '下一页'))
+}
+
 /* ────────────── 会话头那个 tab：它刷过的视频（最小实验版）────────────── */
 function WatchTab() {
-  const PAGE = 30
   const onOpenUrl = (u) => { jpost('/open', { what: 'url', u }).catch(() => {}) }
   const [rows, setRows] = React.useState(null)
   const [st, setSt] = React.useState('')      // '' | picked | skipped | commented
@@ -189,46 +262,35 @@ function WatchTab() {
   const [total, setTotal] = React.useState(0)
   const load = (s, t, off) => {
     setRows(null)
-    const q = `/watched?limit=${PAGE}&offset=${off}` + (s ? '&state=' + s : '') + (t ? '&tier=' + encodeURIComponent(t) : '')
-    jget(q).then((r) => {
+    jget(watchedQuery(s, t, off)).then((r) => {
       if (!r || !r.ok) { setRows([]); return }
       setRows(r.rows || [])
       setTotal(Number(r.total) || 0)
     }).catch(() => setRows([]))
   }
-  React.useEffect(() => { load("", "", 0) }, [])
+  React.useEffect(() => { load('', '', 0) }, [])
   const pick = (kind, v) => {
     const next = (kind === 'state' ? st : tier) === v ? '' : v
     if (kind === 'state') setSt(next); else setTier(next)
     setOffset(0)
     load(kind === 'state' ? next : st, kind === 'tier' ? next : tier, 0)
   }
-  const go = (d) => { const n = Math.max(0, Math.min(offset + d, Math.max(0, total - 1))); setOffset(n); load(st, tier, n) }
-  const chip = (label, on, active) => h('button', { 'data-bd-chip': '', 'aria-selected': active ? 'true' : 'false', onClick: on }, label)
+  const go = (d) => {
+    const n = Math.max(0, Math.min(offset + d, Math.max(0, total - 1)))
+    setOffset(n)
+    load(st, tier, n)
+  }
   return h('div', { 'data-bd-page': '', 'data-bd-wide': '' },
-    h('div', { 'data-bd-row': '' },
-      chip('全部', () => pick('state', ''), st === ''),
-      chip('挑了', () => pick('state', 'picked'), st === 'picked'),
-      chip('跳过', () => pick('state', 'skipped'), st === 'skipped'),
-      chip('发给你了', () => pick('state', 'commented'), st === 'commented'),
-      h('div', { 'data-bd-note': '' }, rows === null ? '读取中…' : `共 ${total} 条`)),
-    h('div', { 'data-bd-row': '' },
-      chip('值得看', () => pick('tier', '值得看'), tier === '值得看'),
-      chip('可以看', () => pick('tier', '可以看'), tier === '可以看'),
-      chip('不值当', () => pick('tier', '不值当'), tier === '不值当')),
-    rows && rows.length ? h('div', { 'data-bd-list': '' },
-      rows.map((x, i) => h('div', { key: x.day + x.bvid, 'data-bd-item': '', 'data-bd-clickable': '', title: '在浏览器打开', onClick: () => onOpenUrl(x.url) },
-        i < 30 ? h('img', { 'data-bd-cover': '', src: API + '/cover?bv=' + x.bvid, loading: 'lazy', alt: '' }) : null,
-        h('div', { 'data-bd-item-body': '' },
-          h('div', { 'data-bd-item-t': '' }, x.title),
-          h('div', { 'data-bd-item-n': '' }, `${x.day} · ${x.up} · `, x.picked ? '挑中了' : '跳过', (x.delivered || x.commented) ? ' · 已发给你' : '',
-            x.tier ? h('span', { 'data-bd-tier': x.tier }, ' · ' + x.tier) : null),
-          x.why ? h('div', { 'data-bd-item-why': '' }, x.why) : null))))
+    h(WatchedFilters, {
+      state: st,
+      tier,
+      onPick: pick,
+      summary: rows === null ? '读取中…' : `共 ${total} 条`,
+    }),
+    rows && rows.length
+      ? h(WatchedCards, { rows, onOpen: onOpenUrl, coverLimit: 30 })
       : h('div', { 'data-bd-note': '' }, rows === null ? '' : '这一类还没有记录 —— 跑一轮之后就有了'),
-    total > PAGE ? h('div', { 'data-bd-row': '' },
-      h('button', { 'data-bd-btn': '', disabled: offset <= 0, onClick: () => go(-PAGE) }, '上一页'),
-      h('div', { 'data-bd-note': '' }, `${offset + 1}–${Math.min(offset + PAGE, total)} / ${total}`),
-      h('button', { 'data-bd-btn': '', disabled: offset + PAGE >= total, onClick: () => go(PAGE) }, '下一页')) : null)
+    h(WatchedPagination, { offset, total, onPage: go }))
 }
 
     function Panel() {
@@ -247,15 +309,15 @@ function WatchTab() {
       const [perDay, setPerDay] = React.useState(null)
       const [perRound, setPerRound] = React.useState(null)
       const [replyPer, setReplyPer] = React.useState(null)
-      const [dmUid, setDmUid] = React.useState(null)        // 私信收件人 UID（本地草稿）
+      const [dmUid, setDmUid] = React.useState(null)              // 日报私信投递对象 UID
       const [dmWatch, setDmWatch] = React.useState(null)          // 私信双向开关
+      const [dmOwnerUid, setDmOwnerUid] = React.useState(null)    // 私信双向允许回复的主人 UID
       const [dmMode, setDmMode] = React.useState(null)      // 投递方式：off / only / both
       const [mention, setMention] = React.useState(null)
       const [login, setLogin] = React.useState(null)
       const [runNote, setRunNote] = React.useState(null)
       const [report, setReport] = React.useState(null)        // 非 null = 报告已展开   // 顶部那行状态（跑一轮/装依赖的反馈原来在最底下，看不见）
       const [watchedRows, setWatchedRows] = React.useState(null)   // null = 还没读；[] = 读到了但没记录
-      const [watchedPicked, setWatchedPicked] = React.useState(false) // 只看挑中的
     const [watchedState, setWatchedState] = React.useState('')
     const [watchedTier, setWatchedTier] = React.useState('')
     const [watchedOffset, setWatchedOffset] = React.useState(0)
@@ -282,10 +344,11 @@ function WatchTab() {
         if (cfg && perDay === null) setPerDay(String(cfg.perDay ?? 5))
         if (cfg && perRound === null) setPerRound(String(cfg.commentPerRound ?? 1))
         if (cfg && replyPer === null) setReplyPer(String(cfg.replyPerRound ?? 1))
-        if (cfg && mention === null) setMention(cfg.mentionName || '')
         if (cfg && dmUid === null) setDmUid(cfg.dmUid ? String(cfg.dmUid) : '')
+        if (cfg && mention === null) setMention(cfg.mentionName || '')
         if (cfg && dmMode === null) setDmMode(cfg.dmMode || 'only')
         if (cfg && dmWatch === null) setDmWatch(cfg.dmWatch !== false)   // 2.0 起默认开
+        if (cfg && dmOwnerUid === null) setDmOwnerUid(cfg.dmOwnerUid ? String(cfg.dmOwnerUid) : '')
         if (cfg && favId === null) setFavId(String(cfg.favFolderId ?? 0))
       }, [cfg])
 
@@ -316,12 +379,10 @@ function WatchTab() {
       }
 
       // 「它刷过的视频」：点开才读，读一次就留着（不会每 5 秒重拉）
-    const WATCH_PAGE = 30
     const onLoadWatched = async (st, tr, off) => {
       setBusy('watched')
       try {
-        const q = `/watched?limit=${WATCH_PAGE}&offset=${off}` + (st ? '&state=' + st : '') + (tr ? '&tier=' + encodeURIComponent(tr) : '')
-        const r = await jget(q)
+        const r = await jget(watchedQuery(st, tr, off))
         setWatchedRows(r && r.ok ? (r.rows || []) : [])
         setWatchedTotal(r && r.ok ? (Number(r.total) || 0) : 0)
         setWatchedState(st)
@@ -600,7 +661,25 @@ function WatchTab() {
             onChange: (e) => setMention(e.target.value),
             onBlur: () => { const v = String(mention || '').trim(); setMention(v); patch({ mentionName: v }, '发给谁') },
           }),
-          (dmMode && dmMode !== 'off') ? h('div', { 'data-bd-note': '' }, '私信会发给他（用昵称自动查一次 UID）；查不到就改回只发评论，不会一条都不送。') : null,
+          dmMode && dmMode !== 'off' ? h('div', { 'data-bd-sub': '' },
+            h('div', { 'data-bd-label': '' }, '私信发给谁（B站 UID，可留空）'),
+            h('input', {
+              'data-bd-input': '',
+              type: 'number',
+              min: 0,
+              value: dmUid ?? '',
+              placeholder: '留空 = 按上面的昵称自动查 UID',
+              onChange: (e) => setDmUid(e.target.value),
+              onBlur: () => {
+                const n = Math.max(0, Math.min(Number(dmUid) || 0, Number.MAX_SAFE_INTEGER))
+                setDmUid(n ? String(n) : '')
+                patch({ dmUid: n }, '私信投递 UID')
+              },
+            }),
+            h('div', { 'data-bd-note': '' },
+              '填了就直接发给这个 UID；不填才会用上面的昵称查找。它只影响日报投递，不决定谁能触发双向回复。')) : null,
+          dmMode === 'only' ? h('div', { 'data-bd-note': '' }, '只私信模式：查不到收件人时不会改发公开评论；这一轮会跳过投递并在报告里说明。') : null,
+          dmMode === 'both' ? h('div', { 'data-bd-note': '' }, '两边都发模式：若私信收件人查找失败，公开评论仍按上面的开关执行；私信会在报告里标记未送达。') : null,
           (dmMode && dmMode !== 'off') ? h('div', { 'data-bd-note': '' }, '私信内容 = 本轮每条的「标题 + 链接 + 一句话」，一轮合并成一条发。⚠️ 建议先让这个号和收件人互关：B站 对「陌生人私信」会限流，还可能不弹提醒。') : null,
 
           (dmMode === 'off' || dmMode === 'both') ? h('div', { 'data-bd-sep': '' }) : null,
@@ -646,13 +725,30 @@ function WatchTab() {
             on: Boolean(dmWatch),
             onChange: (v) => { setDmWatch(v); patch({ dmWatch: v }, '私信双向') },
           }),
+          dmWatch ? h('div', { 'data-bd-sub': '' },
+            h('div', { 'data-bd-label': '' }, '只回谁的私信（B站 UID，可留空）'),
+            h('input', {
+              'data-bd-input': '',
+              type: 'number',
+              min: 0,
+              value: dmOwnerUid ?? '',
+              placeholder: '留空 = 只回当前登录账号自己',
+              onChange: (e) => setDmOwnerUid(e.target.value),
+              onBlur: () => {
+                const n = Math.max(0, Math.min(Number(dmOwnerUid) || 0, Number.MAX_SAFE_INTEGER))
+                setDmOwnerUid(n ? String(n) : '')
+                patch({ dmOwnerUid: n }, '私信主人 UID')
+              },
+            }),
+            h('div', { 'data-bd-note': '' },
+              '这是私信双向的安全边界，不影响上面“发给谁 / @ 谁”的日报投递对象。留空时只认当前扫码登录的账号。')) : null,
           // ⭐ 2026-10-23：**不加新输入框**，只把"它认谁当主人"显示出来 —— 填错当场看得见 ✓
           (st.ownerInfo && dmWatch) ? h('div', { 'data-bd-note': '' },
             '它会认这个人当主人：',
             (st.ownerInfo.name ? st.ownerInfo.name + ' · ' : ''),
             'uid ' + st.ownerInfo.uid,
             st.ownerInfo.self ? '（就是现在登录的这个号）' : '',
-            ' —— 想换人，改上面那个「要 @ 谁」就行') : null,
+            ' —— 想换人，改上面的「只回谁的私信」UID') : null,
           h(ToggleRow, {
             label: '本地转写没字幕的视频',
             note: '默认关；开了以后，没字幕的视频会在本机转写一遍（不花 API 钱）',
@@ -731,27 +827,20 @@ function WatchTab() {
             h('div', { 'data-bd-note': '' },
               watchedRows === null ? '（点一下读出来；数据来自判重表 seen.md + 报告里的档位）'
                 : (watchedTotal ? `共 ${watchedTotal} 条` : '这一类还没有记录 —— 跑一轮之后就有了'))),
-          watchedRows !== null ? h('div', { 'data-bd-row': '' },
-            [['', '全部'], ['picked', '挑了'], ['skipped', '跳过'], ['commented', '发给你了']].map(([v, label]) =>
-              h('button', { key: v || 'all', 'data-bd-chip': '', 'aria-selected': watchedState === v ? 'true' : 'false', onClick: () => onWatchPick('state', v) }, label)),
-            ['值得看', '可以看', '不值当'].map((v) =>
-              h('button', { key: v, 'data-bd-chip': '', 'aria-selected': watchedTier === v ? 'true' : 'false', onClick: () => onWatchPick('tier', v) }, v))) : null,
-          watchedRows !== null && watchedRows.length ? h('div', { 'data-bd-list': '' },
-            watchedRows.map((x, i) => h('div', { key: x.day + x.bvid, 'data-bd-item': '' },
-              // 封面走宿主代理（直连 i0.hdslb.com 会被防盗链挡，也等于把使用者 IP 交出去）
-              i < 40 ? h('img', { 'data-bd-cover': '', src: API + '/cover?bv=' + x.bvid, loading: 'lazy', alt: '' }) : null,
-              h('div', { 'data-bd-item-body': '' },
-                h('div', { 'data-bd-item-t': '' },
-                  h('a', { href: x.url, target: '_blank', rel: 'noreferrer' }, x.title)),
-                h('div', { 'data-bd-item-n': '' },
-                  `${x.day} · ${x.up} · `, x.picked ? '挑中了' : '跳过', (x.delivered || x.commented) ? ' · 已发给你' : '',
-                  x.tier ? h('span', { 'data-bd-tier': x.tier }, ' · ' + x.tier) : null),
-                x.why ? h('div', { 'data-bd-item-why': '' }, x.why) : null))))
+          watchedRows !== null ? h(WatchedFilters, {
+            state: watchedState,
+            tier: watchedTier,
+            onPick: onWatchPick,
+            compact: true,
+          }) : null,
+          watchedRows !== null && watchedRows.length
+            ? h(WatchedCards, { rows: watchedRows })
             : null,
-          watchedRows !== null && watchedTotal > WATCH_PAGE ? h('div', { 'data-bd-row': '' },
-            h('button', { 'data-bd-btn': '', disabled: watchedOffset <= 0, onClick: () => onWatchPage(-WATCH_PAGE) }, '上一页'),
-            h('div', { 'data-bd-note': '' }, `${watchedOffset + 1}–${Math.min(watchedOffset + WATCH_PAGE, watchedTotal)} / ${watchedTotal}`),
-            h('button', { 'data-bd-btn': '', disabled: watchedOffset + WATCH_PAGE >= watchedTotal, onClick: () => onWatchPage(WATCH_PAGE) }, '下一页')) : null),
+          h(WatchedPagination, {
+            offset: watchedOffset,
+            total: watchedTotal,
+            onPage: onWatchPage,
+          })),
 
         h('div', { 'data-bd-sec': '', 'data-bd-group': 'adv', 'data-bd-away': tab === 'adv' ? undefined : '' },
           h('div', { 'data-bd-row': '' },

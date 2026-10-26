@@ -16,6 +16,11 @@
   "license": "MIT",
   "type": "module",
   "main": "index.js",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "check": "node tools/check-syntax.mjs",
+    "selfcheck": "node selfcheck.mjs"
+  },
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
@@ -32,6 +37,8 @@
     "README.md",
     "AGENTS.md",
     "selfcheck.mjs",
+    "test",
+    "tools/check-syntax.mjs",
     "LICENSE",
     "NOTICE.md",
     "CHANGELOG.md",
