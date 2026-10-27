@@ -70,6 +70,11 @@ window.__ModuleLoader__.load({
   border:1px solid var(--dsw-alias-bg-layer-3,rgba(255,255,255,.14));
   background:var(--dsw-alias-bg-layer-4,rgba(128,128,128,.12));color:inherit;font-family:inherit;}
 [data-bd-input]:focus{outline:none;border-color:#3b82f6;}
+[data-bd-select]{width:100%;box-sizing:border-box;padding:7px 9px;border-radius:8px;font-size:12px;
+  border:1px solid var(--dsw-alias-bg-layer-3,rgba(255,255,255,.14));
+  background:var(--dsw-alias-bg-layer-4,rgba(128,128,128,.12));color:inherit;font-family:inherit;}
+[data-bd-select]:focus{outline:none;border-color:#3b82f6;}
+[data-bd-warn]{font-size:11px;line-height:18px;color:#d29922;}
 [data-bd-num]{width:88px;text-align:center;}
 [data-bd-btn]{padding:7px 12px;border-radius:8px;font-size:12px;cursor:pointer;font-family:inherit;white-space:nowrap;
   border:1px solid var(--dsw-alias-bg-layer-3,rgba(255,255,255,.16));
@@ -321,6 +326,40 @@ function WatchTab() {
         finally { setBusy('') }
       }
 
+      /* ⭐ 2.3.0：值班轮用哪个模型 —— 可选清单要**现查**（装了什么 adapter 就有什么），
+       *   所以不能跟着 /status 每 5 秒轮询：有的 adapter 要联网取目录 ✗ */
+      const [modelCat, setModelCat] = React.useState(null)
+      const [pickProvider, setPickProvider] = React.useState('')
+      const [pickModel, setPickModel] = React.useState('')
+      const onLoadModels = async () => {
+        setBusy('models')
+        try {
+          const r = await jget('/models')
+          setModelCat(r || null)
+          const pk = (r && r.picked) || {}
+          setPickProvider(pk.provider || '')
+          setPickModel(pk.model || '')
+          if (!r || r.ok === false) say('读不到可选模型：' + ((r && r.error) || '未知原因'), 'warn')
+        } catch (e) { say('读不到可选模型：' + String(e?.message ?? e), 'warn') }
+        finally { setBusy('') }
+      }
+      const onSaveModel = async () => {
+        if (!pickProvider || !pickModel) return say('先把 provider 和模型都选上', 'warn')
+        await patch({ modelProvider: pickProvider, modelId: pickModel }, '值班轮的模型')
+        await onLoadModels()   // 存完重读一次 ⇒ 界面上的「现在固定用」跟真实值一致
+      }
+      /* 恢复「跟随 DSH 当前模型」：空值会被 /config 的「空值不覆盖」保护拦下 ⇒ 必须显式带 clear */
+      const onClearModel = async () => {
+        setBusy('model-clear')
+        try {
+          const r = await jpost('/config', { modelProvider: '', modelId: '', clear: ['modelProvider', 'modelId'] })
+          if (r?.config) setSt((old) => ({ ...old, config: r.config }))
+          setPickProvider(''); setPickModel('')
+          await onLoadModels()
+          say('已恢复：跟着 DSH 当前模型走', 'good')
+        } catch (e) { say(String(e?.message ?? e), 'warn') } finally { setBusy('') }
+      }
+
       // 「它刷过的视频」：点开才读，读一次就留着（不会每 5 秒重拉）
     const WATCH_PAGE = 30
     const onLoadWatched = async (st, tr, off) => {
@@ -539,6 +578,13 @@ function WatchTab() {
       }
 
       const sw = (k) => Boolean(cfg[k])
+
+      /* ⭐ 2.3.0：模型下拉框用的几个抴展值 */
+      const PROVIDERS = (modelCat && Array.isArray(modelCat.providers)) ? modelCat.providers : []
+      const pickRow = PROVIDERS.find((p) => p.id === pickProvider) || null
+      const modelCount = PROVIDERS.reduce((n, p) => n + ((p.models && p.models.length) || 0), 0)
+      const pinned = (cfg && cfg.modelProvider && cfg.modelId) ? String(cfg.modelProvider) + ' / ' + String(cfg.modelId) : ''
+      const pickNotReady = Boolean(modelCat && modelCat.minimal && pickRow && pickRow.ready === false)
 
       return h('div', { 'data-bd-page': '' },
 
@@ -788,6 +834,48 @@ function WatchTab() {
             h('button', { 'data-bd-btn': '', disabled: watchedOffset <= 0, onClick: () => onWatchPage(-WATCH_PAGE) }, '上一页'),
             h('div', { 'data-bd-note': '' }, `${watchedOffset + 1}–${Math.min(watchedOffset + WATCH_PAGE, watchedTotal)} / ${watchedTotal}`),
             h('button', { 'data-bd-btn': '', disabled: watchedOffset + WATCH_PAGE >= watchedTotal, onClick: () => onWatchPage(WATCH_PAGE) }, '下一页')) : null),
+
+        /* ── 值班轮用哪个模型（2.3.0：不再被 GUI 当前选的模型拖着跑） ── */
+        h('div', { 'data-bd-sec': '', 'data-bd-group': 'adv', 'data-bd-away': tab === 'adv' ? undefined : '' },
+          h('div', { 'data-bd-h': '' }, '跑值班轮用哪个模型'),
+          h('div', { 'data-bd-note': '' },
+            '留空 = 跟着 DSH 当前选的模型走。选过之后就固定用它：' +
+            '那一轮的配置是插件自己生成的，GUI 那边换模型不会再把这一轮跑死。'),
+          h('div', { 'data-bd-row': '' },
+            h('button', { 'data-bd-btn': '', disabled: busy === 'models', onClick: onLoadModels },
+              modelCat === null ? '读可选模型' : '刷新可选模型'),
+            h('div', { 'data-bd-note': '' },
+              modelCat && modelCat.ok === false ? ('读不到模型目录：' + (modelCat.error || '未知原因'))
+                : modelCat ? ('共 ' + modelCount + ' 个模型 / ' + PROVIDERS.length + ' 个 provider（现在跑在 ' + (modelCat.profile || '?') + ' profile 下）')
+                  : '点一下才去读：有的 adapter 要联网取目录，不能放在每 5 秒的轮询里')),
+          h('div', { 'data-bd-row': '' },
+            h('div', { 'data-bd-grow': '' },
+              h('div', { 'data-bd-label': '' }, 'provider'),
+              h('select', {
+                'data-bd-select': '',
+                value: pickProvider,
+                onChange: (e) => { setPickProvider(e.target.value); setPickModel('') },
+              },
+                h('option', { value: '' }, '（跟随 DSH 当前模型）'),
+                PROVIDERS.map((p) => h('option', { key: p.id, value: p.id },
+                  p.name + ' · ' + p.id + (p.ready ? '' : ' （要在装了适配器的 profile 下跑）') + (p.models && p.models.length ? '' : ' · 目录读不到')))))),
+          h('div', { 'data-bd-row': '' },
+            h('div', { 'data-bd-grow': '' },
+              h('div', { 'data-bd-label': '' }, '模型'),
+              pickRow
+                ? h('select', { 'data-bd-select': '', value: pickModel, onChange: (e) => setPickModel(e.target.value) },
+                    h('option', { value: '' }, '（选一个）'),
+                    (pickRow.models || []).map((m) => h('option', { key: m.id, value: m.id }, m.name + ' · ' + m.id)))
+                : h('div', { 'data-bd-note': '' }, pickProvider && pickRow && pickRow.error
+                    ? ('这个 provider 的目录读不到：' + pickRow.error)
+                    : '先在上面选 provider，这里才有模型可选'))),
+          pickNotReady ? h('div', { 'data-bd-warn': '' },
+            '⚠️ 这条路由不是最小权限 profile 自带的（只有 dsh-base + dsh-headless）。选它就要把高级里的「值班 profile」换成装了适配器的那个（例如 desktop），否则那一轮会报 NO_ADAPTER。') : null,
+          h('div', { 'data-bd-row': '' },
+            h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: !pickProvider || !pickModel || busy === 'models', onClick: onSaveModel }, '确定'),
+            pinned ? h('button', { 'data-bd-btn': '', disabled: busy === 'model-clear', onClick: onClearModel }, '恢复跟随当前模型') : null,
+            h('div', { 'data-bd-note': '' }, pinned ? ('现在固定用：' + pinned) : '现在：跟随 DSH 当前模型')),
+        ),
 
         h('div', { 'data-bd-sec': '', 'data-bd-group': 'adv', 'data-bd-away': tab === 'adv' ? undefined : '' },
           h('div', { 'data-bd-row': '' },

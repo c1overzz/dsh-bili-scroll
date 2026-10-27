@@ -84,6 +84,11 @@ export const Config = !z ? undefined : z.object({
   headlessProfile: z.string().default('bili-duty').extra('volatile', true),
   /** 给那一轮叠一份插件自己的 patch（把 B站 MCP 挂上）—— 用户 profile 一个字都不用改 */
   overlayMcp: z.boolean().default(true).extra('volatile', true),
+  /** ⭐ 2.3.0：值班轮固定用哪个 provider 路由（留空 = 跟随 DSH 当前选的模型）
+   *  它和下面的 modelId 是**一对**：两个都非空才生效，缺一个就退回"跟随 GUI"。 */
+  modelProvider: z.string().default('').extra('volatile', true),
+  /** ⭐ 2.3.0：值班轮固定用哪个模型 id（和 modelProvider 配对） */
+  modelId: z.string().default('').extra('volatile', true),
   /** 跑 headless 时的工作目录 */
   /** ⭐ 人设提示词：使用者想让它怎么说话（比"填工作区"对新手友好得多）· 留空 = 按中性说话 */
   personaPrompt: z.string().default('').extra('volatile', true),
@@ -256,7 +261,7 @@ function reportMeta() {
     personaPrompt: '',
     perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
     dmMode: 'only', dmUid: 0,
-    keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, favFolderId: 0,
+    keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, modelProvider: '', modelId: '', workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, favFolderId: 0,
     // ⭐ 2.3.0：手动轮 / 抓取量 / 排除词 / 评论长度 —— 少一项 normalize 就会把用户存的值丢掉
     manualMax: 3, manualCooldownMin: 10, searchSort: 'pubdate', searchPages: 2, fetchPerRound: 8, excludeWords: [], commentLength: 'medium',
   }
@@ -1367,6 +1372,59 @@ function reportMeta() {
     return dutyProfileState === 'ok' ? 'bili-duty' : (want || 'headless')
   }
 
+  /* ⭐⭐ 2.3.0：最小权限 profile 的 package.json 只装 dsh-base + dsh-headless ⇒ 它里面**只有**
+   *  DeepSeek 那几条路由。别的 provider（trae / buddy / qoder / cline …）是 dsh-codearts-auth
+   *  这类插件在**别的 profile**里注册的，跑到 bili-duty 下必然 NO_ADAPTER。
+   *  这里只做**粗略提示**（不拦着用户选）：命中的算「这个 profile 里跑得起来」，其余的在下拉框里
+   *  标一句「要在装了适配器的 profile 下跑」，免得又踩同一个坑。 */
+  const DUTY_PROFILE_PROVIDERS = new Set(['deepseek-official', 'deepseek-account', 'deepseek'])
+
+  /* ⭐⭐ 2.3.0：这台机器上**现在能选**哪些模型 —— 设置-高级 那个下拉框的数据源。
+   *
+   * 为什么不写死一张表：模型路由是「装了什么 adapter 就有什么」。用户装了 dsh-codearts-auth，
+   * trae / buddy / qoder 这些路由才会出现；写死表就会「设置里能选、跑起来 NO_ADAPTER」✗
+   * （这正是 2.3.0 要修的那个坑）。`listProviders()` / `listModels(provider)` 是
+   * @deepseek-ai/dsh-llm 的公开接口，adapter 自己报目录，插件只负责原样列出来。
+   * ⚠️ 有的 adapter 的 listModels 会去打远端（几百毫秒到几秒）⇒ 每个 provider 单独 try +
+   *    6 秒超时，一个卡住不影响别的；读不到就标出来，别让整页挂掉。
+   */
+  const listModelCatalog = async () => {
+    const pickedProvider = String(cfg.modelProvider || '').trim()
+    const pickedModel = String(cfg.modelId || '').trim()
+    const picked = { provider: pickedProvider, model: pickedModel }
+    let gui = null
+    try {
+      const sel = ctx.get('agentDefaultModel')?.currentSelection?.() ?? null
+      const provider = sel?.provider ?? sel?.providerId ?? ''
+      const model = sel?.model ?? sel?.modelId ?? ''
+      if (provider && model) gui = { provider: String(provider), model: String(model), reasoningEffort: sel?.reasoningEffort ? String(sel.reasoningEffort) : '' }
+    } catch { /* 老版本没有这个服务 */ }
+    const profile = effectiveProfile()
+    const minimal = profile === 'bili-duty' || profile === 'headless'
+    const llm = ctx.get('llm')
+    if (!llm || typeof llm.listProviders !== 'function' || typeof llm.listModels !== 'function') {
+      return { ok: false, error: '这个 DSH 没有暴露模型目录（ctx.llm.listProviders 不可用）⇒ 只能用「跟随当前模型」', profile, minimal, picked, gui, providers: [] }
+    }
+    const timeout = (ms) => new Promise((_, reject) => {
+      const t = setTimeout(() => reject(new Error('读模型目录超时（' + ms + 'ms）')), ms)
+      if (typeof t.unref === 'function') t.unref()
+    })
+    const providers = []
+    for (const p of llm.listProviders()) {
+      const id = String(p?.id ?? '')
+      if (!id) continue
+      const row = { id, name: String(p?.name || id), models: [], error: '', ready: !minimal || DUTY_PROFILE_PROVIDERS.has(id) }
+      try {
+        const list = await Promise.race([llm.listModels(id), timeout(6000)])
+        row.models = (Array.isArray(list) ? list : [])
+          .filter((m) => m && typeof m.id === 'string' && m.id)
+          .map((m) => ({ id: m.id, name: String(m.name || m.id) }))
+      } catch (e) { row.error = String(e?.message ?? e) }
+      providers.push(row)
+    }
+    return { ok: true, profile, minimal, picked, gui, providers }
+  }
+
   const ensureOverlay = () => {
     const file = join(stateDir, 'headless-overlay.yml')
     const script = join(stateDir, 'mcp_server.py')
@@ -1391,7 +1449,18 @@ function reportMeta() {
     //    而"账号登录"的机器没有 key；桌面版是靠 profile 那层 patch 把路由指到 deepseek-account 的，
     //    **我们这一轮的一次性 overlay 没有那一层** ⇒ 还没发请求就死了。
     //    ⇒ overlay 里补一条 agent-default-model，**优先跟随用户当前选的模型**；拿不到就不写（保持原行为）✓
-    try {
+    // ⭐⭐ 2.3.0：高级页里**选过**模型就以它为准（overlay 每次重写 ⇒ GUI 那边换模型不会再把它冲掉）
+    const pickedProvider = String(cfg.modelProvider || '').trim()
+    const pickedModel = String(cfg.modelId || '').trim()
+    if (pickedProvider && pickedModel) {
+      yml.push(
+        '- id: agent-default-model',
+        '  config:',
+        '    provider: ' + yq(pickedProvider),
+        '    model: ' + yq(pickedModel),
+        '',
+      )
+    } else try {
       const sel = ctx.get('agentDefaultModel')?.currentSelection?.() ?? null
       const selProvider = sel?.provider ?? sel?.providerId
       const selModel = sel?.model ?? sel?.modelId
@@ -2611,6 +2680,11 @@ function reportMeta() {
       try { rollSeen() } catch (e) { /* 归档失败不影响状态接口 */ }
       try { syncNotes() } catch (e) { /* 笔记失败不影响状态接口 */ }
       return sendJson(res, 200, status())
+    }
+    // ⭐ 2.3.0：模型下拉框的数据源（现查 ctx.llm，不写死表）
+    if (req.method === 'GET' && path === '/api/bili-duty/models') {
+      try { return sendJson(res, 200, await listModelCatalog()) }
+      catch (e) { return sendJson(res, 200, { ok: false, error: String(e?.message ?? e), providers: [] }) }
     }
     if (req.method === 'GET' && path === '/api/bili-duty/config') {
       return sendJson(res, 200, { ok: true, config: cfg, windows: WINDOWS, home: stateDir })

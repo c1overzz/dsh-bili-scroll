@@ -25,6 +25,30 @@
 **升级**：`dsh plugin --profile web add dsh-bili-scroll`，然后**完全退出 dsh 再打开**。
 新设置项在「设置 → 刷B站 → 关注什么」下面：排除词、评论长度、排序。
 
+## 2.3.1 — 2026-10-28
+
+**值班轮可以自己挑模型了 —— 不再被 DSH 里「当前选中的模型」拖着跑。**
+
+**① 高级页新增「跑值班轮用哪个模型」**
+
+以前每一轮都会把 DSH 设置里**当前选中**的 provider / model 抄进 `headless-overlay.yml`。看起来贴心，实际是个坑：
+只要你在 GUI 里换了个模型（比如切到某个只在桌面 profile 注册了适配器的路由），下一轮就会照着它去起进程，
+而值班轮跑在**最小权限 profile** 里 —— 那个 profile 只有 `@deepseek-ai/dsh-base` + `@deepseek-ai/dsh-headless`，
+根本没有 trae / buddy 这类外部适配器 ⇒ 起来就死在 `NO_ADAPTER` 上，报告、判重表、私信一条都没有。
+
+现在可以在**设置 → 高级 → 跑值班轮用哪个模型**里选一次，点「确定」写进配置，overlay 每轮都按它写；
+留空则保持老行为（跟随 DSH 当前模型）。选过之后 GUI 那边怎么换都不影响值班轮 ✓
+
+**② 可选模型是现查的，不是写死的表**
+
+下拉框的数据来自 `ctx.llm.listProviders()` / `ctx.llm.listModels(provider)`（新接口 `GET /api/bili-duty/models`），
+所以 **装了什么适配器就列什么** —— 包括 `dsh-codearts-auth` 注册的 trae / buddy / qoder / cline 等路由。
+某个 provider 读不出来（没注册适配器、接口报错）不会拖垮整个列表，那一行会单独显示原因。
+
+**③ 顺手给了个提示，免得又踩 `NO_ADAPTER`**
+
+在最小权限 profile（`bili-duty`）下，只对 DeepSeek 那几条路由放行；选了别的 provider 时会标一句
+「要在装了适配器的 profile 下跑」—— 想用 trae 就把高级里的「值班 profile」换成 `desktop`。只是提示，不拦着选。
 
 ## 2.2.2 — 2026-10-26
 
