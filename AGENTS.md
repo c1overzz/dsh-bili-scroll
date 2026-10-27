@@ -50,6 +50,18 @@
 - `selfcheck.mjs` + `tools/` —— 本地预检：`node selfcheck.mjs`（**现在不用解析钩子了**；`tools/register.mjs` 那条还留着当备份）
   · `tools/check-vision.py` —— 看图纯函数的回归检查（不联网）。动了 `_https` / `_cover_url` / `_snapshot_entries` / `_crop_tile` 就跑一次：
     `<家目录>/.venv/Scripts/python.exe tools/check-vision.py`（用插件自己的 venv，里面才有 Pillow）
+  · `tools/check-typing.py` —— **输入延迟**（`_typing_wait` / `_type_wait`）的回归检查（不联网、不真睡）。
+    动了"发之前等多久"那套就跑一次：`<家目录>/.venv/Scripts/python.exe tools/check-typing.py`
+
+## ⚠️ 两条延迟别搞混（动这块之前先看这段）
+
+- `_throttle()` —— **读**类工具（搜索 / 推荐流 / 字幕 / 评论）被调之前随机歇 0.6~1.6 秒（2.3.0 加的）
+- `_typing_wait()` / `_type_wait()` —— **写**类（`bili_reply` 评论 / `bili_send_message` 私信）**提交之前**
+  按 `字数 / 速度 + 随机抖动` 等一会儿（2.4.0 加的）：速度默认 **1.2~3.5 字/秒**、抖动 0.5~2.0 秒、上限 **90 秒**；
+  可调 `BILI_TYPE_CPS_MIN` / `BILI_TYPE_CPS_MAX` / `BILI_TYPE_JITTER_MIN` / `BILI_TYPE_JITTER_MAX` /
+  `BILI_TYPE_MAX_WAIT`，整个关掉用 `BILI_TYPE_OFF=1`
+  · ⚠️ 上限必须留在宿主那条 MCP 调用超时（180 秒）以下，否则就是自己把自己卡死
+  · ⚠️ 别把这套加到**读**工具上：读已经有 `_throttle()`，叠起来一轮会慢到跑不完
 
 ## 约定
 

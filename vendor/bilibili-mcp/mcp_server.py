@@ -16,6 +16,8 @@ B站数据采集 MCP 服务，支持 OpenClaw / Claude Code / Cursor / Cline
 #      ⑤ `bili_reply` 回执带上 `rpid` / `rpid_str` / `root` / `parent`（判重表与评论复核要用）
 #      ⑥ `bili_cover` / `bili_frames`：封面和画面帧**作为图片**返回（上游没有；
 #         图能不能进模型上下文由宿主判断）
+#      ⑦ **输入延迟**：`_typing_wait()` / `_type_wait()` —— 发评论 / 发私信之前按
+#         「字数 / 速度(随机) + 随机抖动」等一会儿（2.4.0；上游也没有）
 import asyncio
 import random
 import json
@@ -44,6 +46,73 @@ async def _throttle():
         await asyncio.sleep(random.uniform(0.6, 1.6))
     except Exception:
         pass
+
+
+# ⭐ 2.4.0 输入延迟：**"发"之前先按人打字的速度等一会儿**
+#   背景：2.3.0 的 `_throttle()` 只管**读**（搜索 / 推荐流 / 字幕 / 评论）。
+#   两个**写**操作（`bili_reply` 评论、`bili_send_message` 私信）此前**一点延迟都没有** ——
+#   读完字幕紧接着就把评论提交上去，节奏上等于"手指比脑子快"，全流程里最像机器的一处。
+#   口径：`等待 = 字数 / 速度(字/秒，范围内取 random) + 随机抖动`
+#     · 速度默认 **1.2~3.5 字/秒**（= 72~210 字/分钟，中文输入法下正常人打字）
+#     · 抖动默认 **0.5~2.0 秒**（按下发送前那一下犹豫 / 挪鼠标）
+#     · 上限默认 **90 秒**（再长就成卡死了；宿主那条 MCP 调用是 180 秒超时）
+#   只影响**写**；读还是走 `_throttle()`。整件事关掉：`BILI_TYPE_OFF=1`。
+def _env_float(name: str, default: float) -> float:
+    """读一个浮点环境变量；没写 / 写坏了都退回默认值（绝不因为一个环境变量炸掉发评论）"""
+    try:
+        return float(os.environ.get(name, "") or default)
+    except (TypeError, ValueError):
+        return default
+
+
+_TYPE_OFF = os.environ.get("BILI_TYPE_OFF", "") in ("1", "true", "yes")
+_TYPE_CPS_MIN = _env_float("BILI_TYPE_CPS_MIN", 1.2)
+_TYPE_CPS_MAX = _env_float("BILI_TYPE_CPS_MAX", 3.5)
+_TYPE_JITTER_MIN = _env_float("BILI_TYPE_JITTER_MIN", 0.5)
+_TYPE_JITTER_MAX = _env_float("BILI_TYPE_JITTER_MAX", 2.0)
+_TYPE_MAX_WAIT = _env_float("BILI_TYPE_MAX_WAIT", 90.0)
+
+
+def _typing_wait(text: str, cps_min=None, cps_max=None, jitter_min=None,
+                 jitter_max=None, cap=None, rng=None) -> float:
+    """这一条"打"下来该等多久（秒）。纯函数：不睡、不联网；`rng` 可注入 ⇒ 好测。
+
+    `字数 / 速度 + 抖动`：字数按**字符**数（中文一个字算一个，emoji 也算一个），
+    速度取 `[cps_min, cps_max]` 里的一个随机值 —— 打字快慢本来就有波动，固定值反而像机器。
+    """
+    r = rng if rng is not None else random
+    cps_lo, cps_hi = sorted((_TYPE_CPS_MIN if cps_min is None else cps_min,
+                             _TYPE_CPS_MAX if cps_max is None else cps_max))
+    jit_lo, jit_hi = sorted((_TYPE_JITTER_MIN if jitter_min is None else jitter_min,
+                             _TYPE_JITTER_MAX if jitter_max is None else jitter_max))
+    ceiling = _TYPE_MAX_WAIT if cap is None else cap
+
+    chars = len(text or "")
+    if chars <= 0:
+        return 0.0
+    if cps_hi <= 0:                     # 速度填成 0 / 负数 ⇒ 别除零，按 1 字/秒算
+        cps_lo = cps_hi = 1.0
+    cps = r.uniform(max(cps_lo, 0.01), cps_hi)
+    wait = chars / cps + r.uniform(max(jit_lo, 0.0), max(jit_hi, 0.0))
+    if ceiling > 0:
+        wait = min(wait, ceiling)
+    return max(wait, 0.0)
+
+
+async def _type_wait(text: str) -> float:
+    """按人打字的速度等一会儿再发。返回实际等了多久（秒）；关着 / 空文本 ⇒ 0。"""
+    if _TYPE_OFF:
+        return 0.0
+    wait = _typing_wait(text)
+    if wait <= 0:
+        return 0.0
+    # 打到 stderr（宿主的 duty.log 会收），以后排查"怎么慢了几十秒"能直接对上
+    print(f"[bili-mcp] 输入延迟 {wait:.1f}s（{len(text or '')} 字）", file=sys.stderr)
+    try:
+        await asyncio.sleep(wait)
+    except Exception:
+        return 0.0                      # 被取消 / 事件循环关了 ⇒ 别拦着发送
+    return wait
 
 # ========== 初始化 ==========
 
@@ -658,6 +727,9 @@ async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0) -> str:
     
     Returns:
         发表结果
+
+    ⚠️ 提交前会按**字数**模拟一段打字延迟（几百毫秒到一分多钟，见 `_typing_wait`）——
+       那是故意的、也是它该有的样子，**不要因此重试**（重试只会把同样的字再打一遍）。
     """
     _deny = _guard("bili_reply")
     if _deny: return _deny
@@ -669,6 +741,9 @@ async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0) -> str:
     v = video.Video(bvid=bvid, credential=cred)
     info = await v.get_info()
     aid = info["aid"]
+
+    # ⭐ 2.4.0：先把该读的读完，再"打字" —— 顺序跟人一样（看完视频 → 在输入框里敲 → 发）
+    typed = await _type_wait(text)
 
     try:
         if rpid == 0:
@@ -697,6 +772,8 @@ async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0) -> str:
         #    （lib/verify.mjs）也要拿它去 B站 查公开可见性。只回 success 的话那条链是断的。
         #（2026-10-16 审查修：原实现把上面的 result 丢掉了）
         out = {"success": True, "message": "评论发送成功"}
+        if typed > 0:                   # 回执里带上"打了多久"，日志/复核对得上时间
+            out["typing_wait_s"] = round(typed, 1)
         _ledger_append(text, bvid, result.get("rpid") if isinstance(result, dict) else None)
         if isinstance(result, dict):
             for key in ("rpid", "rpid_str", "root", "parent"):
@@ -1162,6 +1239,9 @@ async def bili_send_message(receiver_uid: int, text: str) -> str:
 
     Returns:
         发送结果
+
+    ⚠️ 跟评论一样：提交前按**字数**模拟打字延迟（见 `_typing_wait`），
+       **不要因为"慢了"就重发**（重发就是把同一句话再说一遍）。
     """
     _deny = _guard("bili_send_message")
     if _deny: return _deny
@@ -1169,6 +1249,9 @@ async def bili_send_message(receiver_uid: int, text: str) -> str:
 
     if not text or not text.strip():
         return json.dumps({"success": False, "error": "text 不能为空"}, ensure_ascii=False)
+
+    # ⭐ 2.4.0：私信也是"打字打出来的"，同样按字数等一会儿（口径见 _typing_wait）
+    typed = await _type_wait(text.strip())
 
     try:
         result = await session.send_msg(
@@ -1196,11 +1279,14 @@ async def bili_send_message(receiver_uid: int, text: str) -> str:
                 "error": "接口回了成功，但**没有投递回执（msg_key）** ⇒ 可能没真正送到（常见于：对方不接受陌生人私信 / 被风控）",
                 "data": data,
             }, ensure_ascii=False)
-        return json.dumps({
+        out = {
             "success": True,
             "message": f"私信已投递（回执 {str(msg_key)[:12]}…）",
             "data": data,
-        }, ensure_ascii=False)
+        }
+        if typed > 0:                   # 跟评论那边一样：把"打了多久"带回去
+            out["typing_wait_s"] = round(typed, 1)
+        return json.dumps(out, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
 
