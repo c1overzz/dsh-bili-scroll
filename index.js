@@ -759,6 +759,8 @@ function reportMeta() {
         today: dayKey(now),
         ranToday: st.day === dayKey(now) ? Number(st.count || 0) : 0,
         pickedToday: countPickedToday(now),
+        // ⭐ 2.3.1：上一轮如果你选的模型在这个 profile 里没有适配器，这里会留一条记录（GUI 据此提示）
+        modelIgnored: st.modelIgnored || null,
         perDay: cfg.perDay,
         // ⭐ 2026-10-19：这一轮会用哪个 dsh（空 = 没找到 ⇒ 那一轮根本跑不起来）
         dshCli: dshCliCached(),
@@ -1378,6 +1380,17 @@ function reportMeta() {
    *  这里只做**粗略提示**（不拦着用户选）：命中的算「这个 profile 里跑得起来」，其余的在下拉框里
    *  标一句「要在装了适配器的 profile 下跑」，免得又踩同一个坑。 */
   const DUTY_PROFILE_PROVIDERS = new Set(['deepseek-official', 'deepseek-account', 'deepseek'])
+  /** 哪些 profile 算「最小权限」⇒ 里面只有 dsh-base 自带的两条 DeepSeek 路由
+   *  （dsh-llm-deepseek-account / dsh-llm-deepseek-api-key）。trae / buddy / aggregate 这些
+   *  是别的插件在**别的 profile** 里注册的 —— 在这儿选它们，起来就是 NO_ADAPTER ✗ */
+  const MINIMAL_PROFILES = new Set(['bili-duty', 'headless'])
+  /** ⭐ 2.3.1：这个 provider 在「跑值班轮的那个 profile」里到底能不能用 */
+  const dutyProviderUsable = (provider, profile = effectiveProfile()) => {
+    const id = String(provider || '').trim()
+    if (!id) return true
+    if (!MINIMAL_PROFILES.has(String(profile || ''))) return true   // 大 profile 里装了什么适配器插件猜不出来 ⇒ 不拦
+    return DUTY_PROFILE_PROVIDERS.has(id)
+  }
 
   /* ⭐⭐ 2.3.0：这台机器上**现在能选**哪些模型 —— 设置-高级 那个下拉框的数据源。
    *
@@ -1413,7 +1426,8 @@ function reportMeta() {
     for (const p of llm.listProviders()) {
       const id = String(p?.id ?? '')
       if (!id) continue
-      const row = { id, name: String(p?.name || id), models: [], error: '', ready: !minimal || DUTY_PROFILE_PROVIDERS.has(id) }
+      const usable = dutyProviderUsable(id, profile)
+      const row = { id, name: String(p?.name || id), models: [], error: '', usable, ready: usable }
       try {
         const list = await Promise.race([llm.listModels(id), timeout(6000)])
         row.models = (Array.isArray(list) ? list : [])
@@ -1422,10 +1436,10 @@ function reportMeta() {
       } catch (e) { row.error = String(e?.message ?? e) }
       providers.push(row)
     }
-    return { ok: true, profile, minimal, picked, gui, providers }
+    return { ok: true, profile, minimal, picked, gui, providers, pickedUsable: dutyProviderUsable(pickedProvider, profile), dutyProviders: [...DUTY_PROFILE_PROVIDERS] }
   }
 
-  const ensureOverlay = () => {
+  const ensureOverlay = (opts = {}) => {
     const file = join(stateDir, 'headless-overlay.yml')
     const script = join(stateDir, 'mcp_server.py')
     const posix = (p) => String(p).replace(/\\/g, '/')
@@ -1452,7 +1466,11 @@ function reportMeta() {
     // ⭐⭐ 2.3.0：高级页里**选过**模型就以它为准（overlay 每次重写 ⇒ GUI 那边换模型不会再把它冲掉）
     const pickedProvider = String(cfg.modelProvider || '').trim()
     const pickedModel = String(cfg.modelId || '').trim()
-    if (pickedProvider && pickedModel) {
+    lastOverlayModel = null
+    if (opts.noModelPin) {
+      // ⭐ 2.3.1：上一轮就是因为模型路由没有适配器（NO_ADAPTER）死的 ⇒ 这一轮干脆不写模型，按 profile 默认的来
+      if (pickedProvider && pickedModel) log('这一轮不写死模型（上一轮 NO_ADAPTER 了），按 profile 默认模型跑')
+    } else if (pickedProvider && pickedModel && dutyProviderUsable(pickedProvider)) {
       yml.push(
         '- id: agent-default-model',
         '  config:',
@@ -1460,6 +1478,13 @@ function reportMeta() {
         '    model: ' + yq(pickedModel),
         '',
       )
+      lastOverlayModel = { provider: pickedProvider, model: pickedModel, source: '设置·高级' }
+    } else if (pickedProvider && pickedModel) {
+      // ⭐⭐ 2.3.1（用户实测）：选了 aggregate 这种只在 desktop profile 注册的路由 ⇒
+      //    起来就 NO_ADAPTER，报告 / 判重表 / 私信一条都没有。这里**不写进 overlay**、
+      //    也不用「跟随 GUI」（GUI 常常正选着同一类路由）⇒ 落到 profile 自己那条 deepseek-account ✓
+      log('设置里的模型 ' + pickedProvider + '/' + pickedModel + ' 在这个 profile（' + effectiveProfile() + '）里没有适配器 ⇒ 不写进 overlay，按 profile 默认模型跑')
+      try { bumpState({ modelIgnored: { provider: pickedProvider, model: pickedModel, at: Date.now(), profile: effectiveProfile() } }) } catch { /* 写不进去也不影响这一轮 */ }
     } else try {
       const sel = ctx.get('agentDefaultModel')?.currentSelection?.() ?? null
       const selProvider = sel?.provider ?? sel?.providerId
@@ -1473,6 +1498,7 @@ function reportMeta() {
           ...(sel.reasoningEffort ? ['    reasoningEffort: ' + String(sel.reasoningEffort)] : []),
           '',
         )
+        lastOverlayModel = { provider: String(selProvider), model: String(selModel), source: 'GUI 当前模型' }
       }
     } catch { /* 老版本没有这个服务 —— 不写就退回原行为 */ }
     if (cfg.overlayMcp) {
@@ -1635,7 +1661,9 @@ function reportMeta() {
 
   let dutyChild = null
   let dutyStartedAt = 0
-  const runDuty = (why = 'window') => {
+  /** ⭐ 2.3.1：这一轮 overlay 里到底写了哪个模型（null = 没写）—— 用来判断 NO_ADAPTER 该怪谁 */
+  let lastOverlayModel = null
+  const runDuty = (why = 'window', opts = {}) => {
    try {
       if (dutyChild) {
         const alive = dutyChild.exitCode === null && !dutyChild.killed
@@ -1656,7 +1684,7 @@ function reportMeta() {
     }
     // ⭐ 跨宿主运行锁：拿到才跑（写不了锁时照常跑，函数内部已经 fail-open）
     if (!acquireRunLock(why)) return { started: false, why, busy: true, error: '另一个宿主正在跑这一轮' }
-    const overlay = ensureOverlay()
+    const overlay = ensureOverlay(opts)
       const args = [...dsh.args, '--profile', effectiveProfile()]
     if (overlay) args.push('--patch', overlay)
     args.push(promptFor(why))
@@ -1705,14 +1733,31 @@ function reportMeta() {
         try { return new TextDecoder('gbk').decode(b) } catch { return u }
       } catch { return String(buf) }
     }
+    // ⭐ 2.3.1：留一份最近的输出尾巴 —— 失败时用它认出 NO_ADAPTER（模型路由没有适配器）
+    let tailText = ''
     const pick = (buf) => {
-      try { appendFileSync(logFile, toText(buf), 'utf8') } catch { /* 写不进去就丢，绝不能抛 */ }
+      const text = toText(buf)
+      try { tailText = (tailText + text).slice(-20000) } catch { /* 内存不够就丢 */ }
+      try { appendFileSync(logFile, text, 'utf8') } catch { /* 写不进去就丢，绝不能抛 */ }
     }
     child.stdout?.on('data', pick)
     child.stderr?.on('data', pick)
     child.on('exit', (code) => {
       releaseRunLock()            // ⭐ 这一轮结束了，把锁放开（删不掉也没事，10 分钟自动过期）
       log(`刷B站结束（${why}，code=${code}）`)
+      // ⭐⭐ 2.3.1（用户实测）：模型路由在这个 profile 里没有适配器 ⇒ 起来就死、什么都不产出。
+      //    这一轮自动**去掉模型覆盖**（不写 agent-default-model）重跑一次，别让使用者点一次又拿到空 ✗
+      if (code !== 0 && !opts.noModelPin && /NO_ADAPTER/.test(tailText)) {
+        const bad = lastOverlayModel
+        log('模型路由不可用（' + (bad ? bad.provider + '/' + bad.model + '，来自 ' + bad.source : 'NO_ADAPTER') + '）⇒ 这一轮没有产出；自动改用 profile 默认模型重跑一次')
+        try { if (bad) bumpState({ modelIgnored: { provider: bad.provider, model: bad.model, at: Date.now(), profile: effectiveProfile(), source: bad.source } }) } catch { /* 忽略 */ }
+        lastOverlayModel = null
+        const retryTimer = setTimeout(() => {
+          try { runDuty(why, { ...opts, noModelPin: true }) } catch (e) { log('自动重跑失败：' + (e?.message ?? e)) }
+        }, 1500)
+        retryTimer.unref?.()
+        return
+      }
       stubReportIfMissing(code)   // ⭐ 没写报告就补一份占位 —— 别让使用者什么都看不到
       try { writeRoundNotesToReport() } catch { /* 写不进去也不能炸 */ }
     // ⭐ 2026-10-20：这一轮跑成了、并且使用者选了收藏夹 ⇒ 把挑中的存进去（后台做，别拖住收尾）

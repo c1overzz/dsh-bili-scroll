@@ -25,6 +25,16 @@
 **升级**：`dsh plugin --profile web add dsh-bili-scroll`，然后**完全退出 dsh 再打开**。
 新设置项在「设置 → 刷B站 → 关注什么」下面：排除词、评论长度、排序。
 
+## 2.3.2 — 2026-10-28
+
+- 修：高级页选了一个**跑值班轮的那个 profile 里没有适配器**的 provider（例如 `aggregate` / `trae`，它们由
+  `dsh-codearts-auth` 只在 desktop profile 注册）时，以前照样写进 overlay ⇒ 那一轮起来就 `NO_ADAPTER`、
+  报告 / 判重表 / 私信**一条都没有**，界面上看着就是「点了没反应」。现在：
+  - 模型目录里这类 provider 直接**标成不可选**（下拉框里禁掉，并说明是哪个 profile 才有）；
+  - overlay 生成时**跳过**不可用的固定模型（不写 `agent-default-model`，也不退回去「跟随 GUI」——
+    GUI 常常正选着同一类路由），改由 profile 自己那条 `deepseek-account` 顶上；
+  - 万一还是撞上 `NO_ADAPTER`，这一轮会**自动去掉模型覆盖重跑一次**，并把 `modelIgnored` 记进状态，
+    设置页 / `duty_status` 能看到「你选的那个没生效」，不会再静默空白一轮。
 ## 2.3.1 — 2026-10-28
 
 **值班轮可以自己挑模型了 —— 不再被 DSH 里「当前选中的模型」拖着跑。**

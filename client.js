@@ -848,6 +848,8 @@ function WatchTab() {
               modelCat && modelCat.ok === false ? ('读不到模型目录：' + (modelCat.error || '未知原因'))
                 : modelCat ? ('共 ' + modelCount + ' 个模型 / ' + PROVIDERS.length + ' 个 provider（现在跑在 ' + (modelCat.profile || '?') + ' profile 下）')
                   : '点一下才去读：有的 adapter 要联网取目录，不能放在每 5 秒的轮询里')),
+          (modelCat && modelCat.pickedUsable === false) ? h('div', { 'data-bd-warn': '' },
+            '⚠️ 你现在固定的是 ' + String(cfg.modelProvider) + ' / ' + String(cfg.modelId) + '，但它在跑值班轮的那个 profile 里没有适配器 ⇒ 那一轮**不会**用它，会自动按 profile 默认模型跑（下面选一个这边真能用的，或者点「恢复跟随当前模型」）。') : null,
           h('div', { 'data-bd-row': '' },
             h('div', { 'data-bd-grow': '' },
               h('div', { 'data-bd-label': '' }, 'provider'),
@@ -857,8 +859,8 @@ function WatchTab() {
                 onChange: (e) => { setPickProvider(e.target.value); setPickModel('') },
               },
                 h('option', { value: '' }, '（跟随 DSH 当前模型）'),
-                PROVIDERS.map((p) => h('option', { key: p.id, value: p.id },
-                  p.name + ' · ' + p.id + (p.ready ? '' : ' （要在装了适配器的 profile 下跑）') + (p.models && p.models.length ? '' : ' · 目录读不到')))))),
+                PROVIDERS.map((p) => h('option', { key: p.id, value: p.id, disabled: p.usable === false },
+                  p.name + ' · ' + p.id + (p.usable === false ? ' （这个 profile 里没有它的适配器，选不了）' : '') + (p.models && p.models.length ? '' : ' · 目录读不到')))))),
           h('div', { 'data-bd-row': '' },
             h('div', { 'data-bd-grow': '' },
               h('div', { 'data-bd-label': '' }, '模型'),
@@ -870,9 +872,9 @@ function WatchTab() {
                     ? ('这个 provider 的目录读不到：' + pickRow.error)
                     : '先在上面选 provider，这里才有模型可选'))),
           pickNotReady ? h('div', { 'data-bd-warn': '' },
-            '⚠️ 这条路由不是最小权限 profile 自带的（只有 dsh-base + dsh-headless）。选它就要把高级里的「值班 profile」换成装了适配器的那个（例如 desktop），否则那一轮会报 NO_ADAPTER。') : null,
+            '⚠️ 这条路由是别的插件在别的 profile 里注册的（例如 aggregate / trae 来自 dsh-codearts-auth，只在 desktop 里），跑值班轮的那个 profile 只有 dsh-base + dsh-headless ⇒ 选它那一轮会直接 NO_ADAPTER、什么都不产出。要它就得把高级里的「值班 profile」换成 desktop（会失去最小权限）。') : null,
           h('div', { 'data-bd-row': '' },
-            h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: !pickProvider || !pickModel || busy === 'models', onClick: onSaveModel }, '确定'),
+            h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: !pickProvider || !pickModel || busy === 'models' || pickNotReady, onClick: onSaveModel }, '确定'),
             pinned ? h('button', { 'data-bd-btn': '', disabled: busy === 'model-clear', onClick: onClearModel }, '恢复跟随当前模型') : null,
             h('div', { 'data-bd-note': '' }, pinned ? ('现在固定用：' + pinned) : '现在：跟随 DSH 当前模型')),
         ),
