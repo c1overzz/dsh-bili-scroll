@@ -1735,7 +1735,8 @@ async def bili_cover(bvid: str) -> list:
 # Video.get_video_snapshot() 有封装，但 pvideo 默认 True 会走老接口，必须传 False。
 # 裁切用 Pillow（requirements 里的 qrcode[pil] 已经带进来）。
 
-_FRAME_MAX = 6
+_FRAME_RAW = int(os.environ.get("BILI_FRAME_MAX", "6") or 6)
+_FRAME_MAX = 10**9 if _FRAME_RAW <= 0 else max(1, min(_FRAME_RAW, 9999))
 _TILE_W_DEFAULT = 480
 _TILE_H_DEFAULT = 270
 
@@ -1809,18 +1810,87 @@ def _crop_tile(sheet: bytes, tile_index: int, tw: int, th: int) -> bytes:
     return buf.getvalue()
 
 
+def _frame_quality(raw: bytes) -> tuple[float, float]:
+    import io
+
+    from PIL import Image, ImageStat
+
+    img = Image.open(io.BytesIO(raw)).convert("L")
+    stat = ImageStat.Stat(img)
+    return float(stat.mean[0]), float(stat.stddev[0])
+
+
+def _frame_signature(raw: bytes) -> tuple[int, ...]:
+    import io
+
+    from PIL import Image
+
+    img = Image.open(io.BytesIO(raw)).convert("L").resize((8, 8), Image.Resampling.BILINEAR)
+    pixels = list(img.tobytes())
+    avg = sum(pixels) / max(1, len(pixels))
+    return tuple(1 if p >= avg else 0 for p in pixels)
+
+
+def _signature_distance(a: tuple[int, ...], b: tuple[int, ...]) -> int:
+    return sum(x != y for x, y in zip(a, b))
+
+
+async def _subtitle_cue_mids(v, cid: int) -> list[float]:
+    """取字幕 cue 的中点（秒）；没有字幕/登录态时返回空，不阻断看画面。"""
+    try:
+        data = await v.get_subtitle(cid=cid)
+        subs = data.get("subtitles") or []
+        target = None
+        for s in subs:
+            if s.get("lan") in ("ai-zh", "zh-CN", "zh"):
+                target = s
+                break
+        if target is None and subs:
+            target = subs[0]
+        if not target or not target.get("subtitle_url"):
+            return []
+        import aiohttp
+
+        url = target["subtitle_url"]
+        if url.startswith("//"):
+            url = "https:" + url
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=_HTTP_TIMEOUT) as resp:
+                if resp.status != 200:
+                    return []
+                body = await resp.json(content_type=None)
+        cues = []
+        for item in body.get("body") or []:
+            try:
+                start = max(0.0, float(item.get("from") or 0))
+                end = max(start, float(item.get("to") or start))
+            except (TypeError, ValueError):
+                continue
+            cues.append((start + end) / 2)
+        return cues
+    except Exception:
+        return []
+
+
 @tool()
-async def bili_frames(bvid: str, num: int = 3, at: list | None = None) -> list:
+async def bili_frames(
+    bvid: str,
+    num: int = 3,
+    at: list | None = None,
+    smart: bool = True,
+) -> list:
     """
     看这个视频里的画面（从 B 站自带的故事板里裁几帧）
 
-    想看"它到底拍了什么"就用它。默认按时长均匀取 3 帧；
+    想看"它到底拍了什么"就用它。默认按字幕节点 + 时间覆盖取 3 帧，
+    并自动避开黑帧、尽量不让连续两帧长得一样。
     想盯某个时刻（比如字幕里提到的那一段）就传 at（单位：秒），会取**最接近的那一块**。
 
     Args:
         bvid: 视频BV号，如"BV1uNk1YxEJQ"
-        num: 取几帧，1-6，默认 3
+        num: 取几帧，默认 3；受 BILI_FRAME_MAX 限制（0=全部）
         at: 指定时间点（秒）的列表；传了就以它为准，忽略 num
+        smart: 默认 true；true = 字幕 cue + 时间覆盖 + 跳黑帧/重复帧；false = 旧版均分
 
     Returns:
         若干张 480×270 的画面 + 一句说明（时长、实际取到的那一刻、哪几帧失败）。
@@ -1874,17 +1944,36 @@ async def bili_frames(bvid: str, num: int = 3, at: list | None = None) -> list:
     if story_max > 0:
         covered = min(covered, story_max)
 
-    # 目标时间点：传了 at 就用它；否则按"覆盖长度"均分
+    entries.sort(key=lambda e: e[0])
+    cue_mids = await _subtitle_cue_mids(v, cid) if (smart and not at) else []
+
+    # 目标时间点：传了 at 就用它；否则字幕 cue + 覆盖时间；都没字幕就纯均分
     if at:
         targets = [min(max(0.0, float(t)), max(0.0, covered - 0.1)) for t in at][:_FRAME_MAX]
     else:
         n = max(1, min(int(num or 3), _FRAME_MAX))
         targets = [covered * (i + 1) / (n + 1) for i in range(n)]
+        if smart and cue_mids:
+            valid = [c for c in cue_mids if 0 <= c <= covered]
+            if valid:
+                step = max(1, len(valid) // max(1, n * 2))
+                # 字幕节点优先，再补均分覆盖，最后按“离目标最近”去重
+                targets = valid[::step] + targets
 
     picked = []
+    used_entries = set()
     for t in targets:
-        ts, tile = min(entries, key=lambda e: abs(e[0] - t))
-        picked.append((round(t, 1), round(ts, 1), tile))
+        order = sorted(
+            (j for j in range(len(entries)) if j not in used_entries),
+            key=lambda j: abs(entries[j][0] - t),
+        )
+        if not order:
+            continue
+        j = order[0]
+        used_entries.add(j)
+        ts, tile = entries[j]
+        picked.append((round(t, 1), round(ts, 1), tile, j))
+    picked = picked[: max(1, min(int(num or 3) or 3, _FRAME_MAX))] if not at else picked
 
     tw = int(snap.get("img_x_size") or _TILE_W_DEFAULT)
     th = int(snap.get("img_y_size") or _TILE_H_DEFAULT)
@@ -1901,28 +1990,79 @@ async def bili_frames(bvid: str, num: int = 3, at: list | None = None) -> list:
 
     # 每张拼图装几块要等第一张下来才知道（列数 = 宽 // 块宽）
     blocks, frames, failed = [], [], []
+    import io
+
+    from PIL import Image
+
     cap = None
-    for i, (want, got, tile) in enumerate(picked):
+    first = await get_sheet(0)
+    im = Image.open(io.BytesIO(first))
+    cap = max(1, (im.width // tw) * (im.height // th))
+    filter_frames = smart and len(picked) < len(entries)
+    reserved = {p[3] for p in picked}
+    used_crop = set()
+    prev_sig = None
+
+    for i, (want, got, tile, base_j) in enumerate(picked):
         try:
-            if cap is None:
-                first = await get_sheet(0)
-                import io
+            candidates = [base_j]
+            if filter_frames:
+                for delta in (1, -1, 2, -2, 3, -3):
+                    candidates.append(base_j + delta)
 
-                from PIL import Image
+            chosen = None
+            last_error = None
+            for j in candidates:
+                if j < 0 or j >= len(entries) or j in used_crop:
+                    continue
+                if j != base_j and j in reserved:
+                    continue
+                ts, tile2 = entries[j]
+                sheet_no, pos = tile2 // cap, tile2 % cap
+                try:
+                    raw = _crop_tile(await get_sheet(sheet_no), pos, tw, th)
+                except Exception as e:
+                    last_error = e
+                    continue
+                if len(raw) > _MAX_IMAGE_BYTES:
+                    last_error = RuntimeError(f"这一帧太大（{len(raw) // 1024}KB）")
+                    continue
+                sig = None
+                if filter_frames:
+                    mean, std = _frame_quality(raw)
+                    if mean < 12 and std < 8:
+                        continue
+                    sig = _frame_signature(raw)
+                    if prev_sig is not None and _signature_distance(prev_sig, sig) < 3:
+                        continue
+                chosen = (j, ts, raw, sig)
+                break
+            if chosen is None and candidates:
+                # 全都黑/太像时至少把 base 帧交出去，不静默少图
+                j = base_j
+                if 0 <= j < len(entries) and j not in used_crop:
+                    ts, tile2 = entries[j]
+                    sheet_no, pos = tile2 // cap, tile2 % cap
+                    raw = _crop_tile(await get_sheet(sheet_no), pos, tw, th)
+                    chosen = (j, ts, raw, None)
+            if chosen is None:
+                raise last_error or RuntimeError("没有可用快照")
 
-                im = Image.open(io.BytesIO(first))
-                cap = max(1, (im.width // tw) * (im.height // th))
-            sheet_no, pos = tile // cap, tile % cap
-            raw = _crop_tile(await get_sheet(sheet_no), pos, tw, th)
-            if len(raw) > _MAX_IMAGE_BYTES:
-                raise RuntimeError(f"这一帧太大（{len(raw) // 1024}KB）")
+            j, actual_ts, raw, sig = chosen
+            used_crop.add(j)
+            if sig is not None:
+                prev_sig = sig
             blocks.append(ImageContent(
                 type="image",
                 data=base64.b64encode(raw).decode("ascii"),
                 mimeType="image/jpeg",
             ))
-            frames.append({"index": i, "want_sec": want, "got_sec": got,
-                           "kb": round(len(raw) / 1024, 1)})
+            frames.append({
+                "index": i,
+                "want_sec": want,
+                "got_sec": round(actual_ts, 1),
+                "kb": round(len(raw) / 1024, 1),
+            })
         except Exception as e:
             failed.append({"index": i, "want_sec": want, "got_sec": got, "reason": str(e)})
 
@@ -1943,7 +2083,9 @@ async def bili_frames(bvid: str, num: int = 3, at: list | None = None) -> list:
             "tile": f"{tw}x{th}",
             "frames": frames,
             "failed": failed,        # 空列表 = 全成
+            "cue_count": len(cue_mids),
             "note": "want_sec 是想要的时刻，got_sec 是实际取到的那一块（故事板按固定间隔切）；"
+                    "smart 会按字幕节点+覆盖选帧，并跳过黑帧/几乎重复的帧；"
                     "多P 视频只覆盖第 1P，看 covered_sec",
         }, ensure_ascii=False)),
         *blocks,

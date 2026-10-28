@@ -71,6 +71,8 @@ export const Config = !z ? undefined : z.object({
    *  ⚠️ 这里故意**不加 `.max(20)`**：schema 校验不过 ⇒ cordis 拒收这条 entry ⇒ **整条插件不激活** ✗
    *     （跟 schemastery 拿不到时的降级同一个道理）—— 范围一律由 clampPatch 在**写**和**读**两头钳。 */
   commentPerRound: z.natural().default(1).extra('volatile', true),
+  /** 看画面帧上限（默认 6；0 = 全部快照，1–9999 为具体上限） */
+  frameMax: z.natural().default(6).extra('volatile', true),
   /** ⭐ 要 @ 谁（B站 昵称）；**留空 = 不发评论** —— 评论存在的意义就是 @ 那一下 */
   mentionName: z.string().default('').extra('volatile', true),
   /** 关注关键词（空了用章程里默认那几组） */
@@ -263,7 +265,7 @@ function reportMeta() {
   const DEFAULTS = {
     dmWatch: true, dmWatchMinutes: 1, dmReplyPerDay: 0, dmOwnerUid: 0,
     personaPrompt: '',
-    perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
+    perDay: 5, frameMax: 6, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
     dmMode: 'only', dmUid: 0,
     keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, favFolderId: 0,
     // ⭐ 2.3.0：手动轮 / 抓取量 / 排除词 / 评论长度 —— 少一项 normalize 就会把用户存的值丢掉
@@ -297,6 +299,10 @@ function reportMeta() {
   const clampPatch = (patch) => {
     const p = { ...patch }
     if ('perDay' in p) p.perDay = Math.max(0, Math.min(Number(p.perDay) || 0, 50))
+    if ('frameMax' in p) {
+      const n = Number(p.frameMax)
+      p.frameMax = n === 0 ? 0 : Math.max(1, Math.min(Number.isFinite(n) ? n : 6, 9999))
+    }
     if ('reportLevel' in p) p.reportLevel = ['full', 'brief', 'off'].includes(String(p.reportLevel)) ? String(p.reportLevel) : 'full'
     // ⭐ 2.0.5（issue #89）：人设上限 8000 → 60000；**截断时要出声**（以前静默砍，用户以为写进去了 ✗）
     if ('personaPrompt' in p) {
@@ -521,7 +527,7 @@ function reportMeta() {
       cwd: stateDir,                     // 凭证落在家里 ✓
       // ⭐ 这个内置的 Python MCP 会往 stdout 打中文（ensure_ascii=False）；
       //    Windows 默认 GBK 的话，中文/emoji 一进管道就可能炸 ⇒ 钉死 UTF-8
-      env: uvEnv(),
+      env: uvEnv({ BILI_FRAME_MAX: String(cfg.frameMax ?? 6) }),
       log,
     })
     return mcp
@@ -692,21 +698,27 @@ function reportMeta() {
 
   tool({
     name: 'bili_frames',
-    description: '看视频里的画面（从 B 站自带的故事板裁 1-6 帧，每帧 480×270）。\n'
+    description: '看视频里的画面（从 B 站自带的故事板裁 1–9999 帧，每帧 480×270；上限由设置 frameMax 决定，0=全部）。\n'
       + '想知道"这条视频到底拍了什么"就用它 —— 字幕告诉你说什么，画面告诉你拍的是什么。\n'
-      + '默认按时长均匀取 3 帧；想盯某个时刻（比如字幕里提到的那段）就传 at。',
+      + '默认按字幕节点 + 时间覆盖取 3 帧，并自动跳过黑帧/几乎重复的帧；想盯某个时刻（比如字幕里提到的那段）就传 at。',
     parameters: {
       bvid: { type: 'string', description: 'BV号' },
-      num: { type: 'number', description: '取几帧，1-6，默认 3' },
+      num: { type: 'number', description: '取几帧，默认 3；受 frameMax 限制，0=全部由 frameMax=0 决定' },
       at: { type: 'array', items: { type: 'number' }, description: '指定时间点（秒）列表；传了就以它为准，忽略 num' },
+      smart: { type: 'boolean', description: '默认 true；false = 退回旧版均分，不按字幕/黑帧做智能选帧' },
     },
     output: imageOutput,
     async execute(args, exec) {
       const at = Array.isArray(args.at) ? args.at.map(Number).filter(Number.isFinite) : undefined
+      const rawFrameMax = Number(cfg.frameMax)
+      const frameMax = rawFrameMax === 0
+        ? Number.MAX_SAFE_INTEGER
+        : Math.max(1, Math.min(Number.isFinite(rawFrameMax) ? rawFrameMax : 6, 9999))
       const { json, images } = await callRaw('bili_frames', {
         bvid: String(args.bvid ?? ''),
-        num: Math.max(1, Math.min(Number(args.num) || 3, 6)),
+        num: Math.max(1, Math.min(Number(args.num) || 3, frameMax)),
         ...(at && at.length ? { at } : {}),
+        smart: args.smart !== false,
       }, { signal: exec?.signal })
       const meta = json && typeof json === 'object' ? json : { raw: json }
       if (!meta.ok) return meta
@@ -1428,6 +1440,7 @@ function reportMeta() {
         '          - ' + yq(posix(script)),
         '        env:',
         '          BILI_MCP_TOOLS: ' + yq(mcpWhitelist().join(',')),
+        '          BILI_FRAME_MAX: ' + yq(String(cfg.frameMax ?? 6)),
         '',
       )
     }
