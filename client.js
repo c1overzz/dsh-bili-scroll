@@ -39,7 +39,12 @@ window.__ModuleLoader__.load({
       const why = res.status === 401 ? '（未登录 / 没权限）' : res.status === 403 ? '（被宿主拦了）' : ''
       throw new Error('HTTP ' + res.status + why)
     }
-    const jget = async (p) => asJson(await fetch(API + p, { credentials: 'same-origin' }))
+    // fnOS's gateway rewrites Host to loopback but may preserve the NAS page Referer.
+    // Suppress it for plugin GETs so sameOriginOk() sees no mismatched browser origin.
+    const jget = async (p) => asJson(await fetch(API + p, {
+      credentials: 'same-origin',
+      referrerPolicy: 'no-referrer',
+    }))
     const jpost = async (p, body) => asJson(await fetch(API + p, {
       method: 'POST',
       credentials: 'same-origin',
@@ -219,7 +224,7 @@ function WatchTab() {
       chip('不值当', () => pick('tier', '不值当'), tier === '不值当')),
     rows && rows.length ? h('div', { 'data-bd-list': '' },
       rows.map((x, i) => h('div', { key: x.day + x.bvid, 'data-bd-item': '', 'data-bd-clickable': '', title: '在浏览器打开', onClick: () => onOpenUrl(x.url) },
-        i < 30 ? h('img', { 'data-bd-cover': '', src: API + '/cover?bv=' + x.bvid, loading: 'lazy', alt: '' }) : null,
+        i < 30 ? h('img', { 'data-bd-cover': '', src: API + '/cover?bv=' + x.bvid, loading: 'lazy', referrerPolicy: 'no-referrer', alt: '' }) : null,
         h('div', { 'data-bd-item-body': '' },
           h('div', { 'data-bd-item-t': '' }, x.title),
           h('div', { 'data-bd-item-n': '' }, `${x.day} · ${x.up} · `, x.picked ? '挑中了' : '跳过', (x.delivered || x.commented) ? ' · 已发给你' : '',
@@ -788,7 +793,7 @@ function WatchTab() {
           watchedRows !== null && watchedRows.length ? h('div', { 'data-bd-list': '' },
             watchedRows.map((x, i) => h('div', { key: x.day + x.bvid, 'data-bd-item': '' },
               // 封面走宿主代理（直连 i0.hdslb.com 会被防盗链挡，也等于把使用者 IP 交出去）
-              i < 40 ? h('img', { 'data-bd-cover': '', src: API + '/cover?bv=' + x.bvid, loading: 'lazy', alt: '' }) : null,
+              i < 40 ? h('img', { 'data-bd-cover': '', src: API + '/cover?bv=' + x.bvid, loading: 'lazy', referrerPolicy: 'no-referrer', alt: '' }) : null,
               h('div', { 'data-bd-item-body': '' },
                 h('div', { 'data-bd-item-t': '' },
                   h('a', { href: x.url, target: '_blank', rel: 'noreferrer' }, x.title)),
