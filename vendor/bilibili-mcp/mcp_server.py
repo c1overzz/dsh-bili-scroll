@@ -1196,6 +1196,16 @@ async def bili_send_message(receiver_uid: int, text: str) -> str:
                 "error": "接口回了成功，但**没有投递回执（msg_key）** ⇒ 可能没真正送到（常见于：对方不接受陌生人私信 / 被风控）",
                 "data": data,
             }, ensure_ascii=False)
+        # 仅值班轮：真实拿到 msg_key 后记录私信中的 BV 号，普通聊天不会标记。
+        duty_day = os.environ.get("BILI_DUTY_RUN_DAY", "")
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", duty_day):
+            bvids = sorted(set(re.findall(r"(?<![0-9A-Za-z])BV[0-9A-Za-z]{10}(?![0-9A-Za-z])", text)))
+            if bvids:
+                try:
+                    with (Path(__file__).parent / "dm-deliveries.jsonl").open("a", encoding="utf-8") as f:
+                        f.write(json.dumps({"day": duty_day, "bvids": bvids}, ensure_ascii=False) + "\n")
+                except OSError as e:
+                    print(f"私信已成功，但记录投递失败：{e}", file=sys.stderr)
         return json.dumps({
             "success": True,
             "message": f"私信已投递（回执 {str(msg_key)[:12]}…）",

@@ -1628,7 +1628,7 @@ function reportMeta() {
       //    中文 / emoji 打进管道会炸（用户反馈过 UnicodeDecodeError），一律按 UTF-8 来
       // ⭐ ELECTRON_RUN_AS_NODE：**桌面版（Electron）里 spawn 出去的 node 必须带这个**，
       //    否则它当成"再开一个 Electron 应用"、什么都不干就以 0 退出（issue #5：0.17 秒、code 0、什么都没做）
-      env: uvEnv({ BILI_DUTY_HOME: stateDir, ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}) }),
+      env: uvEnv({ BILI_DUTY_HOME: stateDir, BILI_DUTY_RUN_DAY: dayKey(), ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}) }),
     })
     // ⚠️ 2026-10-16 issue #1（用户 `miaoxingyunduo` 贴了崩溃日志）：`duty.log` 被别的进程占着时
     //    (`EBUSY`) `appendFileSync` 会抛异常 —— 而这里是 **stream 的 data 回调**，没人接
@@ -2223,6 +2223,19 @@ function reportMeta() {
     const file = join(stateDir, 'seen.md')
     let text = ''
     try { text = readFileSync(file, 'utf8') } catch { return [] }
+    // 只有值班轮中收到 B 站投递回执的 BV 才记为已私信。
+    const dmDelivered = new Set()
+    try {
+      for (const line of readFileSync(join(stateDir, 'dm-deliveries.jsonl'), 'utf8').split(/\r?\n/)) {
+        try {
+          const { day, bvids } = JSON.parse(line)
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || !Array.isArray(bvids)) continue
+          for (const bv of bvids) {
+            if (typeof bv === 'string' && /^BV[0-9A-Za-z]{10}$/.test(bv)) dmDelivered.add(`${day}@${bv}`)
+          }
+        } catch { /* 跳过空行或损坏的记录 */ }
+      }
+    } catch { /* 尚未发送过私信 */ }
     const out = []
     const seen = new Set()
     let bad = 0
@@ -2255,7 +2268,7 @@ function reportMeta() {
       const skipped = /跳过|跳了|没挑/.test(status)
       const picked = !skipped && /挑|收|选|值得看|可以看/.test(status)
       const commented = /评论/.test(status)
-      const delivered = /评论|私信|已发|发给/.test(status) || deliveredBvs.has(bvid)
+      const delivered = /评论|私信|已发|发给/.test(status) || deliveredBvs.has(bvid) || (picked && dmDelivered.has(`${day}@${bvid}`))
       out.push({ day, bvid, title, up, status, picked, commented, delivered, url: 'https://www.bilibili.com/video/' + bvid })
     }
     // ⭐ 以前这里是静默丢行 ⇒ 卡片墙空了也没人知道为什么（#133）
