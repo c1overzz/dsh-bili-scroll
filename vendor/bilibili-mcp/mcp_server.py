@@ -26,6 +26,10 @@ import struct
 import sys
 import tempfile
 from pathlib import Path
+# ⭐ 2026-10-29（评审第 1 条）：**必须在模块顶层导入**。
+#   之前只在几个函数里局部 `import aiohttp`，而新加的 _get_comment_json() 用的就是它
+#   ⇒ 一调用就 NameError: name 'aiohttp' is not defined（而且是运行时才炸，测试不跑到就发现不了）。
+import aiohttp
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ImageContent, TextContent
 
@@ -37,6 +41,21 @@ from bilibili_api.video_uploader import (
 )
 from bilibili_api.utils.picture import Picture
 from bilibili_api.login_v2 import QrCodeLogin, QrCodeLoginEvents
+
+# ⭐ 2026-10-28 自定义：**怎么 @ 你**。由宿主通过环境变量下发，这一层强制执行
+#    （模型写错了会被改写掉，不靠它自觉）：
+#      top = 主评论正文里 @
+#      dm  = 主评论不带 @，发完由这里私信把「评论原文 + 链接」发给主人
+#    另外有一个**独立开关** BILI_MENTION_NESTED（默认关）：
+#      开 = 凡是「回复别人的评论」（rpid>0）都强制以「@昵称」开头
+#           —— 也就是「看到有意思的评论，就在那条下面回一句 @ 你」
+_MENTION_MODE = (os.environ.get("BILI_MENTION_MODE") or "top").strip().lower()
+_MENTION_NAME = (os.environ.get("BILI_MENTION_NAME") or "").strip()
+_MENTION_NESTED = (os.environ.get("BILI_MENTION_NESTED") or "").strip().lower() in ("1", "true", "on", "yes")
+try:
+    _MENTION_UID = int(os.environ.get("BILI_MENTION_UID") or 0)
+except (TypeError, ValueError):
+    _MENTION_UID = 0
 
 # 2.3.0 throttle: every read tool sleeps 0.6-1.6s before running
 async def _throttle():
@@ -488,16 +507,21 @@ async def bili_comments(bvid: str, num: int = 30) -> str:
                     "reply_count": r.get("rcount", 0),
                     "time": r.get("ctime", 0),
                 }
-                # 子评论
+                # 子评论 —— ⚠️ 这只是**预览**：B站 列表接口每条只内嵌前几条回复，
+                #    所以这里给 3 条已经是上限附近，**不代表整栋楼**。
+                #    真正要回某条评论时，宿主会自己按 root 再取一次完整抽样（见 _fetch_reply_context）。
                 sub_replies = []
-                for sub in (r.get("replies") or [])[:2]:
+                for sub in (r.get("replies") or [])[:3]:
                     sub_replies.append({
+                        "rpid": sub.get("rpid", 0),
+                        "root": sub.get("root", 0),
                         "user": sub.get("member", {}).get("uname", ""),
                         "content": sub.get("content", {}).get("message", ""),
                         "like": sub.get("like", 0),
                     })
                 if sub_replies:
                     c["top_replies"] = sub_replies
+                    c["top_replies_preview"] = True
                 comments.append(c)
 
             page += 1
@@ -645,8 +669,306 @@ async def bili_video_info(bvid: str) -> str:
 
 # ========== Tool 6: 回复评论 ==========
 
+def _strip_mention(text: str) -> str:
+    """把正文里的 @某人 整段去掉（连它旁边的空格一起收拾干净）。"""
+    if not _MENTION_NAME:
+        return text
+    t = re.sub(r"@\s*" + re.escape(_MENTION_NAME) + r"\s*", "", text)
+    t = re.sub(r"[ \t]{2,}", " ", t).strip()
+    return t or text
+
+
+def _apply_mention(text: str, rpid: int) -> str:
+    """按配置改写评论正文 —— 这是「怎么 @ 你」的执行点。
+
+    两种场景，各管各的（互不影响）：
+      · 主评论（rpid=0）→ 看 `mentionMode`
+          top = 正文里必须有 @你（顺手把「@ 你」压成「@你」）
+          dm  = 正文里一个 @ 都不许有（改由私信把这条评论发给你）
+      · 回复别人的评论（rpid>0）→ 只看独立开关「在有意思的评论下 @ 你」
+          开 = 强制以「@你」开头；关 = 正文一个字不动
+               （关着必须不动 —— 否则「只回楼中楼」那个老功能会被莫名塞 @）
+    """
+    if not _MENTION_NAME:
+        return text
+    tag = "@" + _MENTION_NAME
+
+    # ── 回复别人的评论 ──
+    if rpid > 0:
+        if _MENTION_NESTED and not text.lstrip().startswith(tag):
+            return tag + " " + text.lstrip()
+        return text
+
+    # ── 主评论 ──
+    if _MENTION_MODE == "dm":
+        return _strip_mention(text)
+    # 默认 top：先把「@ 昵称」（@ 后面带空格）压成「@昵称」—— B站 只认紧挨着的写法
+    text = re.sub(r"@\s*" + re.escape(_MENTION_NAME), "@" + _MENTION_NAME, text)
+    if tag not in text:
+        text = (text.rstrip() + " " + tag).strip()
+    return text
+
+
+async def _share_comment_by_dm(uid: int, bvid: str, text: str):
+    """第三种 @ 方式：把刚发的评论用私信发给主人。
+
+    返回 (ok, error)：
+      · 只有拿到 **msg_key**（投递回执）才算真的送到了 —— 光看 `code==0` 不算，
+        实测会出现"接口回 0 但没收件箱记录"（issue #35 / #147）。
+      · 失败时把原因带回去，调用方会把它写进回执，**不会**因此重发评论。
+    """
+    cred = get_cred()
+    body = (
+        "我在这个视频下面留了条评论：\n"
+        f"https://www.bilibili.com/video/{bvid}\n\n"
+        f"{text}"
+    )
+    if len(body) > 470:
+        body = body[:450] + "…"
+    try:
+        res = await session.send_msg(
+            credential=cred,
+            receiver_id=uid,
+            msg_type=session.EventType.TEXT,
+            content=body,
+        )
+    except Exception as e:
+        return False, f"私信接口抛错：{type(e).__name__}: {e}"
+    data = res if isinstance(res, dict) else {}
+    if data.get("msg_key"):
+        return True, ""
+    code = data.get("code", None)
+    msg = str(data.get("message") or data.get("msg") or "").strip()
+    if code is None:
+        return False, "私信没回执（响应里既没有 msg_key，也没有 code）"
+    return False, f"私信没回执：code={code} {msg}".strip()
+
+
+# ⭐ 2026-10-28：**「在有意思的评论下 @ 你」的硬闸门**。
+#    为什么不交给模型判断：它对"有意思"的标准太宽 —— 一句「大肥鱼」「笑死」在它眼里
+#    也算有趣，结果就是往人堆里挤；而热评底下本来就一堆人抢答，回进去最像机器人。
+#    所以这里把它**说要回的那条评论原文**拿来，用可判定的规则过一遍：
+#      去标点后 < 10 字          ⇒ 太短，多半是梗
+#      命中梗词 且 去标点 < 20 字 ⇒ 玩梗 / 纯情绪
+#      基本是重复字符            ⇒ 刷屏
+#    闸门只判"够不够格"，不判"好不好" —— 好不好交给提示词。
+_NESTED_MEME = [
+    "大肥鱼", "绷不住", "笑死", "笑麻", "笑不活", "破防", "泪目", "太好哭", "好哭",
+    "前排", "沙发", "打卡", "路过", "三连", "已投币", "支持一下", "顶一下",
+    "哈哈哈哈", "嘿嘿嘿", "awsl", "绝了", "爱了", "绝绝子", "yyds", "爷青回",
+    "好活", "整活", "整挺好", "急了", "格局打开", "格局", "典中典", "典",
+]
+
+
+# ═══════════════ 回复别人的评论：质量闸门 ═══════════════
+# ⭐ 2026-10-29（评审第 4 条）：**筛选依据一律由程序从 B站 接口取，不采信模型自报。**
+#    上一版把「原文 / 回复数 / 楼中楼抽样」交给模型填写 —— 它漏传、填错、或选择性摘录
+#    就能绕过筛选，那这道闸门等于摆设。现在只认 bvid / rpid / root，
+#    正文、回复数、楼中楼抽样全部由 _fetch_reply_context() 现取；取数失败直接拒。
+_NESTED_MAX_RCOUNT = 20      # 一栋楼回复超过这个数就别往里挤
+_NESTED_JUNK_RATIO = 0.6     # 楼中楼抽样里"短/玩梗"占比超过这个值 ⇒ 这楼已经变味
+_NESTED_MIN_SAMPLE = 3       # 少于这么多条抽样 ⇒ 不做整楼判断（会明说，不能当成"通过"）
+# 这一楼在**吵架**（有人身攻击）⇒ 一律不进
+_NESTED_ATTACK = ["傻逼", "脑残", "你妈", "去死", "狗东西", "有病", "神经病", "闭嘴", "滚蛋"]
+# 这一楼在**抵触玩梗**（"讨厌大肥鱼""别刷了"这种）⇒ 不进：
+#   在这种楼里插一句，只会被当成同一类人在拱火。必须跟梗词同时出现才算，
+#   否则「我讨厌这个观点」这种正常讨论会被误伤。
+_NESTED_AVOID = ["讨厌", "反感", "烦死", "受够了", "受够", "别刷", "刷屏", "滚出", "吵死", "没完没了", "无聊"]
+# 这条留言**像是 AI / 机器人发的** ⇒ 不回。
+#   只看「那条留言本身」，不看整楼。也刻意只收「自称/自曝」的说法，
+#   免得「你觉得 DeepSeek 怎么样」这种真人讨论被误伤。
+_NESTED_AI_HINTS = [
+    "作为ai", "作为一个ai", "作为人工智能", "我是一个ai", "我是一个人工智能",
+    "我是ai助手", "我是人工智能助手", "我是机器人", "我是自动回复",
+    "由ai生成", "ai生成的内容", "本回复由", "自动回复", "ai总结", "ai摘要",
+    "（ai", "(ai", "［ai", "[ai",
+]
+
+_COMMENT_LIST_API = "https://api.bilibili.com/x/v2/reply"
+_COMMENT_REPLY_API = "https://api.bilibili.com/x/v2/reply/reply"
+_COMMENT_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+               "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+_FETCH_MAX_PAGES = 3         # 一级评论最多翻 3 页（60 条）去找目标
+_FETCH_TIMEOUT = 15          # 单次请求超时（秒）
+
+
+def _looks_like_ai(text: str) -> bool:
+    low = (text or "").lower()
+    if not low:
+        return False
+    return any(h in low for h in _NESTED_AI_HINTS)
+
+
+def _cred_cookies(cred) -> dict:
+    out = {}
+    for key, attr in (("SESSDATA", "sessdata"), ("bili_jct", "bili_jct"),
+                      ("buvid3", "buvid3"), ("DedeUserID", "dedeuserid")):
+        val = getattr(cred, attr, "") or ""
+        if val:
+            out[key] = str(val)
+    return out
+
+
+async def _get_comment_json(url: str, params: dict, cred) -> dict:
+    timeout = aiohttp.ClientTimeout(total=_FETCH_TIMEOUT)
+    headers = {"User-Agent": _COMMENT_UA, "Referer": "https://www.bilibili.com/"}
+    async with aiohttp.ClientSession(timeout=timeout, cookies=_cred_cookies(cred)) as sess:
+        async with sess.get(url, params=params, headers=headers) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"HTTP {resp.status}")
+            raw = await resp.read()
+    return json.loads(raw.decode("utf-8"))
+
+
+def _reply_row(r: dict) -> dict:
+    member = r.get("member") or {}
+    return {
+        "rpid": int(r.get("rpid") or 0),
+        "root": int(r.get("root") or 0),
+        "parent": int(r.get("parent") or 0),
+        "mid": int(member.get("mid") or 0),
+        "user": str(member.get("uname") or ""),
+        "text": str((r.get("content") or {}).get("message") or ""),
+        "like": int(r.get("like") or 0),
+        "rcount": int(r.get("rcount") or 0),
+        "ctime": int(r.get("ctime") or 0),
+    }
+
+
+async def _fetch_reply_context(aid: int, rpid: int, root: int, cred) -> dict:
+    """取「要回复的那条评论」的真实数据 + 它所在楼的抽样。
+
+    返回 {"ok": True, "target": row, "sample": [row...], "same_thread": bool}
+      或 {"ok": False, "error": "具体原因"}
+
+    ⚠️ 取数失败（超时 / 限流 / 评论已删 / 字段缺失）一律返回 ok:False，
+       调用方**直接拒掉这次回复**，绝不退回去信任模型自报的数据。
+    """
+    root = int(root or 0)
+    try:
+        # ① 目标在楼中楼里（给了 root，且 root 不是目标本身）
+        if root and root != rpid:
+            data = await _get_comment_json(_COMMENT_REPLY_API, {
+                "oid": aid, "type": 1, "root": root, "pn": 1, "ps": 20,
+            }, cred)
+            if data.get("code") != 0:
+                return {"ok": False,
+                        "error": f"取楼中楼失败：code={data.get('code')} {data.get('message') or ''}".strip()}
+            rows = [_reply_row(r) for r in ((data.get("data") or {}).get("replies") or [])]
+            target = next((r for r in rows if r["rpid"] == rpid), None)
+            if not target:
+                return {"ok": False, "error": "这栋楼里没找到你指定的那条回复（可能已删除，或 root / rpid 填错了）"}
+            if target.get("root") and int(target["root"]) != root:
+                return {"ok": False, "error": "目标回复不属于你给的这栋楼（root 与实际楼层不一致）"}
+            sample = [r for r in rows if r["rpid"] != rpid]
+            return {"ok": True, "target": target, "sample": sample, "same_thread": True}
+
+        # ② 目标是一级评论：按热度翻页找
+        for pn in range(1, _FETCH_MAX_PAGES + 1):
+            data = await _get_comment_json(_COMMENT_LIST_API, {
+                "oid": aid, "type": 1, "pn": pn, "ps": 20, "sort": 2,
+            }, cred)
+            if data.get("code") != 0:
+                return {"ok": False,
+                        "error": f"取评论列表失败：code={data.get('code')} {data.get('message') or ''}".strip()}
+            rows = [_reply_row(r) for r in ((data.get("data") or {}).get("replies") or [])]
+            target = next((r for r in rows if r["rpid"] == rpid), None)
+            if target:
+                if target.get("root") and int(target["root"]) != rpid:
+                    return {"ok": False, "error": "目标其实是一条楼中楼回复，请把 root 一起传上来"}
+                sample = []
+                try:
+                    sub = await _get_comment_json(_COMMENT_REPLY_API, {
+                        "oid": aid, "type": 1, "root": rpid, "pn": 1, "ps": 20,
+                    }, cred)
+                    if sub.get("code") == 0:
+                        sample = [_reply_row(r) for r in ((sub.get("data") or {}).get("replies") or [])]
+                except Exception:
+                    sample = []      # 楼中楼取不到不影响目标判定，但会记成「样本不足」
+                return {"ok": True, "target": target, "sample": sample, "same_thread": False}
+            if not rows:
+                break
+        return {"ok": False,
+                "error": f"在前 {_FETCH_MAX_PAGES} 页评论里没找到 rpid={rpid}（可能已删除，或它不是这条视频的一级评论）"}
+    except Exception as e:
+        return {"ok": False, "error": f"取评论数据失败：{type(e).__name__}: {e}"}
+
+
+def _nested_gate(target: dict, sample: list) -> tuple:
+    """判「要回复的那条评论 + 它所在的楼」够不够格。
+
+    ⚠️ 入参**全部来自接口**（_fetch_reply_context 取回来的），不接受模型自报。
+
+    返回 (拒因, 说明)：
+      · 拒因为空串 ⇒ 放行
+      · 说明是给人看的补充（例如「样本不足，未做整楼判断」），不影响放行
+    """
+    text = str(target.get("text") or "")
+    rc = int(target.get("rcount") or 0)
+
+    # ── ① 楼层本身：人太多就别挤 ──
+    if rc > _NESTED_MAX_RCOUNT:
+        return (f"那条评论底下已经有 {rc} 条回复了（超过 {_NESTED_MAX_RCOUNT} 条）—— 挤进去没人看得见，"
+                "而且「和一大群人一起回同一条」是最像机器人的行为。换一条冷一点的，或者这一轮不回。", "")
+
+    # ── ② 这条留言像是 AI / 机器人发的 ⇒ 不回 ──
+    if _looks_like_ai(text):
+        return ("那条留言看措辞像 AI / 机器人发的（接口取回的原文里出现了「作为AI」「由AI生成」这类自称），"
+                "不回 —— 跟机器人对话没有意义，两个机器人在评论区互相回复也最显眼。换一条真人写的。", "")
+
+    # ── ③ 这一楼的气氛：在对骂 / 在抵触玩梗 ⇒ 躲开 ──
+    thread_text = "\n".join([text] + [str(r.get("text") or "") for r in sample])
+    low_thread = thread_text.lower()
+    for w in _NESTED_ATTACK:
+        if w in low_thread:
+            return ("这一楼在吵架（出现了人身攻击），不进去 —— 掺和进去只会变成拱火。"
+                    "换一条正常讨论的，或者这一轮不回。", "")
+    if any(w in low_thread for w in _NESTED_MEME):
+        for w in _NESTED_AVOID:
+            if w in low_thread:
+                return (f"这一楼在抵触玩梗（出现了「{w}」），别进去 —— "
+                        "在这种楼里插一句，只会被当成同一类人在拱火。换一条正常讨论的。", "")
+
+    # ── ④ 那条评论本身 ──
+    t = re.sub(r"_|[^\w]+", "", text, flags=re.UNICODE)
+    if not t:
+        return ("目标评论的正文是空的（接口返回里没有内容），没法判断，不回。", "")
+    n = len(t)
+    if n < 10:
+        return (f"那条评论去掉标点只有 {n} 个字 —— 这种基本是玩梗或一句情绪，接不上话。"
+                "换一条，或者这一轮不回。", "")
+    low = t.lower()
+    for w in _NESTED_MEME:
+        if w in low and n < 20:
+            return (f"那条评论是「{w}」这类梗 / 纯情绪（去标点 {n} 字），不接。"
+                    "要找有信息量的：讲了自己的经历、纠了错、补了数据、提了一个具体问题。", "")
+    if len(set(t)) <= 3:
+        return ("那条评论基本是重复字符（刷屏式），不接。", "")
+
+    # ── ⑤ 整栋楼：**样本不够就不发**（不能嘴上说"没判断"、手上照发）──
+    usable = [str(r.get("text") or "") for r in sample if str(r.get("text") or "").strip()]
+    if len(usable) < _NESTED_MIN_SAMPLE:
+        return (f"这楼只有 {len(usable)} 条回复，不到 {_NESTED_MIN_SAMPLE} 条 —— "
+                "没法判断整楼质量，这一次不回（宁可不回，也不在「没看过」的情况下发出去）。"
+                "换一栋回复多一点的楼，或者这一轮不回。", "")
+    junk = 0
+    for line in usable:
+        lt = re.sub(r"_|[^\w]+", "", line, flags=re.UNICODE)
+        short = len(lt) < 10
+        meme = any(w in lt.lower() for w in _NESTED_MEME) and len(lt) < 20
+        if short or meme:
+            junk += 1
+    ratio = junk / len(usable)
+    if ratio >= _NESTED_JUNK_RATIO:
+        return (f"这一楼已经变了味：接口取回的 {len(usable)} 条回复里，"
+                f"{junk} 条是玩梗或一句情绪（{ratio:.0%}）。别再往里添了 —— "
+                "挑一栋还在正常讨论的楼，或者这一轮不回。", "")
+    return ("", f"整楼抽样 {len(usable)} 条，梗/短句占 {ratio:.0%}")
+
+
 @tool()
-async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0) -> str:
+async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0, parent_text: str = "",
+                     parent_rcount: int = 0, thread_sample: str = "") -> str:
     """
     在B站视频下发表评论或回复某条评论
 
@@ -658,9 +980,20 @@ async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0) -> str:
     
     Returns:
         发表结果
+
+    说明：为了让筛选用的是**真实数据**而不是模型自报，回复别人时宿主会自己按
+    bvid/rpid/root 去 B站 接口取那条评论的正文、回复数和楼中楼抽样；
+    取不到就不发（返回 blocked_by=nested_data）。下面三个参数已废弃、会被忽略：
+    parent_text / parent_rcount / thread_sample —— 传了也不会被当作证据。
     """
     _deny = _guard("bili_reply")
     if _deny: return _deny
+    # ⚠️ 这三个是旧版「让模型自报证据」的残留，保留签名只为兼容，**一律忽略**。
+    #    判定真伪只能靠接口数据（见下面的 _fetch_reply_context）。
+    _ignored_self_report = (parent_text, parent_rcount, thread_sample)  # noqa: F841
+    # ⭐ 2026-10-28 自定义：按「怎么 @ 你」改写正文
+    #    （top=补 @ · dm 主评论去 @ · nestedMention 回复补 @）
+    text = _apply_mention(text, rpid)
     # ⭐ 语感闸门：撞八股 / 撞自己以前的 / 撞这条视频的热评 ⇒ 不发，把改法告诉模型
     _style = await _style_reason(text, bvid, get_cred())
     if _style:
@@ -669,6 +1002,21 @@ async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0) -> str:
     v = video.Video(bvid=bvid, credential=cred)
     info = await v.get_info()
     aid = info["aid"]
+
+    # ⭐ 2026-10-29（评审第 4 条）：回复别人时的质量闸门 —— **数据全部现取，不信模型**
+    _gate_note = ""
+    if _MENTION_NESTED and rpid > 0:
+        _ctx = await _fetch_reply_context(int(aid), int(rpid), int(root), cred)
+        if not _ctx.get("ok"):
+            return json.dumps({
+                "ok": False, "sent": False, "blocked_by": "nested_data",
+                "error": "没能拿到目标评论的真实数据，这一轮先不回：" + str(_ctx.get("error") or "未知原因"),
+            }, ensure_ascii=False)
+        _why, _gate_note = _nested_gate(_ctx["target"], _ctx.get("sample") or [])
+        if _why:
+            return json.dumps({
+                "ok": False, "sent": False, "blocked_by": "nested_quality", "error": _why,
+            }, ensure_ascii=False)
 
     try:
         if rpid == 0:
@@ -703,6 +1051,21 @@ async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0) -> str:
                 val = result.get(key)
                 if isinstance(val, (int, str)) and str(val).strip() and str(val) != "0":
                     out[key] = val
+        # ⭐ 2026-10-28 自定义：第三种 @ 方式 —— 主评论不带 @，改由私信把这条评论发给主人
+        # ⭐ 2026-10-29：**没有 msg_key 就不算发出去**；但评论已经发出了，
+        #    所以这里只标注「评论成功、私信失败」，绝不因此重发评论（否则就重复了）。
+        if _MENTION_MODE == "dm" and rpid == 0 and _MENTION_UID > 0:
+            try:
+                ok, why = await _share_comment_by_dm(_MENTION_UID, bvid, text)
+                out["dm_shared"] = bool(ok)
+                if not ok:
+                    out["dm_error"] = (why or "私信没拿到回执") + "（评论本身已发出，请不要重发评论）"
+            except Exception as _e:
+                out["dm_shared"] = False
+                out["dm_error"] = f"{type(_e).__name__}: {_e}"[:140] + "（评论本身已发出）"
+        # ⭐ 2026-10-29：把闸门的补充说明带回去（例如「样本不足，未做整楼判断」）
+        if _gate_note:
+            out["gate_note"] = _gate_note
         return json.dumps(out, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)

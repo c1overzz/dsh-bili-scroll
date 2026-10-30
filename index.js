@@ -28,8 +28,14 @@ import { join, dirname } from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { McpClient } from './lib/mcp.mjs'
+// ⭐ 2026-10-29：两条入口（值班轮 overlay / 内部 MCP）共用的 env 与重试判定，
+//    抽成纯函数放 lib 里，方便直接拿真值跑测试。
+import { mentionEnvFrom } from './lib/mention-env.mjs'
+import { dmRetryAllowed } from './lib/dm-retry.mjs'
 import { verifyRecent, appendVerifyToReport } from './lib/verify.mjs'
 import { WINDOWS, stateDirOf, readJson, writeJson, ensureHomeFiles, ensureCharter, charterPath, inWindow, dayKey, seenDay } from './lib/state.mjs'
+// ⭐ 2026-10-30：分时计划「还能不能复用」的判据抽成纯函数，测试跑的就是这一份
+import { planSignature, planReusable, carryRanSlots } from './lib/slot-plan.mjs'
 import { diagnoseRound } from './lib/diagnose.mjs'
 import { loginStart, loginPoll, saveCredential, renderQrPng } from './lib/login.mjs'
 import { resolveUid } from './lib/uid.mjs'
@@ -73,6 +79,34 @@ export const Config = !z ? undefined : z.object({
   commentPerRound: z.natural().default(1).extra('volatile', true),
   /** ⭐ 要 @ 谁（B站 昵称）；**留空 = 不发评论** —— 评论存在的意义就是 @ 那一下 */
   mentionName: z.string().default('').extra('volatile', true),
+  /** ⭐ 2026-10-28 自定义：**主评论里怎么 @ 你**
+   *    top = 主评论正文里直接 @（原来那套）
+   *    dm  = 主评论不带 @，发完由宿主私信把「评论原文 + 视频链接」发给你
+   *  （「在有意思的评论下 @ 你」曾经是这里的第三档，2026-10-28 拆成独立开关 nestedMention ——
+   *    它跟"主评论怎么写"是两回事，混在一起既表达不了组合，还把写操作次数搞成了两倍。）
+   */
+  mentionMode: z.string().default('top').extra('volatile', true),
+  /** ⭐ 2026-10-28 自定义：**在有意思的评论下 @ 你**（独立开关，默认关）
+   *  开了之后：读评论时碰到有价值的留言，就在**那条留言下面**回一句，开头 @你。
+   *  注意这跟「只回楼中楼」(replyToComments) 不是一回事 —— 那个是回复"别人回复我的"，
+   *  这个是主动去回复"我看到的别人的评论"。 */
+  nestedMention: z.boolean().default(false).extra('volatile', true),
+  /** 每轮最多在几条评论下面 @ 你（0 = 不在评论区回复） */
+  nestedPerRound: z.natural().default(1).extra('volatile', true),
+  /** ⭐ 2026-10-28 自定义：**分时随机** —— 一天要刷 perDay 条，就摊到 perDay 个随机时间点上，
+   *  每个点只挑 1 条，不再"到点一口气刷 5 条"。
+   *  ⚠️ 2026-10-29（评审第 3 条）：**默认改成 false**。它是新行为，不该在升级时
+   *  悄悄改变老用户"每个谷时窗口跑一轮"的节奏 —— 想要的人自己去设置页打开。 */
+  spread: z.boolean().default(false).extra('volatile', true),
+  /** ⭐ 2026-10-30：**当天复用同一个会话**（默认开）
+   *  一天要跑好几轮，每轮都开新会话 ⇒ 章程（16KB）、人设、AGENTS.md 每次都要重新进上下文。
+   *  复用之后这些只在第一轮付一次；前几轮挑过什么它也记得，判重更准。
+   *  按天换新（跨天重开），不会无限滚。想回到"每轮全新"就关掉。 */
+  reuseSession: z.boolean().default(true).extra('volatile', true),
+  /** ⭐ 2026-10-30：**同一天最多复用几轮**（默认 10）
+   *  上下文是一路累加的：每轮 +2 万多 token，5 轮就 13 万，20 轮直接几十万。
+   *  超过这个数就主动开新会话 —— 顺便让新一轮把最新的判重表重读一遍。 */
+  reuseSessionMax: z.natural().default(10).extra('volatile', true),
   /** 关注关键词（空了用章程里默认那几组） */
   keywords: z.array(z.string()).default([]).extra('volatile', true),
   /** Python：指向 venv 里的那个最好 */
@@ -265,7 +299,7 @@ function reportMeta() {
     personaPrompt: '',
     perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
     dmMode: 'only', dmUid: 0,
-    keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, favFolderId: 0,
+    keywords: [], commentPerRound: 1, mentionName: '', mentionMode: 'top', nestedMention: false, nestedPerRound: 1, spread: false, reuseSession: true, reuseSessionMax: 10, pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, favFolderId: 0,
     // ⭐ 2.3.0：手动轮 / 抓取量 / 排除词 / 评论长度 —— 少一项 normalize 就会把用户存的值丢掉
     manualMax: 3, manualCooldownMin: 10, searchSort: 'pubdate', searchPages: 2, fetchPerRound: 8, excludeWords: [], commentLength: 'medium',
   }
@@ -315,6 +349,20 @@ function reportMeta() {
     if ('replyPerRound' in p) p.replyPerRound = Math.max(1, Math.min(Number(p.replyPerRound) || 1, 10))
     if ('favFolderId' in p) p.favFolderId = Math.max(0, Math.floor(Number(p.favFolderId) || 0))
     if ('commentPerRound' in p) p.commentPerRound = Math.max(0, Math.min(Number(p.commentPerRound) || 0, 20))
+    // ⭐ 2026-10-28 自定义：主评论的 @ 方式只认 top / dm；
+    //    以前存过 'nested' 的（那会儿楼中楼是第三档）在这里**迁移成 top**，不让它变成非法值。
+    if ('mentionMode' in p) {
+      const v = String(p.mentionMode)
+      p.mentionMode = ['top', 'dm'].includes(v) ? v : 'top'
+    }
+    // 「在有意思的评论下 @ 你」是独立开关，跟 mentionMode 互不影响
+    if ('nestedMention' in p) p.nestedMention = Boolean(p.nestedMention)
+    if ('nestedPerRound' in p) p.nestedPerRound = Math.max(0, Math.min(Number(p.nestedPerRound) || 0, 5))
+    if ('spread' in p) p.spread = Boolean(p.spread)
+    // ⚠️ 2026-10-29（评审第 3 条）：这里**不再**替用户把 autoComment 改成 true。
+    //    上一版为了让「投递方式=评论」能真的发出去，在 clampPatch 里强制置 true ——
+    //    但那会覆盖用户自己关掉的开关（升级或切换模式时偷偷打开"拿他的号说话"）。
+    //    现在只由界面在**用户主动切换投递方式**时一起提交两个键；这里保持用户原值。
     return p
   }
 
@@ -341,6 +389,37 @@ function reportMeta() {
     if (Array.isArray(raw._set)) return new Set(raw._set)
     return new Set(Object.keys(DEFAULTS).filter((k) => k in raw && JSON.stringify(raw[k]) !== JSON.stringify(DEFAULTS[k])))
   })()
+
+  /**
+   * ⭐ 2026-10-30：**默认值改过之后，旧配置里的"旧默认"要跟着走。**
+   *
+   * 实际踩到的：`spread`（分时随机刷）在 10-28 那版默认是 `true`，用户没动过它，
+   * 但 config.json 里因此存了 `spread: true`。10-29 把默认改成 `false` 之后，
+   * `loadCfg()` 那条「和默认值不一样 ⇒ 说明用户显式设过 ⇒ 以本地为准」的规则
+   * 就把这个 `true` 当成"用户选的"永久保留了 —— 于是设置页显示关闭、实际却一直在分时。
+   *
+   * 判据：**这个键从没进过 `_set`（用户没在面板里点过）**，且值正好等于旧默认值
+   *       ⇒ 它是旧默认留下的，改成新默认。
+   * 只要用户真点过一下，`_set` 里就会有它，绝不会被这条迁移覆盖。
+   */
+  const DEFAULT_MIGRATIONS = [
+    { key: 'spread', oldDefault: true, newDefault: false },
+  ]
+  try {
+    const raw = readJson(cfgFile, {})
+    const setList = Array.isArray(raw._set) ? raw._set : []
+    let changed = false
+    for (const m of DEFAULT_MIGRATIONS) {
+      if (setList.includes(m.key)) continue                       // 用户设过 ⇒ 不动
+      if (!(m.key in raw)) continue
+      if (JSON.stringify(raw[m.key]) !== JSON.stringify(m.oldDefault)) continue
+      if (JSON.stringify(DEFAULTS[m.key]) === JSON.stringify(m.oldDefault)) continue  // 默认没变过
+      raw[m.key] = m.newDefault
+      changed = true
+      log(`配置迁移：${m.key} 是旧默认值（${JSON.stringify(m.oldDefault)}），你没设过它 ⇒ 改成新默认 ${JSON.stringify(m.newDefault)}`)
+    }
+    if (changed) writeJson(cfgFile, raw)
+  } catch { /* 迁移失败不影响启动 */ }
   const CFG_SIG = ['perDay', 'mentionName', 'replyToComments', 'overlayMcp']   // 靠这几个键认出"哪一行是我们"
   let settingsRow = { at: 0, row: null }
   /**
@@ -463,6 +542,16 @@ function reportMeta() {
   const persistCfg = async (patch) => {
     const clean = clampPatch(patch)
     saveCfg(clean)
+    // ⭐⭐ 2026-10-30（用户问「每个开关都有用吗」时查出来的第 2 处）：
+    //    私信监听的定时器只在**插件挂载时**按当时的 `dmWatchMinutes` 建一次
+    //    ⇒ 用户把间隔从 1 分钟改成 10 分钟，界面显示改了、`dmTick` 每跳也重读配置，
+    //      但**定时器本身的周期没变** ⇒ 实际还是每分钟查一次 ✗
+    //    （这跟「开关有没有用」是同一个毛病：值读到了，可它驱动的东西没重建。）
+    //    ⇒ 间隔或开关一变就重建那个定时器。重建很便宜（只是 clearInterval + setInterval），
+    //      而且 startDmWatch 自己有 try/catch，不会因为这一步把保存搞失败。
+    if ('dmWatchMinutes' in clean || 'dmWatch' in clean) {
+      try { startDmWatch() } catch (e2) { log('重建私信监听失败（不影响保存）：' + String(e2?.message ?? e2)) }
+    }
     const host = await saveCfgHost(clean)
     // 宿主写成功 ⇒ 恢复对账；失败 ⇒ 记成"本地优先"，别让界面把它们压回去
     // ⭐ 无条件本地优先（2026-10-18 第二次修）：
@@ -507,7 +596,17 @@ function reportMeta() {
 
   let mcp = null
   let mcpKey = ''
-  const mcpKeyNow = () => `${cfg.pythonPath}|${join(stateDir, 'mcp_server.py')}`
+  /**
+   * ⭐ 2026-10-29（评审第 5 条）：**「怎么 @ 你」这套配置，两条入口必须拿到同一份**。
+   *   值班轮走 overlay 的 env；而插件自己起的这份内部 MCP（宿主工具 bili_reply 走它）
+   *   以前只传 uvEnv() —— 于是 BILI_MENTION_* 全是空的：
+   *     · `_MENTION_NESTED` 默认 False ⇒ **评论闸门在宿主这条路上根本不执行**
+   *     · `_MENTION_NAME` 空 ⇒ 连 @ 都不会补
+   *   现在统一走 lib/mention-env.mjs 里的纯函数，overlay 和内部 MCP 各调一次。
+   */
+  const mentionEnv = () => mentionEnvFrom(cfg, dmUidCache)
+  // ⭐ 配置变了要重建 MCP 进程（不然改了设置、闸门还是按旧配置跑）
+  const mcpKeyNow = () => `${cfg.pythonPath}|${join(stateDir, 'mcp_server.py')}|${JSON.stringify(mentionEnv())}`
 
   const ensureMcp = async () => {
     if (mcp?.running && mcpKey === mcpKeyNow()) return mcp
@@ -521,7 +620,8 @@ function reportMeta() {
       cwd: stateDir,                     // 凭证落在家里 ✓
       // ⭐ 这个内置的 Python MCP 会往 stdout 打中文（ensure_ascii=False）；
       //    Windows 默认 GBK 的话，中文/emoji 一进管道就可能炸 ⇒ 钉死 UTF-8
-      env: uvEnv(),
+      // ⭐ 2026-10-29：再把「怎么 @ 你」那套配置一起传下去 —— 跟值班轮 overlay 同一份
+      env: uvEnv({ ...mentionEnv() }),
       log,
     })
     return mcp
@@ -728,6 +828,7 @@ function reportMeta() {
       bvid: { type: 'string', description: 'BV号' },
       text: { type: 'string', description: '评论正文（短、干净、纯文本 @；别写敏感词）' },
       rpid: { type: 'number', description: '要回复的评论 id（0/不填 = 发新评论）' },
+      root: { type: 'number', description: '楼层根评论 id（回复楼中楼里的某条回复时必填；回复一级评论不用填）' },
       force: { type: 'boolean', description: '本人当场让你发的，传 true 越过"自动评论关着"的闸' },
     },
     async execute(args) {
@@ -742,10 +843,15 @@ function reportMeta() {
             : '要发评论得同时满足两条：设置里开着「自动评论并 @ 你」、并且填了「要 @ 谁」。或者本人当场让你发时传 force: true。',
         }
       }
+      // ⚠️ 2026-10-29（评审第 5 条）：这里必须跟后台那条路径参数一致 ——
+      //    root 要转发（否则楼中楼回复会挂错楼层）；parent_text / parent_rcount /
+      //    thread_sample 是旧版「让模型自报证据」的残留，**不再转发**（Python 侧也一律忽略），
+      //    筛选用的是 Python 自己按 bvid/rpid/root 现取的接口数据。
       return call('bili_reply', {
         bvid: String(args.bvid ?? ''),
         text: String(args.text ?? ''),
         rpid: Number(args.rpid) || 0,
+        root: Number(args.root) || 0,
       })
     },
   })
@@ -1105,7 +1211,8 @@ function reportMeta() {
   let dmUidCache = 0
   async function warmDmUid() {
     if (Number(cfg.dmUid) > 0) return Number(cfg.dmUid)
-    if (cfg.dmMode === 'off') return 0
+    // ⭐ 2026-10-28 自定义：选了「私信把评论发给你」时，就算投递方式关着也要把 UID 查出来
+    if (cfg.dmMode === 'off' && String(cfg.mentionMode || 'top') !== 'dm') return 0
     const name = String(cfg.mentionName || '').trim()
     if (!name) return 0
     try {
@@ -1115,7 +1222,19 @@ function reportMeta() {
     } catch (e) { log('查私信 UID 出错：' + String(e?.message ?? e)); return 0 }
   }
 
-  const promptFor = (why = 'auto') => {
+  /**
+   * @param {string} why            这一轮是谁触发的
+   * @param {object} opts
+   * @param {boolean} opts.resumed  这一轮是**接着当天同一个会话**聊的
+   *
+   * ⭐ 2026-10-30：续会话时**不再内联章程**。
+   *   章程（duty.md）有 12737 字符 ≈ 7600 token，以前**每一轮**都整份塞进提示词。
+   *   可一旦续上同一个会话，它早就在上下文里了 —— 再塞一遍纯属重复付费，
+   *   还会让"这一轮该干什么"被两遍章程冲淡。
+   *   所以续会话时只说一句"还按上面那份章程来"。
+   */
+  const promptFor = (why = 'auto', opts = {}) => {
+    const resumed = Boolean(opts && opts.resumed)
     // ⭐ 章程取哪一份：家里那份优先（ensureCharter 保证铺好；他改过的话就是他那份，升级的事由 ensureCharter 记账处理）
     const duty = charterPath(pluginDir, stateDir)
     // ⭐ 2026-10-19（issue #36）：这里以前是**在路径字符串上**做 split('<家目录>') —— 空操作 ✗
@@ -1123,7 +1242,7 @@ function reportMeta() {
     //    现在改成：宿主读内容 → 把占位符换成真路径 → 内联进提示词（也省掉它一次读文件）✓
     let charterText = ''
     try {
-      charterText = readFileSync(duty, 'utf8').split('<家目录>').join(stateDir)
+      if (!resumed) charterText = readFileSync(duty, 'utf8').split('<家目录>').join(stateDir)
     } catch { /* 读不到就退回"让它自己读路径"（下面提示词里会说） */ }
     const kws = Array.isArray(cfg.keywords) ? cfg.keywords.filter(Boolean) : []
     // ⭐ 开场先让它读**工作区**的 AGENTS.md —— 这一轮的工作目录就是使用者的工作区，
@@ -1215,7 +1334,11 @@ function reportMeta() {
       + (charterText
           ? '下面是**值班章程**（里面的「<家目录>」已经替换成真实绝对路径了）—— 严格按它执行：\n\n'
             + charterText + '\n\n按上面的章程刷一轮 B站，'
-          : `然后读章程 ${duty}，按里面的要求刷一轮 B站（章程里的 <家目录> 指的是 ${stateDir}），`)
+          : (resumed
+            // ⭐ 续会话：章程已经在上下文里了，不再重复塞一遍（省 ~7600 token/轮）
+            ? '**继续按上面那份值班章程刷一轮 B站**（章程没变，不用我再贴一遍）。这一轮是接着今天前面几轮做的 —— '
+              + '前几轮挑过什么、跳过什么你都记得，**别重复挑同一条**。'
+            : `然后读章程 ${duty}，按里面的要求刷一轮 B站（章程里的 <家目录> 指的是 ${stateDir}），`))
       + (cfg.reportLevel === 'brief'
         ? `日报写成薄版：每条一两行（值不值得 + 链接）就够，别写长摘要。`
         : cfg.reportLevel === 'off'
@@ -1223,9 +1346,12 @@ function reportMeta() {
           : `把报告写到 ${join(outDir, `${dayKey()}.md`)}。`)
       + (cfg.reportLevel === 'off' ? '' : `⚠️ 今天那份报告里可能已经有上一轮写的东西 —— 有就**追加到末尾**，别覆盖（配额按全天算）。`)
       + (cfg.reportLevel === 'off' ? '' : '⭐ 报告里**每挑中一条**，第一行写成 `### BV号`（例：`### BV1xxxxxxx`）—— 宿主**就数这些标题行**算今天挑了几条：漏写当成没挑中，给只是提到 / 跳过的视频加上标题则当成挑中。')
-      + (already > 0
-        ? `今天已经挑过 ${already} 条了 ⇒ **这一轮最多再挑 ${left} 条**（「每天最多 ${quota} 条」是全天总量，不是每轮）；`
-        : `今天最多挑 ${quota} 条；`)
+      + (cfg.spread && !isManual
+        ? `⭐ **分时模式**：今天要看的 ${quota} 条已经摊到 ${quota} 个随机时间点上，**这一轮只挑 1 条**（挑完就收，别一口气多挑）。`
+          + (already > 0 ? `今天已经挑过 ${already} 条了，剩下 ${left} 条留到后面的时间点。` : '')
+        : (already > 0
+          ? `今天已经挑过 ${already} 条了 ⇒ **这一轮最多再挑 ${left} 条**（「每天最多 ${quota} 条」是全天总量，不是每轮）；`
+          : `今天最多挑 ${quota} 条；`))
         + (isManual
             ? '\n\n⭐ **这一轮是「手动触发」**：只为"现在就想看一眼"，**不占用今天的自动额度** '
               + `（自动那边今天还能挑 ${left} 条）。所以只挑 ${manualMax} 条以内、挑完就收，别把全天要看的量一次挑光。`
@@ -1269,10 +1395,42 @@ function reportMeta() {
         } catch { return '' }
       })()
       + `自动评论并 @ ${cfg.mentionName || '（还没填要 @ 谁）'} 是${commentOn
-        ? `开着的（每轮最多 ${cfg.commentPerRound} 条评论，每条在正文里纯文本 @ ${cfg.mentionName}，150 字内）`
+        ? `开着的（每轮最多 ${cfg.commentPerRound} 条评论，150 字内）。**怎么 @ 他，按这一条来：** `
+          + (({
+            top: `在**每条评论正文里**直接写「@${cfg.mentionName}」；⚠️ @ 和名字中间**不要加空格**（B站 只认紧挨着的写法，加了空格等于没 @ 到）。`,
+            dm: `**主评论正文里一个 @ 都不许出现**（就正常说话）。发完评论后宿主会自动把「评论原文 + 视频链接」私信给他，`
+              + `所以你把**评论本身写完整、能独立看懂**就行。`,
+          })[String(cfg.mentionMode || 'top')] || `在正文里直接写「@${cfg.mentionName}」。`)
         : (dmModeEff === 'only'
           ? '关着的 —— 当前是「**只私信**」模式：**这一轮一条公开评论都不许发**，改走私信'
           : '关着的（只写报告，别发评论）')}。`
+      // ⭐ 2026-10-28 自定义：**在有意思的评论下 @ 你**（独立开关，默认关）
+      //    这跟「只回楼中楼」是两件事：那个是回"别人回复我的"，这个是主动回"我看到的别人的评论"。
+      + (commentOn && cfg.nestedMention && Number(cfg.nestedPerRound) > 0
+        ? `\n\n⭐ **另外：在有意思的评论下 @ 他**（这一轮最多 ${Number(cfg.nestedPerRound)} 条）。`
+          + `\n**「有意思」不等于「好笑」。下面三条至少满足一条才算：**`
+          + `\n  · 讲了**自己的经历或现场**（例如「我在那住过三年，视频里那家店去年就关了」）；`
+          + `\n  · **纠错或补充**了视频里说错 / 没说的（数据、时间线、型号、价格）；`
+          + `\n  · 提了一个**具体**的问题或反例（不是「真的吗」这种）。`
+          + `\n⛔ **明确不算**：玩梗、纯情绪、纯夸赞、复读热评 —— 比如「大肥鱼」「笑死」「绷不住了」`
+          + `「典」「前排」「三连了」，**这些一句都不许回**。`
+          + `\n📌 调 bili_reply 时**只需要传定位信息**：\`bvid\` + \`rpid\`（要回的那条评论 id）；`
+          + `如果那条是**楼中楼里的回复**，再把 \`root\`（它所在楼层的根评论 id）一起传。`
+          + `\n⭐ **正文、回复数、楼中楼抽样都不用你填** —— 宿主会自己按这三个 id 去 B站 接口现取，`
+          + `拿真实数据过闸门（这样你漏传或摘录也没法绕过）。取不到就不回，返回 blocked_by: nested_data。`
+          + `\n宿主会按下面这些条件拒（返回 blocked_by: nested_quality）：`
+          + `原文太短 / 是玩梗或纯情绪 / **那条评论已经有 20 条以上回复** / **这楼回复不到 3 条（样本不够，判不了整楼）** / `
+          + `**这一楼抽样的回复里大半是梗** / **那条留言看措辞像 AI 或机器人发的** / **这一楼在对骂或抵触玩梗**。`
+          + `被拒就换一条，或者这一轮不回。`
+          + `\n⛔ **别往人堆里挤**：回复数很多的楼、已经玩成梗的楼，一律跳过 —— `
+          + `挤进去没人看得见，而且「和一大群人一起回同一条」是最像机器人的行为。`
+          + `\n⛔ **AI / 机器人的留言不回**：出现「作为AI」「由AI生成」这类自称的，直接跳过 —— `
+          + `跟机器人对话没意义，两个机器人在评论区互相回复是最显眼的信号。`
+          + `\n⛔ **吵架的楼不进**：有人在对骂、或者有人明说「讨厌大肥鱼」「别刷了」这种抵触玩梗的 —— `
+          + `一律躲开。在那种楼里插一句，只会被当成同一类人在拱火。`
+          + `\n⛔ 别为了凑数去回：**没有够格的就一条都不回**（回 0 条完全正常）；`
+          + `⛔ 别回骂人 / 引战的；⛔ 别回自己发的评论。`
+        : '')
       + (dmOn
         ? `⭐⭐ **私信投递**：用 bili_send_message 把这一轮的结果发到 UID **${dmUidEff}**。`
           + `内容**别照抄评论那套**：把本轮每条值得的写成 **标题 + 链接 + 一句话理由**`
@@ -1330,7 +1488,12 @@ function reportMeta() {
     list.push('duty_paths', 'duty_report_append', 'duty_seen_append', 'duty_digest_append', 'duty_seen_recent')
     // ⭐ 2026-10-25：转写改成 job 模型（start / result）—— 慢活不该占住一次工具调用；
     //    老的 bili_transcribe 还留着（仍能用，但它会等到跑完，别在一轮里连用两条）
-    if (cfg.asrInstalled !== false) list.push('bili_transcribe', 'bili_transcribe_start', 'bili_transcribe_result')
+    // ⭐⭐ 2026-10-30 修（用户问「每个开关都有用吗」时查出来的）：这里以前读的是 `cfg.asrInstalled`，
+    //    而**这个键在 schema 和 DEFAULTS 里根本不存在** ⇒ 永远是 `undefined` ⇒ `!== false` 恒真
+    //    ⇒ 「本地转写」明明关着，三只转写工具照样下发到值班轮手里 ✗
+    //    （后果不只是多给工具：没装 faster-whisper 时它一试就报错，白烧一轮的 token。）
+    //    改成认**界面上那个真开关** `transcribe` —— 关着就不给，模型连名字都看不见。
+    if (cfg.transcribe) list.push('bili_transcribe', 'bili_transcribe_start', 'bili_transcribe_result')
     // ⭐⭐ 2.0.4（第三方体检第 3 条）：**"只发私信"时评论通道必须硬关** —— 以前只看 autoComment，
     //    用户以前开过自动评论、后来切到"只私信"，那个 true 还在 config 里 ⇒ 评论工具照样下发 ✗
     const dmOnly = String(cfg.dmMode || '').trim() === 'only'
@@ -1339,6 +1502,8 @@ function reportMeta() {
     //   模型手里压根没有这只工具 ⇒ 表现成"开关也开了、这一轮也跑了，但从来没发出去过" ✗
     //   ⇒ dmMode 不是 off、且填了收件人 UID 才放进去（关着就不给，白名单别松）
   if (String(cfg.dmMode || 'off') !== 'off' || cfg.dmWatch) list.push('bili_send_message')   // 2026-10-21：UID 可能靠昵称查，别再拿 dmUid>0 当条件
+    // ⭐ 2026-10-28 自定义：@ 方式选「私信把评论分享给你」时，私信这只手必须在
+    if (String(cfg.mentionMode || 'top') === 'dm' && !list.includes('bili_send_message')) list.push('bili_send_message')
     return list
   }
 
@@ -1428,6 +1593,10 @@ function reportMeta() {
         '          - ' + yq(posix(script)),
         '        env:',
         '          BILI_MCP_TOOLS: ' + yq(mcpWhitelist().join(',')),
+        // ⭐ 2026-10-28 自定义：把「怎么 @」下沉给 Python 那一侧强制执行，
+        //    不靠模型自觉 —— 它写错了这里会改写掉。
+        // ⭐ 2026-10-29：跟内部 MCP 共用 mentionEnv()，两条入口永远同一份配置
+        ...Object.entries(mentionEnv()).map(([k, v]) => '          ' + k + ': ' + yq(String(v))),
         '',
       )
     }
@@ -1573,6 +1742,56 @@ function reportMeta() {
     } catch { /* 没有锁 / 读不出来 / 写不进去都无所谓，靠 10 分钟过期兜底 */ }
   }
 
+  /* ⭐ 2026-10-30：**当天所有值班轮复用同一个会话。**
+   *
+   * 用户问的：「每次都会开个新对话，当天的都放在一个对话里会不会省一点」—— 会。
+   *
+   * 以前每轮都是全新会话 ⇒ 每一轮都要**重新读一遍章程（duty.md，16KB）+ 提示词**，
+   * 而这几轮干的是同一件事（读字幕、判断、写报告）。同一天复用之后：
+   *   · 章程、人设、AGENTS.md 只在第一轮进一次上下文，后面接着聊
+   *   · 前几轮挑过什么、为什么跳过，它自己记得 ⇒ 判重更准，也更像"同一个人连着看"
+   *   · 上下文太长时 DSH 会自己压缩（headless 支持 --session-id，历史由它带）
+   *
+   * 但**不能无限复用**：上下文越滚越贵，而且一轮跑歪了会污染后面几轮。
+   * 所以按**天**换新（跨天就开新的），并且留一个开关给想关掉的人。
+   *
+   * ⚠️ 这几个函数必须定义在 runDuty **之前** —— runDuty 里直接调用它们，
+   *    而 `const` 不像 `function` 那样会提升。
+   */
+  const dutySessionFile = join(stateDir, 'duty-session.json')
+  /**
+   * 读今天该续哪个会话。
+   * ⭐ 2026-10-30：加了**轮次上限**（cfg.reuseSessionMax，默认 10）。
+   *   上下文是一路累加的：每轮 +2 万多 token，5 轮就 13 万，20 轮直接几十万。
+   *   超过上限就主动开新的 —— 顺便让新一轮把**最新**的判重表重读一遍（比 5 轮前那份准）。
+   */
+  const readDutySession = (today) => {
+    if (!cfg.reuseSession) return ''
+    try {
+      const j = JSON.parse(readFileSync(dutySessionFile, 'utf8'))
+      // 只复用**同一天**的；跨天重开（不然上下文越滚越大，也不好按天对账）
+      if (!j || j.day !== today || typeof j.id !== 'string' || !j.id) return ''
+      const max = Math.max(1, Number(cfg.reuseSessionMax) || 10)
+      if (Number(j.used || 0) >= max) {
+        log(`今天的会话已经连着用了 ${j.used} 轮（上限 ${max}）⇒ 这一轮开个新的，别让上下文继续滚`)
+        return ''
+      }
+      return j.id
+    } catch { /* 没有就开新的 */ }
+    return ''
+  }
+  /** 记下会话 id；used = 这个会话已经跑过几轮（续一次 +1） */
+  const writeDutySession = (today, id, used) => {
+    try { writeFileSync(dutySessionFile, JSON.stringify({ day: today, id, used: Number(used) || 0, at: Date.now() }, null, 2), 'utf8') } catch { /* 写不了下次再认 */ }
+  }
+  /** 续会话时把计数 +1 */
+  const bumpDutySessionUsed = (today) => {
+    try {
+      const j = JSON.parse(readFileSync(dutySessionFile, 'utf8'))
+      if (j && j.day === today && j.id) writeDutySession(today, j.id, Number(j.used || 0) + 1)
+    } catch { /* 无所谓 */ }
+  }
+
   let dutyChild = null
   let dutyStartedAt = 0
   const runDuty = (why = 'window') => {
@@ -1586,6 +1805,15 @@ function reportMeta() {
         dutyChild = null
       }
     refreshCfg()          // ⭐ 设置页刚改过的值要立刻生效（config 是就地改的，快照会过期）
+    // ⭐ 2026-10-30：**没登录就别跑了**。
+    //   实际踩到：连续两天每轮都照常启动，字幕/评论/私信接口全部返回"未登录"，
+    //   白花一整轮 token，报告里只留下一句"评论没发出去"。这里提前挡掉，
+    //   并且**不消费分时时间点**（调用方看到 started:false 会保留待执行）。
+    if (!hasCredential()) {
+      const msg = '这一轮没跑：还没扫码登录 B站。去 设置 → 刷B站 → 扫码登录。'
+      log(msg)
+      return { started: false, why, error: msg, needLogin: true }
+    }
     const dsh = resolveDsh()
     // ⭐ 找不到 dsh 就别硬跑：以前会退化成裸 `dsh` ⇒ spawn 失败、只留 exit 1 + 一串乱码 ✗
     if (dsh.missing) {
@@ -1599,7 +1827,18 @@ function reportMeta() {
     const overlay = ensureOverlay()
       const args = [...dsh.args, '--profile', effectiveProfile()]
     if (overlay) args.push('--patch', overlay)
-    args.push(promptFor(why))
+    // ⭐ 2026-10-30：**同一天复用同一个会话**（省 token，也让判重更准）。
+    //    手动轮不续 —— 用户手动跑往往是想"干净地看一眼现在什么情况"，
+    //    接在前面几轮的上下文后面反而容易被带偏。
+    const todayKey = dayKey()
+    const reuseSid = why === 'manual' ? '' : readDutySession(todayKey)
+    if (reuseSid) args.push('--session-id', reuseSid)
+    // ⭐ 续会话时不再内联章程（它已经在上下文里了），省 ~7600 token/轮
+    args.push(promptFor(why, { resumed: Boolean(reuseSid) }))
+    if (reuseSid) {
+      bumpDutySessionUsed(todayKey)
+      log(`接着今天的会话跑（这个会话第 ${Number(readJson(dutySessionFile, {}).used || 0)} 轮，上限 ${Number(cfg.reuseSessionMax) || 10}）`)
+    }
     // ⭐ 这一轮的工作目录 = 使用者（或别的用户）的**工作区** —— 只有这样它的 `AGENTS.md` 才会自动加载。
     // ⭐ 工作目录 = **插件家**：那一轮**被沙箱关着**，只写得了自己工作目录里的东西 ✗
     //    （2026-10-14 教训：为了让它读工作区里的 AGENTS.md 把 cwd 改成工作区 ⇒
@@ -1653,6 +1892,16 @@ function reportMeta() {
     child.on('exit', (code) => {
       releaseRunLock()            // ⭐ 这一轮结束了，把锁放开（删不掉也没事，10 分钟自动过期）
       log(`刷B站结束（${why}，code=${code}）`)
+      // ⭐ 2026-10-30：把这一轮开出来的会话 id 记下来，供**当天后续几轮**接着用。
+      //    没续上（比如第一轮）才需要认领；已经续着的就沿用，不用再找。
+      try {
+        if (!reuseSid && code === 0 && why !== 'manual' && cfg.reuseSession) {
+          const id = discoverDmSession(dutyStartedAt)
+          // used 从 1 起算：这个会话已经跑过 1 轮了
+          if (id) { writeDutySession(todayKey, id, 1); log('今天的会话已记下：' + id.slice(0, 24) + '…（后面几轮接着这个聊，省 token）') }
+          else log('⚠️ 没找到这一轮的会话 id ⇒ 下一轮还是新会话（不影响结果，只是多花一点）')
+        }
+      } catch { /* 记不上就算了，不能影响收尾 */ }
       stubReportIfMissing(code)   // ⭐ 没写报告就补一份占位 —— 别让使用者什么都看不到
       try { writeRoundNotesToReport() } catch { /* 写不进去也不能炸 */ }
     // ⭐ 2026-10-20：这一轮跑成了、并且使用者选了收藏夹 ⇒ 把挑中的存进去（后台做，别拖住收尾）
@@ -1688,11 +1937,173 @@ function reportMeta() {
     child.on('error', (e) => { releaseRunLock(); log(`刷B站起不来：${e?.message ?? e}`) })
     // ⭐ 起不来/被杀掉也要把锁放开，否则之后每一轮都会被判成'上一轮还没结束' ✗
     child.on('close', () => { if (dutyChild === child) dutyChild = null })
-    return { started: true, why, profile: cfg.headlessProfile, cwd, log: logFile }
+    return { started: true, why, profile: cfg.headlessProfile, cwd, log: logFile, child }
    } catch (e) {
     log(`刷B站开跑失败（${why}）：${e?.stack ?? e}`)
     return { started: false, why, error: String(e?.message ?? e) }
    }
+  }
+
+  /**
+   * ⭐ 2026-10-29（评审第 1 条）：**「spawn 没抛异常」不等于「真的跑起来了」**。
+   *   spawn 成功只说明进程建出来了 —— dsh 起不来、profile 坏了、模型/凭据缺失时，
+   *   子进程会在几秒内直接退出（历史上有过"0.17 秒就结束、code=0、什么都没干"的坑）。
+   *   所以定时调度要用这个函数：**等一小会儿**，确认它没有马上死掉，才认为启动成功。
+   *
+   *   判定：
+   *     · 在 waitMs 内退出，code≠0  ⇒ 失败（附退出码）
+   *     · 在 waitMs 内退出，code=0  ⇒ 也算失败（跑一轮不可能这么快，多半是空转）
+   *     · 撑过 waitMs 还活着          ⇒ 成功
+   */
+  const runDutyConfirmed = (why, waitMs = 6000) => new Promise((resolve) => {
+    const r = runDuty(why)
+    if (!r || !r.started || !r.child) return resolve(r || { started: false, why, error: '没起来' })
+    const child = r.child
+    let done = false
+    const finish = (ok, error) => {
+      if (done) return
+      done = true
+      clearTimeout(timer)
+      try { child.removeListener('exit', onExit) } catch { /* 无所谓 */ }
+      resolve({ ...r, confirmed: ok, error: ok ? '' : error })
+    }
+    const timer = setTimeout(() => finish(true, ''), waitMs)
+    const onExit = (code) => {
+      if (code === 0) finish(false, `进程 ${waitMs / 1000} 秒内就退出了（code=0）—— 多半是空转，不是真的跑起来`)
+      else finish(false, `进程 ${waitMs / 1000} 秒内就退出了（code=${code}）`)
+    }
+    child.once('exit', onExit)
+    child.once('error', (e) => finish(false, 'spawn 报错：' + (e?.message ?? e)))
+  })
+
+  /* ─────────── 分时随机（2026-10-28 自定义） ───────────
+   * 用户的要求：一天刷 N 条，但**不要同一时间刷 N 条**。
+   * 做法：给「今天剩下的谷时」排 N 个时间点 —— 把可用的分钟均分成 N 段，
+   *      每段里随机取一分钟 ⇒ 既拉得开、又不固定。到点跑一轮，那一轮只挑 1 条。
+   * 计划落在 slots.json：重启不会重排、也不会把同一个点跑两遍。
+   */
+  const slotsFile = join(stateDir, 'slots.json')
+  // 从「现在」到今晚 23:59，所有落在启用谷时窗口里的分钟
+  const upcomingOffPeakMinutes = (now) => {
+    const out = []
+    const startMs = Math.ceil(now.getTime() / 60000) * 60000
+    const endOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 0).getTime()
+    for (let t = startMs; t <= endOfDay; t += 60000) {
+      const d = new Date(t)
+      if (['noon', 'night'].some((k) => cfg[k] && inWindow(d, WINDOWS[k]))) out.push(t)
+    }
+    return out
+  }
+  // ⭐ 分时排点：**只在真正可用的分钟里按比例抽**，相邻两点至少隔 minGap。
+  //    ⚠️ 2026-10-28 修：以前是"把 12:00–23:59 按时间轴切段、每段随机取一个、再吸附到最近的可用分钟"。
+  //    但中午 12–14 与夜间 18–09 之间那段 14–18 是空的（正峰时），而第二段恰好横跨空白
+  //    ⇒ 随机目标落进空档、吸附到最近的边界 ⇒ **每天第二个点都卡在 18:00 整**，
+  //    比固定时间还机械，跟"随机"的目的正好相反（实测连续五天全是 18:00）。
+  //    现在改成按"可用分钟列表"分片：空档天然不存在，吸附这一步也就不需要了。
+  //
+  //    ⭐ 2026-10-30（用户："我给了多少条，你就在我给的时间里跑完"）：
+  //       改成**按"可用分钟列表的下标"均分** —— 每个点从自己那一段里随机取一分钟。
+  //       这样不管可用时间是连续的 2 小时，还是"中午+夜间"两段拼起来，都能排满 N 个点。
+  //       （之前按 `总时长 / 条数` 算间隔，碰上中间有空档必然排不满：12 小时 ÷ 20 条
+  //         算出 36 分钟间隔，可真正能用的只有 8 小时，于是只排得出 12 个点。）
+  //
+  //    ⚠️ 排太密没意义（等于连发）。所以额外给一条**警告线**：平均间隔 < 5 分钟就出声，
+  //       但仍然按用户要求的条数排满 —— 该提醒的提醒，不替用户做决定。
+  const DENSE_WARN_GAP = 5 * 60000
+  /**
+   * ⭐ 2026-10-30（用户："不要有规律的间隔"）：
+   *   上一版是「把可用分钟等分成 N 段，每段随机取一分钟」—— 每段一样长，
+   *   于是间隔天然都差不多（实测 19/20/15/43 分钟，倍差只有 2.9），看着还是规律。
+   *
+   *   现在改成**间隔本身随机**，而且用**重尾分布**（指数分布）：
+   *   大多数间隔偏短、偶尔冒一个很长的 —— 这正是真人看视频的节奏
+   *   （有时连着看三条，有时隔两小时才想起来）。
+   *   实测倍差从 2.9 提到 66+：间隔里既有 3 分钟的，也有 6 小时的。
+   *
+   *   做法：
+   *     ① 生成 k-1 个指数分布权重（-ln(1-U)），归一化
+   *     ② 按权重把「可用分钟」切开 ⇒ 间隔自然有长有短
+   *     ③ 只占用 88% 的可用时间，首尾留白 ⇒ 起点不固定、终点不固定
+   *     ④ 每个点仍然落回真实可用分钟（空档天然跳过）
+   */
+  const spreadSlots = (mins, n) => {
+    if (!mins.length) return { times: [], wanted: Number(n) || 0, avgGapMin: 0 }
+    const wanted = Math.max(1, Number(n) || 1)
+    const L = mins.length
+    const k = Math.min(wanted, L)                 // 最多排到"每个可用分钟一个"
+    if (k === 1) return { times: [mins[Math.floor(Math.random() * L)]], wanted, avgGapMin: 0 }
+
+    // ① 指数分布权重 ⇒ 重尾（很多小的 + 少数很大的）
+    const w = []
+    for (let i = 0; i < k - 1; i++) w.push(-Math.log(1 - Math.random() * 0.999))
+    const sum = w.reduce((a, b) => a + b, 0)
+
+    // ② 只用 88% 的可用时间，首尾各留一点 ⇒ 起点不固定、终点不固定
+    const usable = Math.max(k - 1, Math.floor(L * 0.88))
+    const startMax = Math.max(1, L - usable)
+    const start = Math.floor(Math.random() * startMax)
+
+    // ③ 按权重累加推进
+    const idx = [start]
+    let acc = 0
+    for (let i = 0; i < k - 1; i++) {
+      acc += w[i] / sum
+      const want = start + Math.round(acc * usable)
+      const j = i + 1                                  // 这是第 j 个点（0 起算）
+      // ⭐⭐ 2026-10-30 修（压测 30 次里偶发 1 次"不严格升序"查出来的）：
+      //    以前上界写死成 `L - 1` —— 但**后面还有 k-1-j 个点要放**，
+      //    指数分布又是重尾的（末尾几个权重可能都很大）⇒ 后面几个点会一起撞到 L-1，
+      //    Math.min 把它们全压成同一个下标 ⇒ **排到同一分钟**。
+      //    tick 是按顺序消费时间点的，同一分钟两个点就会连开两轮（也是"规律"的破绽）。
+      //    ⇒ 上界改成「给后面每个点至少留 1 分钟」：L-1-(k-1-j) = L-k+j。
+      const cap = L - k + j
+      const next = Math.min(cap, Math.max(idx[idx.length - 1] + 1, want))
+      idx.push(next)
+    }
+
+    const out = idx.map((i) => mins[i])
+    const span = out[out.length - 1] - out[0]
+    const avgGapMin = Math.round(span / (out.length - 1) / 60000)
+    return { times: out, wanted, avgGapMin }
+  }
+  const ensureSlotPlan = (now) => {
+    const today = dayKey(now)
+    // ⚠️ 别写 `cfg.perDay || 5`：`||` 会把 0 当成 5。0 是"不自动刷"这个有意义的取值。
+    const quotaRaw = (cfg.perDay === undefined || cfg.perDay === null || cfg.perDay === '') ? 5 : Number(cfg.perDay)
+    const quota = Math.max(1, Math.min(Number.isFinite(quotaRaw) ? quotaRaw : 5, 50))
+    // ⭐⭐ 2026-10-30（「每个开关都有用吗」查出来的第 3 处）：
+    //    以前只要 `day` 对得上就直接复用旧计划 —— 但计划是**按当时的开关和条数**排的：
+    //      · 早上两个窗口都关着 ⇒ 排出 0 个点并存进 slots.json
+    //      · 中午用户把「夜间」打开 ⇒ 计划还是那份空的，**当天一个点都不会跑** ✗
+    //      · 同理：把「每天挑几条」从 5 改成 10，当天也还是只排 5 个点
+    //    ⇒ 计划里记下"按什么排的"（sig），对不上就重排。判据在 lib/slot-plan.mjs（测试跑同一份）。
+    const wantSig = planSignature(cfg)
+    const old = readJson(slotsFile, null)
+    if (planReusable(old, today, wantSig)) return old
+    const { times, avgGapMin } = spreadSlots(upcomingOffPeakMinutes(now), quota)
+    const { done, ranTimes } = carryRanSlots(times, old, today)
+    const plan = { day: today, times, done, madeAt: now.toISOString(), wanted: quota, avgGapMin, sig: wantSig }
+    if (ranTimes.length) plan.carried = ranTimes
+    if (old && old.day === today) {
+      log(`分时计划重排（${today}）：条数 ${old.wanted ?? '?'} → ${quota}，窗口 ${old.sig ?? '（旧版没有）'} → ${wantSig}`
+        + (ranTimes.length ? `；今天已经跑过 ${ranTimes.length} 个点，保留不重跑` : ''))
+    }
+    try { writeFileSync(slotsFile, JSON.stringify(plan, null, 2), 'utf8') } catch { /* 写不进去就只在本进程里用 */ }
+    if (times.length) {
+      log(`分时计划（${today}，要 ${quota} 条，排了 ${times.length} 个点，平均间隔 ${avgGapMin} 分钟）：`
+        + times.map((t) => new Date(t).toTimeString().slice(0, 5)).join(' / '))
+      // ⭐ 2026-10-30：排太密要出声（但仍然按用户要求排满 —— 该提醒的提醒，不替他决定）
+      if (times.length > 1 && avgGapMin * 60000 < DENSE_WARN_GAP) {
+        log(`⚠️ 太密了：平均 ${avgGapMin} 分钟一轮，等于连着发。`
+          + `想让间隔拉开，要么把条数降下来，要么把「夜间」窗口也打开（可用时长从 2 小时变成 8 小时）。`)
+      }
+      if (times.length < quota) {
+        log(`⚠️ 排不满：要 ${quota} 条，可用分钟只够 ${times.length} 个点。`)
+      }
+    } else {
+      log(`分时计划（${today}）：今天剩下的时间里没有可用的谷时窗口（检查「中午/夜间」开关和时间段）`)
+    }
+    return plan
   }
 
   /* ─────────────── 谷时定时器 ───────────────
@@ -1701,15 +2112,78 @@ function reportMeta() {
    *    （`dsh: fatal uncaught exception`）。⇒ **定时器回调必须自己兜住所有异常**：
    *    插件再错也只该"这一轮没跑成"，绝不该杀宿主。
    */
-  const tick = () => {
+  // ⭐ 2026-10-30：tick 是 async 的（里面要 await 启动确认），加个防重入标记
+  let ticking = false
+  const tick = async () => {
+    // ⭐ 2026-10-30：**防重入**。tick 现在是 async 的，里面有 `await runDutyConfirmed()`
+    //    （最长等 6 秒），而 setInterval 是 60 秒一跳 —— 平时够，但一旦机器卡顿、
+    //    或将来把确认窗口调大，就可能两跳叠在一起 ⇒ 同一分钟启动两轮。
+    //    runDuty 自己有锁兜底，但账（slots.done / windows 标记）会写乱，所以这里直接挡住。
+    if (ticking) return
+    ticking = true
     try {
       refreshCfg()                    // ⭐ 定时器活得比设置页久：每一跳都重新读一遍配置
       if (!cfg.peakValley) return
+      // ⭐ 2026-10-28 自定义：「私信分享评论」要知道发给谁 —— 这一轮开跑前先把这个 UID 查出来
+      if (String(cfg.mentionMode || 'top') === 'dm' && !(Number(cfg.dmUid) > 0) && !dmUidCache) {
+        try { await warmDmUid() } catch { /* 查不到就这一轮不带 uid，评论照发 */ }
+      }
       const now = new Date()
       const st = readJson(dutyStateFile, {})
       const today = dayKey(now)
       // ⭐ 闸门看的是「今天已经**挑到几条**」（从今天的报告里数出来），不是「跑了几轮」
       if (autoPickedToday(now) >= Number(cfg.perDay || 0)) return
+      // ⭐⭐ 2026-10-28 自定义：**分时随机** —— 到点跑一轮，那一轮只挑 1 条
+      //    ⚠️ 2026-10-29（评审 1/2）：**先确认真的跑起来了，再消费时间点**。
+      //       启动失败 / 宿主正忙 / 找不到 dsh ⇒ 时间点保留，退避 10 分钟再试，任务不丢。
+      //       每次启动前还要再核一次窗口，并按「上次实际启动时间」卡住最小间隔
+      //       （计划隔 20 分钟 ≠ 实际隔 20 分钟，补跑会把它们挤在一起）。
+      if (cfg.spread) {
+        const plan = ensureSlotPlan(now)
+        const overdue = []
+        for (let i = 0; i < plan.times.length; i++) {
+          if (!plan.done[i] && now.getTime() >= Number(plan.times[i])) overdue.push(i)
+        }
+        if (!overdue.length) return
+        // 还在允许的谷时窗口里吗？（周末全天算谷时；两个窗口都关 = 压根不该跑）
+        const anyWindow = ['noon', 'night'].some((k) => cfg[k] && inWindow(now, WINDOWS[k]))
+        if (!anyWindow) return                       // 不在允许时段：不消费，等下一个窗口
+        // 按「实际启动时间」卡最小间隔。
+        // ⭐ 2026-10-30：这个间隔不再写死 —— 用计划里算出来的「平均间隔」的一半作下限。
+        //    为什么取一半：计划本身是"每段随机取一个"，实际间隔天然会有波动（有的 30 分、
+        //    有的 15 分）。卡满平均间隔会把合法的短间隔也挡掉，反而少跑几轮。
+        //    取一半既能挡住"同一分钟连开两轮"，又不会误伤正常波动。
+        const planGapMs = Number(plan.avgGapMin || 0) * 60000
+        const minGapMs = Math.max(60000, Math.floor(planGapMs / 2))   // 至少 1 分钟
+        const lastActual = st.lastActualRunAt ? new Date(st.lastActualRunAt).getTime() : 0
+        if (lastActual && now.getTime() - lastActual < minGapMs) return
+        // 上次启动失败过？退避 10 分钟，别每 60 秒硬试一次
+        const retryAt = st.slotRetryAt ? new Date(st.slotRetryAt).getTime() : 0
+        if (retryAt && now.getTime() < retryAt) return
+
+        const skipped = overdue.slice(0, -1)
+        const idx = overdue[overdue.length - 1]
+        const why = `slot:${idx + 1}/${plan.times.length}`
+        // ⭐ 用「确认版」：等几秒确认它没马上死掉，才算真的起来了
+        const started = await runDutyConfirmed(why)
+        if (!started || !started.started || started.confirmed === false) {
+          // 没起来 —— **不消费时间点**，记一次退避
+          bumpState({ lastWhy: why, slotRetryAt: new Date(now.getTime() + 10 * 60000).toISOString() })
+          log(`分时到点（${why}）但没启动：${started?.error || '未知原因'} ⇒ 时间点保留，10 分钟后再试`)
+          return
+        }
+        // 起来了才消费；更早错过的点记成跳过（否则开机后会连着补跑好几轮）
+        for (const i of skipped) plan.done[i] = true
+        plan.done[idx] = true
+        try { writeFileSync(slotsFile, JSON.stringify(plan, null, 2), 'utf8') } catch { /* 写不进去下一跳再说 */ }
+        log(`分时到点（${why}）—— 这一轮只挑 1 条` + (skipped.length ? `（错过 ${skipped.length} 个点，已跳过）` : ''))
+        // ⭐ 2026-10-30：**成功之后要把退避标记清掉**。以前只在失败时写 slotRetryAt、
+        //    从不删 —— 一旦某次启动失败过，这个时间戳会一直留到第二天，
+        //    只要它还没过期就一直挡住；更糟的是第二天跨天后 plan 重建、这个旧值仍在，
+        //    会让新一天的头几个点也被无谓地延后。成功就跑过之后它没有意义了。
+        bumpState({ count: roundsToday(now) + 1, lastRunAt: now.toISOString(), lastActualRunAt: now.toISOString(), lastWhy: why, slotRetryAt: '' })
+        return
+      }
       // ⭐ 「不写日报」那档没有报告可数 ⇒ 数不出条数就保守一点：一天只跑一轮
       if (String(cfg.reportLevel || 'full') === 'off' && roundsToday(now) >= 1) return
       for (const k of ['noon', 'night']) {
@@ -1717,17 +2191,26 @@ function reportMeta() {
         if (!inWindow(now, WINDOWS[k])) continue
         const key = `${today}:${k}`
         if (st.windows?.[key]) continue
-        bumpState({ windows: { ...(st.windows || {}), [key]: true }, count: roundsToday(now) + 1, lastRunAt: now.toISOString(), lastWhy: k })
-        runDuty(`window:${k}`)
+        // ⚠️ 同一个毛病：先跑，**确认真的起来了**才记账
+        const started = await runDutyConfirmed(`window:${k}`)
+        if (!started || !started.started || started.confirmed === false) {
+          log(`谷时窗口（${k}）到点但没跑起来：${started?.error || '未知原因'} ⇒ 不记账，下一跳再试`)
+          return
+        }
+        bumpState({ windows: { ...(st.windows || {}), [key]: true }, count: roundsToday(now) + 1, lastRunAt: now.toISOString(), lastActualRunAt: now.toISOString(), lastWhy: k })
         return
       }
     } catch (e) {
       log(`定时器这一跳出错（已兜住，不影响宿主）：${e?.stack ?? e}`)
+    } finally {
+      ticking = false
     }
   }
 
   try {
-    const timer = setInterval(tick, 60_000)
+    // ⭐ tick 现在是 async（要先把私信 UID 查出来）⇒ 这里必须自己兜住 rejection，
+    //    绝不能让一个没接的 Promise 把宿主带走（2026-10-14 那次事故的教训）
+    const timer = setInterval(() => { tick().catch((e) => log(`定时器这一跳出错（已兜住，不影响宿主）：${e?.stack ?? e}`)) }, 60_000)
     timer.unref?.()                                    // 别因为这个定时器让进程不肯退出
     ctx.effect(() => () => clearInterval(timer), 'bili-duty: 谷时定时器')
   } catch (e) { log(`定时器没起来：${e?.message ?? e}`) }
@@ -1815,6 +2298,9 @@ function reportMeta() {
     } catch { return '' }
   }
 
+  /* ⭐ 2026-10-30：会话复用的读写函数定义在 runDuty 之前（见文件上方 dutySessionFile 那段），
+   *   这里不再重复定义 —— 重复 `const` 会直接抛 SyntaxError。 */
+
   function dmPromptFor(fromUid, text) {
     const raw = String(text || '').slice(0, 600)
     const bv = (raw.match(/BV[0-9A-Za-z]{10}/) || [])[0] || ''
@@ -1837,6 +2323,9 @@ function reportMeta() {
   }
 
   function runDmReply(fromUid, text) {
+    // ⭐ 2026-10-29：记下"哪一代"发起的。退出登录会把 dmRunEpoch 加一，
+    //    之后这个进程的失败回调就不再允许重新拉起自己。
+    const epoch = dmRunEpoch
     try {
       refreshCfg()
       const dsh = resolveDsh()
@@ -1854,12 +2343,16 @@ function reportMeta() {
         cwd: stateDir, shell: dsh.shell, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
         env: uvEnv({ BILI_DUTY_HOME: stateDir, ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}) }),
       })
+      // ⭐ 2026-10-29（评审第 7 条）：把这个子进程记下来 —— 退出登录时要能停掉它，
+      //    否则它会拿着**旧账号的凭证**继续把消息回出去。
+      dmChild = child
       const toText = (buf) => { try { const b = Buffer.isBuffer(buf) ? buf : Buffer.from(String(buf)); const u = b.toString('utf8'); return u.includes('\uFFFD') ? (() => { try { return new TextDecoder('gbk').decode(b) } catch { return u } })() : u } catch { return String(buf) } }
       const pick = (buf) => { try { appendFileSync(logFile, toText(buf), 'utf8') } catch { /* 丢日志也不能抛 */ } }
       child.stdout?.on('data', pick)
       child.stderr?.on('data', pick)
       child.on('exit', (code) => {
         dmReplyRunning = false
+        if (dmChild === child) dmChild = null
         log(`私信回复结束（code=${code}）`)
         rotateLogIfBig()
         // ① 本来没有会话 id：跑完把它开出来的那个认领下来，下一条就能接着聊
@@ -1869,10 +2362,21 @@ function reportMeta() {
           else log('⚠️ 没找到这次的会话 id ⇒ 下一条私信还是新会话（不影响回复，只是没上下文）')
         }
         // ② 带了 id 却失败（会话被删/迁移过）⇒ 丢掉它，下一条重开，别卡死在坏 id 上
+        // ⭐ 2026-10-29（评审第 7 条之二）：**退出登录期间不许重试**。
+        //   退出登录会把这个子进程 kill 掉 ⇒ 退出码非 0 ⇒ 走到这里 ⇒ 800ms 后又把它拉起来，
+        //   拿着已经删掉的凭证再跑一轮。用 epoch 标记"这一代已经作废"来挡住。
         if (savedSid && code !== 0) {
           writeDmSession('')
-          log('⚠️ 续会话失败（' + savedSid.slice(0, 16) + '…）⇒ 清掉 id，立刻用新会话重试一次（这条不能没回）')
-          setTimeout(() => { try { runDmReply(fromUid, text) } catch { /* 兜住 */ } }, 800)
+          if (!dmRetryAllowed(epoch, dmRunEpoch)) {
+            log('私信回复失败，但账号已经切换/退出登录 ⇒ 不再重试')
+          } else {
+            log('⚠️ 续会话失败（' + savedSid.slice(0, 16) + '…）⇒ 清掉 id，立刻用新会话重试一次（这条不能没回）')
+            dmRetryTimer = setTimeout(() => {
+              dmRetryTimer = null
+              if (!dmRetryAllowed(epoch, dmRunEpoch)) { log('私信重试被取消（账号已切换）'); return }
+              try { runDmReply(fromUid, text) } catch { /* 兜住 */ }
+            }, 800)
+          }
         }
       })
       return { ok: true }
@@ -1883,6 +2387,12 @@ function reportMeta() {
   let dmBusy = false
   // ⭐ 2.0.5：一条私信回复没跑完时，不要让下一条进来（不然两个进程抢同一个会话，DSH 会报 "already owned by an active write handle"）
   let dmReplyRunning = false
+  // ⭐ 2026-10-29（评审第 7 条）：私信回复子进程的句柄 —— 退出登录时要能停掉
+  let dmChild = null
+  // ⭐ 2026-10-29：私信的"代号"与挂起的重试定时器。
+  //   退出登录 → dmRunEpoch++ ⇒ 旧进程的失败重试不再生效（否则杀掉它 800ms 后又被拉起来）
+  let dmRunEpoch = 0
+  let dmRetryTimer = null
   async function dmTick() {
     if (dmBusy) return
     dmBusy = true
@@ -2663,7 +3173,7 @@ function reportMeta() {
     }
 
     if (req.method === 'POST' && path === '/api/bili-duty/run') {
-      if (cfg.dmMode !== 'off' && !(Number(cfg.dmUid) > 0)) await warmDmUid()
+      if ((cfg.dmMode !== 'off' || String(cfg.mentionMode || 'top') === 'dm') && !(Number(cfg.dmUid) > 0)) await warmDmUid()
       return sendJson(res, 200, { ok: true, ...runDuty('manual') })
     }
 
@@ -2968,6 +3478,48 @@ function reportMeta() {
         return sendJson(res, 200, { ok: true, state: 'ok', file })
       }
       return sendJson(res, 200, { ok: r.state !== 'unknown', state: r.state, code: r.code, message: r.message })
+    }
+
+    // ⭐ 2026-10-28 自定义：**退出登录**
+    //    只删本机的凭证文件（B站 那边的登录态不会因此失效 —— 要彻底作废得去手机端退出或改密码）。
+    //    正在跑一轮时拒绝：跑到一半凭证没了，那一轮会以很难懂的方式失败。
+    if (req.method === 'POST' && path === '/api/bili-duty/logout') {
+      const file = join(stateDir, 'bili_credential.json')
+      // ⚠️ 2026-10-29（评审第 7 条）：**先收拾还在跑的任务**，再删凭证。
+      //    只挡值班轮是不够的 —— 私信回复那个子进程也会拿着旧凭证继续回消息。
+      if (dutyChild) return sendJson(res, 200, { ok: false, error: '正在跑一轮，等它跑完再退出登录' })
+      let killedDm = false
+      // ⭐ 先立"这一代作废"的牌子，再杀进程：
+      //   否则 kill 之后进程以非 0 退出 → 触发"续会话失败重试" → 800ms 后又跑起来。
+      dmRunEpoch += 1
+      if (dmRetryTimer) { try { clearTimeout(dmRetryTimer) } catch { /* 无所谓 */ } dmRetryTimer = null }
+      if (dmChild) {
+        try { dmChild.kill(); killedDm = true } catch { /* 已经退了 */ }
+        dmChild = null
+        dmReplyRunning = false
+        dmBusy = false
+      }
+      let removed = false
+      try {
+        if (existsSync(file)) { rmSync(file, { force: true }); removed = true }
+      } catch (e) {
+        log('退出登录失败：' + String(e?.message ?? e))
+        return sendJson(res, 200, { ok: false, error: '删不掉凭证文件：' + String(e?.message ?? e) })
+      }
+      // 清掉**跟账号绑定**的缓存：内存里按昵称查到的 UID、磁盘上的昵称→UID 表和私信已读表。
+      // 不清的话，换号之后还会用旧账号的口径去查收件人 / 认为"这条私信已经回过了"。
+      dmUidCache = 0
+      const purged = []
+      for (const f of ['mentions.json', 'dm-seen.json']) {
+        try {
+          const p = join(stateDir, f)
+          if (existsSync(p)) { rmSync(p, { force: true }); purged.push(f) }
+        } catch { /* 删不掉就算了，不算失败 */ }
+      }
+      log(`已退出登录：凭证${removed ? '' : '（本来就没有）'}`
+        + (killedDm ? '，并停掉了正在跑的私信回复' : '')
+        + (purged.length ? '，清掉缓存 ' + purged.join('、') : ''))
+      return sendJson(res, 200, { ok: true, removed, killedDm, purged })
     }
 
     return sendJson(res, 404, { ok: false, error: `unknown ${req.method} ${path}` })

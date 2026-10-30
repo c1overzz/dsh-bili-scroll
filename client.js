@@ -70,6 +70,13 @@ window.__ModuleLoader__.load({
   border:1px solid var(--dsw-alias-bg-layer-3,rgba(255,255,255,.14));
   background:var(--dsw-alias-bg-layer-4,rgba(128,128,128,.12));color:inherit;font-family:inherit;}
 [data-bd-input]:focus{outline:none;border-color:#3b82f6;}
+/* ⭐ 2026-10-28：下拉框的**弹出列表**是系统画的，只设 select 自己的背景管不到它 ——
+ *    深色主题下会变成"白底 + 浅色字"（文字 color:inherit 跟了页面的浅色）⇒ 看不清。
+ *    这里给 option 明确指定主题色（DSH 的 bg-layer-1 / label-primary 会跟着主题走），
+ *    再声明 color-scheme 让系统把弹出框的滚动条、边框也按深浅色渲染。 */
+[data-bd-input] option{background-color:var(--dsw-alias-bg-layer-1,#fff);
+  color:var(--dsw-alias-label-primary,#111);}
+select[data-bd-input]{color-scheme:light dark;}
 [data-bd-num]{width:88px;text-align:center;}
 [data-bd-btn]{padding:7px 12px;border-radius:8px;font-size:12px;cursor:pointer;font-family:inherit;white-space:nowrap;
   border:1px solid var(--dsw-alias-bg-layer-3,rgba(255,255,255,.16));
@@ -256,6 +263,8 @@ function WatchTab() {
       const [dmWatch, setDmWatch] = React.useState(null)          // 私信双向开关
       const [dmMode, setDmMode] = React.useState(null)      // 投递方式：off / only / both
       const [mention, setMention] = React.useState(null)
+      const [mentionMode, setMentionMode] = React.useState(null)   // 怎么 @：top / nested / dm
+      const [spread, setSpread] = React.useState(null)             // 分时随机刷
       const [login, setLogin] = React.useState(null)
       const [runNote, setRunNote] = React.useState(null)
       const [report, setReport] = React.useState(null)        // 非 null = 报告已展开   // 顶部那行状态（跑一轮/装依赖的反馈原来在最底下，看不见）
@@ -288,6 +297,8 @@ function WatchTab() {
         if (cfg && perRound === null) setPerRound(String(cfg.commentPerRound ?? 1))
         if (cfg && replyPer === null) setReplyPer(String(cfg.replyPerRound ?? 1))
         if (cfg && mention === null) setMention(cfg.mentionName || '')
+        if (cfg && mentionMode === null) setMentionMode(cfg.mentionMode || 'top')
+        if (cfg && spread === null) setSpread(cfg.spread === true)
         if (cfg && dmUid === null) setDmUid(cfg.dmUid ? String(cfg.dmUid) : '')
         if (cfg && dmMode === null) setDmMode(cfg.dmMode || 'only')
         if (cfg && dmWatch === null) setDmWatch(cfg.dmWatch !== false)   // 2.0 起默认开
@@ -518,6 +529,30 @@ function WatchTab() {
         finally { setBusy('') }
       }
 
+      // ⭐ 2026-10-28 自定义：退出登录（删本机凭证）。
+      //    问一句再动手 —— 删了要重新扫码，而扫码在手机上是个真动作。
+      const onLogout = async () => {
+        const yes = window.confirm(
+          '退出登录会删掉这台电脑上的 B站 凭证（bili_credential.json）。\n\n'
+          + '· B站 那边的登录**不会**因此失效，要彻底作废请去手机端「退出登录」或改密码\n'
+          + '· 删了要重新扫码才能再用\n\n确定退出吗？',
+        )
+        if (!yes) return
+        setBusy('logout')
+        setLoginTone('')
+        setLoginState('正在退出…')
+        try {
+          const r = await jpost('/logout', {})
+          if (!r?.ok) { setLoginTone('warn'); setLoginState('没退出：' + (r?.error || '未知原因')); return }
+          if (loginTimer.current) { clearInterval(loginTimer.current); loginTimer.current = null }
+          setLogin(null)
+          setSt((old) => ({ ...old, loggedIn: false }))
+          setLoginTone('good')
+          setLoginState(r.removed ? '已退出登录（凭证已删）。要换号就点「扫码登录」' : '本来就没登录，不用退')
+        } catch (e) { setLoginTone('warn'); setLoginState(String(e?.message ?? e)) }
+        finally { setBusy('') }
+      }
+
       const onFavToday = async () => {
         setBusy('fav')
         try {
@@ -606,6 +641,13 @@ function WatchTab() {
               onChange: (e) => setPerDay(e.target.value),
               onBlur: () => { const n = Math.max(0, Math.min(Number(perDay) || 0, 50)); setPerDay(String(n)); patch({ perDay: n }, '每天挑几条') },
             })),
+          h(ToggleRow, {
+            label: '分时随机刷',
+            note: '一天的量摊到几个随机时间点，每个点只挑 1 条 —— 不再到点一口气刷完。'
+              + '默认关（这是新行为，开不开由你定）；关着就是老规矩：每个谷时窗口跑一轮。',
+            on: spread === true,
+            onChange: (v) => { setSpread(v); patch({ spread: v }, '分时随机') },
+          }),
           st.lastRunAt ? h('div', { 'data-bd-note': '' }, `上次跑：${new Date(st.lastRunAt).toLocaleString('zh-CN')}`) : null),
 
         /* ── 发言与转写 ── */
@@ -614,51 +656,116 @@ function WatchTab() {
           h('div', { 'data-bd-label': '' }, '投递方式'),
           h('select', {
             'data-bd-input': '', value: dmMode ?? 'only',
-            onChange: (e) => { setDmMode(e.target.value); patch({ dmMode: e.target.value }, '投递方式') },
+            onChange: (e) => {
+              const v = e.target.value
+              setDmMode(v)
+              /* ⭐ 2026-10-30：这里原来会顺手把 autoComment 设成 `v !== 'only'` —— 也就是
+               *   **用户只是换了个投递方式，就被自动打开了「拿他的号说话」**，而且切回「私信」
+               *   时又被关掉，把他自己设的值覆盖掉。现在只提交 dmMode 一个键，
+               *   autoComment 完全由用户自己决定；两者不一致时下面会有红字提示。 */
+              patch({ dmMode: v }, '投递方式')
+            },
           },
-            h('option', { value: 'only' }, '只发私信 —— 一条公开评论都不发（默认，最不打扰别人）'),
-            h('option', { value: 'off' }, '只发评论 —— 在视频下面 @ 你（公开，别人也看得见）'),
-            h('option', { value: 'both' }, '私信 + 评论 —— 两边都发')),
-          h('div', { 'data-bd-label': '' }, '发给谁 / @ 谁（B站 昵称）'),
+            h('option', { value: 'only' }, '私信 —— 只发私信，评论区一句话都不说'),
+            h('option', { value: 'off' }, '评论 —— 只在评论区说话，不发私信'),
+            h('option', { value: 'both' }, '私信并评论 —— 两个都做')),
+          h('div', { 'data-bd-note': '' },
+            (dmMode === 'off' || dmMode === 'both')
+              ? '含「评论」的这两种，它才会在挑中的视频下面说话并 @ 你。'
+              : '「私信」= 评论区一句话都不会说，所有东西都走私信。'),
+          /* ⚠️ 2026-10-30：投递方式和「自动评论」现在是**两个独立的开关**（宿主不再替用户
+           *   打开 autoComment）。不一致的时候不能只提示、不给操作 —— 这里直接给个按钮。 */
+          (dmMode === 'off' || dmMode === 'both') && !sw('autoComment')
+            ? h('div', { 'data-bd-msg': '', 'data-warn': '' },
+              h('div', null, '⚠️ 你选了含评论的投递方式，但「自动评论」是关的 —— 现在它不会在评论区说话。'),
+              h('div', { 'data-bd-row': '' },
+                h('button', {
+                  'data-bd-btn': '', 'data-primary': '',
+                  onClick: () => patch({ autoComment: true }, '自动评论'),
+                }, '打开自动评论'),
+                h('button', {
+                  'data-bd-btn': '',
+                  onClick: () => patch({ dmMode: 'only' }, '投递方式'),
+                }, '改回只发私信')))
+            : null,
+          (dmMode === 'only' && sw('autoComment'))
+            ? h('div', { 'data-bd-msg': '', 'data-warn': '' },
+              '⚠️ 现在是「私信」模式，但「自动评论」还开着 —— 这一项会被忽略（私信模式不发公开评论）。'
+              + '想让它评论，把投递方式改成「评论」或「私信并评论」。')
+            : null,
+          h('div', { 'data-bd-label': '' }, '要 @ 谁 / 私信发给谁（B站 昵称）'),
           h('input', {
             'data-bd-input': '', value: mention ?? '',
-            placeholder: '填你自己的 B站 昵称；私信按它查 UID，评论也 @ 它',
+            placeholder: '填你自己的 B站 昵称 —— 评论靠它 @ 到你，私信靠它查 UID',
             onChange: (e) => setMention(e.target.value),
             onBlur: () => { const v = String(mention || '').trim(); setMention(v); patch({ mentionName: v }, '发给谁') },
           }),
-          (dmMode && dmMode !== 'off') ? h('div', { 'data-bd-note': '' }, '私信会发给他（用昵称自动查一次 UID）；查不到就改回只发评论，不会一条都不送。') : null,
+          !String(mention ?? '').trim() ? h('div', { 'data-bd-msg': '', 'data-warn': '' },
+            '⚠️ 这一项空着 = 什么都不发：评论没有可 @ 的对象，私信也查不到 UID。去你 B站 个人主页把昵称原样抄过来。') : null,
+          (dmMode && dmMode !== 'off') ? h('div', { 'data-bd-note': '' }, '私信会发给他（用昵称自动查一次 UID）；查不到就改回「评论」模式，不会一条都不送。') : null,
           (dmMode && dmMode !== 'off') ? h('div', { 'data-bd-note': '' }, '私信内容 = 本轮每条的「标题 + 链接 + 一句话」，一轮合并成一条发。⚠️ 建议先让这个号和收件人互关：B站 对「陌生人私信」会限流，还可能不弹提醒。') : null,
 
-          (dmMode === 'off' || dmMode === 'both') ? h('div', { 'data-bd-sep': '' }) : null,
+          h('div', { 'data-bd-sep': '' }),
+          h('div', { 'data-bd-h': '' }, '在评论区，它怎么说话'),
+          (dmMode === 'off' || dmMode === 'both')
+            ? null
+            : h('div', { 'data-bd-note': '' },
+              '现在的投递方式是「私信」⇒ 评论区不会说话。想让它在评论区说话，把上面的投递方式改成「评论」或「私信并评论」。'),
+          (dmMode === 'off' || dmMode === 'both') ? h('div', { 'data-bd-label': '' }, '主评论里怎么 @ 你') : null,
+          (dmMode === 'off' || dmMode === 'both') ? h('select', {
+            'data-bd-input': '', value: mentionMode ?? 'top',
+            onChange: (e) => { setMentionMode(e.target.value); patch({ mentionMode: e.target.value }, '怎么 @ 你') },
+          },
+            h('option', { value: 'top' }, '在主评论正文里 @ 你'),
+            h('option', { value: 'dm' }, '主评论不 @，发完私信把这条评论转给你')) : null,
+          (dmMode === 'off' || dmMode === 'both') ? h('div', { 'data-bd-note': '' },
+            mentionMode === 'dm'
+              ? '私信转告：评论本身不出现 @，靠私信把「评论原文 + 链接」发给你 —— 公开面最干净。'
+              : '公开 @：最直接，你能在评论区看到它写的东西，被认出来是自动化时也最显眼。') : null,
+          (dmMode === 'off' || dmMode === 'both') ? h('div', { 'data-bd-row': '' },
+            h('div', { 'data-bd-grow': '' },
+              h('div', { 'data-bd-label': '' }, '每轮最多发几条评论'),
+              h('div', { 'data-bd-note': '' }, '填 0 = 评论这一轮不做（等于退化成「私信」）')),
+            h('input', {
+              'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 0, max: 20,
+              value: perRound ?? '',
+              onChange: (e) => setPerRound(e.target.value),
+              onBlur: () => { const n = Math.max(0, Math.min(Number(perRound) || 0, 20)); setPerRound(String(n)); patch({ commentPerRound: n }, '每轮发几条评论') },
+            })) : null,
+          (dmMode === 'off' || dmMode === 'both') ? h('div', { 'data-bd-row': '' },
+            h('div', { 'data-bd-grow': '' },
+              h('div', { 'data-bd-label': '' }, '评论写多长'),
+              h('div', { 'data-bd-note': '' }, '短 ≤15 字 · 中 ≤40 字 · 长 ≤100 字（默认中）')),
+            h('select', {
+              'data-bd-input': '', value: cLen ?? 'medium',
+              onChange: (e) => { setCLen(e.target.value); patch({ commentLength: e.target.value }, '评论长度') },
+            },
+              h('option', { value: 'short' }, '短'),
+              h('option', { value: 'medium' }, '中'),
+              h('option', { value: 'long' }, '长'))) : null,
+          /* ⭐ 2026-10-28：**在有意思的评论下 @ 你** —— 独立开关，默认关。
+           *  以前它是「怎么 @ 你」的第三档，但那个位置表达不了组合，还白白多写一次评论。
+           *  现在拆出来：跟"主评论怎么写"互不影响。 */
           (dmMode === 'off' || dmMode === 'both') ? h(ToggleRow, {
-            label: '自动评论并 @ 你',
-            note: '开了之后它会在挑中的视频下面留评论，并 @ 上面那个人',
-            on: sw('autoComment'),
-            onChange: (v) => patch({ autoComment: v }, '自动评论'),
+            label: '在有意思的评论下 @ 你',
+            note: '默认关。开了之后，它读评论时碰到「有信息量」的留言，会在那条下面回一句并 @ 你。'
+              + '⭐ 代码里有硬闸门：玩梗（大肥鱼、笑死、典…）、纯情绪、去标点不到 10 字的直接拒；'
+              + '那条评论已经 20 条以上回复的、整楼抽样大半是梗的，也一律不进。没够格的就一条都不回。',
+            on: sw('nestedMention'),
+            onChange: (v) => patch({ nestedMention: v }, '在评论下 @ 你'),
           }) : null,
-          (dmMode === 'off' || dmMode === 'both') && sw('autoComment') ? h('div', { 'data-bd-sub': '' },
+          (dmMode === 'off' || dmMode === 'both') && sw('nestedMention') ? h('div', { 'data-bd-sub': '' },
             h('div', { 'data-bd-row': '' },
               h('div', { 'data-bd-grow': '' },
-                h('div', { 'data-bd-label': '' }, '每轮最多发几条评论'),
-                h('div', { 'data-bd-note': '' }, '每条评论里 @ 一次上面那个人；填 0 = 这一轮不发评论')),
-              h('input', {
-                'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 0, max: 20,
-                value: perRound ?? '',
-                onChange: (e) => setPerRound(e.target.value),
-                onBlur: () => { const n = Math.max(0, Math.min(Number(perRound) || 0, 20)); setPerRound(String(n)); patch({ commentPerRound: n }, '每轮发几条评论') },
-              }))) : null,
-          (dmMode === 'off' || dmMode === 'both') && sw('autoComment') ? h('div', { 'data-bd-sub': '' },
-            h('div', { 'data-bd-row': '' },
-              h('div', { 'data-bd-grow': '' },
-                h('div', { 'data-bd-label': '' }, '评论写多长'),
-                h('div', { 'data-bd-note': '' }, '短 ≤15 字 · 中 ≤40 字 · 长 ≤100 字（默认中）')),
+                h('div', { 'data-bd-label': '' }, '每轮最多在几条评论下 @ 你'),
+                h('div', { 'data-bd-note': '' }, '多回一条就多一次写入，建议就 1 条')),
               h('select', {
-                'data-bd-input': '', value: cLen ?? 'medium',
-                onChange: (e) => { setCLen(e.target.value); patch({ commentLength: e.target.value }, '评论长度') },
+                'data-bd-input': '', value: String(cfg?.nestedPerRound ?? 1),
+                onChange: (e) => patch({ nestedPerRound: Number(e.target.value) }, '每轮几条'),
               },
-                h('option', { value: 'short' }, '短'),
-                h('option', { value: 'medium' }, '中'),
-                h('option', { value: 'long' }, '长')))) : null,
+                h('option', { value: '1' }, '1 条'),
+                h('option', { value: '2' }, '2 条'),
+                h('option', { value: '3' }, '3 条')))) : null,
           (dmMode === 'off' || dmMode === 'both') ? h(ToggleRow, {
             label: '回复评论（只回楼中楼）',
             note: '开了之后它只回「直接回复到你那条评论下面的人」，不参与讨论',
@@ -821,6 +928,7 @@ function WatchTab() {
             h('button', { 'data-bd-btn': '', disabled: busy === 'update', onClick: onCheckUpdate }, '检查更新'),
             newVer ? h('button', { 'data-bd-btn': '', 'data-primary': '', disabled: busy === 'upgrade', onClick: onUpgrade }, '一键升级到 v' + newVer) : null,
             h('button', { 'data-bd-btn': '', disabled: busy === 'login', onClick: onLoginStart }, '扫码登录'),
+            st.loggedIn ? h('button', { 'data-bd-btn': '', disabled: busy === 'logout', onClick: onLogout }, '退出登录') : null,
             h('div', { 'data-bd-note': '' },
               !st.venvReady ? (st.installFailed ? '上次没装成 → 看下面日志' : '还没装 → 先点「装主依赖」')
                 : (st.loggedIn ? '装好了 → 下一步「扫码登录」' : '环境好了 → 点「扫码登录」'))),
