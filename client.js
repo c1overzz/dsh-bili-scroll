@@ -250,6 +250,8 @@ function WatchTab() {
       // ⚠️ 输入框必须绑"本地草稿"：页面每 5 秒轮询 /status，服务端那份会把 config 盖掉
       //    ⇒ 直接绑 cfg 的话，用户打字打到一半就被冲没了 ✗（2026-10-14 陌生人验收时抓到）
       const [perDay, setPerDay] = React.useState(null)
+      // ⭐ 2026-10-25：每轮最多挑几条（0 = 不限）。注意别跟下面的 perRound（那是 commentPerRound）撞名
+      const [pickPer, setPickPer] = React.useState(null)
       const [perRound, setPerRound] = React.useState(null)
       const [replyPer, setReplyPer] = React.useState(null)
       const [dmUid, setDmUid] = React.useState(null)        // 私信收件人 UID（本地草稿）
@@ -285,6 +287,7 @@ function WatchTab() {
         if (cfg && persona === null) setPersona(cfg.personaPrompt || '')
         if (cfg && rl === null) setRl(cfg.reportLevel || 'full')
         if (cfg && perDay === null) setPerDay(String(cfg.perDay ?? 5))
+        if (cfg && pickPer === null) setPickPer(String(cfg.perRoundPick ?? 0))
         if (cfg && perRound === null) setPerRound(String(cfg.commentPerRound ?? 1))
         if (cfg && replyPer === null) setReplyPer(String(cfg.replyPerRound ?? 1))
         if (cfg && mention === null) setMention(cfg.mentionName || '')
@@ -332,8 +335,15 @@ function WatchTab() {
         finally { setOptim({}); setBusy('') }
       }
 
-      // 「它刷过的视频」：点开才读，读一次就留着（不会每 5 秒重拉）
+      // 「它刷过的视频」：点开才读；读一次留着 —— 但**不是永远不更新**了。
+      // ⭐ 2026-10-25（用户报「这里它看过的视频好像不会自动更新」）：
+      //    原来注释写死「读一次就留着（不会每 5 秒重拉）」⇒ 面板开着的时候又跑完一轮，
+      //    列表纹丝不动，看起来就像坏了。现在盯「轮数 / 今天翻过几条 / 在不在跑」，
+      //    一变就重读当前这一页（筛选和页码都不动，跑的过程中能看着条目一条条长出来）。
     const WATCH_PAGE = 30
+    // 用来判断"数据可能变了没有"的指纹（状态每 5 秒轮询一次，这几个值变了就说明有新东西）
+    const watchSig = st ? `${st.ranToday || 0}|${st.todaySeen || 0}|${st.running ? 1 : 0}` : ''
+    const watchSigRef = React.useRef(null)
     const onLoadWatched = async (st, tr, off) => {
       setBusy('watched')
       try {
@@ -344,9 +354,16 @@ function WatchTab() {
         setWatchedState(st)
         setWatchedTier(tr)
         setWatchedOffset(off)
+        watchSigRef.current = watchSig        // 记住"读到的是哪一版数据"，别自己再触发一次
         if (!r || r.ok === false) say('读不到记录：' + ((r && r.error) || '未知原因'), 'warn')
       } catch (e) { say('读不到记录：' + String(e?.message ?? e), 'warn') } finally { setBusy('') }
     }
+    // 列表展开着，而轮数 / 今天翻过几条变了 ⇒ 自动重读（不打断筛选和翻页）
+    React.useEffect(() => {
+      if (watchedRows === null) return
+      if (watchSigRef.current === watchSig) return
+      onLoadWatched(watchedState, watchedTier, watchedOffset)
+    }, [watchSig])
     const onWatchPick = (kind, v) => {
       const cur = kind === 'state' ? watchedState : watchedTier
       const next = cur === v ? '' : v
@@ -558,7 +575,15 @@ function WatchTab() {
 
         /* ── 今天 ── */
         h('div', { 'data-bd-row': '' },
-          h('span', { 'data-bd-badge': '' }, `自动已挑 ${st.autoPicked ?? st.pickedToday ?? 0} / ${cfg.perDay} 条` + ((st.manualExtra > 0) ? ` · 手动 ${st.manualExtra} 条` : '')),
+          h('span', { 'data-bd-badge': '' }, `自动已挑 ${st.autoPicked || st.pickedToday || st.pickedSeenToday || 0} / ${cfg.perDay} 条` + ((st.manualExtra > 0) ? ` · 手动 ${st.manualExtra} 条` : '')),
+          // ⭐ 2026-10-25（#117）：徽章只显示"挑中条数"，跑了几轮 / 最近一次什么时候跑 完全没有出口
+          h('span', { 'data-bd-badge': '' },
+            '今天跑了 ' + (st.ranToday || 0) + ' 轮'
+            + (st.lastRunAt ? ' · 最近 ' + (() => {
+              try { const d = new Date(st.lastRunAt); return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0') }
+              catch { return '' }
+            })() : '')),
+          st.running ? h('span', { 'data-bd-badge': '', title: st.runStartedAt ? ('从 ' + new Date(st.runStartedAt).toLocaleTimeString('zh-CN') + ' 开始') : '' }, '⏳ 正在跑一轮…') : null,
           h('span', { 'data-bd-badge': '' }, '环境' + (st.venvReady ? '已就绪' : (st.installing ? '正在装' : '未装'))),
           h('span', { 'data-bd-badge': '' }, st.loggedIn ? 'B站已登录' : 'B站未登录'),
             h('span', { 'data-bd-badge': '' }, 'v' + (st.version || '?')),
@@ -566,6 +591,33 @@ function WatchTab() {
           h('button', { 'data-bd-btn': '', disabled: busy === 'run', onClick: onRun }, '现在跑一轮')),
           runNote ? h('div', { 'data-bd-msg': '', 'data-good': runNote.tone === 'good' ? '' : undefined,
             'data-warn': runNote.tone === 'warn' ? '' : undefined }, runNote.t) : null,
+
+        /* ── 2026-10-25（用户反馈"不知道这一轮刷了几个、也不知道它看过哪些"）── */
+        (() => {
+          const hm = (t) => { try { const d = new Date(t); return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0') } catch { return '?' } }
+          const r = st.round || {}
+          const list = st.running ? (r.rows || []) : (st.todayRows || []).slice(-8).reverse()
+          const tone = (s2) => (/跳过|跳了|没挑|未收/.test(String(s2)) ? 'data-warn' : undefined)
+          return h('div', { 'data-bd-sec': '' },
+            h('div', { 'data-bd-h': '' }, st.running ? '这一轮正在跑' : '今天看过什么'),
+            st.running
+              ? h('div', { 'data-bd-note': '' },
+                  '第 ' + ((st.ranToday || 0) + 1) + ' 轮' + (st.runStartedAt ? ' · 从 ' + hm(st.runStartedAt) + ' 开始' : '')
+                  + ' · 本轮已翻 ' + (r.seen || 0) + ' 条 · 已挑 ' + (r.picked || 0) + ' 条'
+                  + '（每 5 秒自动刷新）')
+              : h('div', { 'data-bd-note': '' },
+                  (st.lastRunAt ? '上一轮 ' + hm(st.lastRunAt) + '：翻了 ' + (r.seenLast || 0) + ' 条、挑了 ' + (r.pickedLast || 0) + ' 条。' : '')
+                  + '今天一共看过 ' + (st.todaySeen || 0) + ' 条，其中挑中 ' + (st.pickedSeenToday || 0) + ' 条。'),
+            list.length
+              ? h('div', { 'data-bd-sec': '' }, list.map((x, i) => h('div', { key: x.bvid + ':' + i, 'data-bd-row': '' },
+                  h('span', { 'data-bd-note': '', 'data-warn': tone(x.status) }, String(x.status || '—').replace(/（[^）]*）/g, '').slice(0, 8)),
+                  h('span', { 'data-bd-grow': '', 'data-bd-label': '', title: String(x.status || '') }, (x.title || x.bvid).slice(0, 38)),
+                  h('button', { 'data-bd-btn': '', onClick: () => jpost('/open', { what: 'url', u: 'https://www.bilibili.com/video/' + x.bvid }).catch(() => {}) }, '打开'))))
+              : h('div', { 'data-bd-note': '' }, st.running ? '（判重表还没写出这一轮的第一条，再等一会儿）' : '（今天还没有记录）'),
+            h('div', { 'data-bd-row': '' },
+              h('button', { 'data-bd-btn': '', onClick: () => { setTab('daily'); if (watchedRows === null) onLoadWatched(watchedState, watchedTier, watchedOffset) } }, '看全部'))
+          )
+        })(),
 
 
         /* ── 定时 ── */
@@ -605,6 +657,17 @@ function WatchTab() {
               value: perDay ?? '',
               onChange: (e) => setPerDay(e.target.value),
               onBlur: () => { const n = Math.max(0, Math.min(Number(perDay) || 0, 50)); setPerDay(String(n)); patch({ perDay: n }, '每天挑几条') },
+            })),
+          /* ⭐ 2026-10-25 加「每轮最多挑几条」：原来单轮没有上限，上限填高了一轮就能把全天额度吃光 */
+          h('div', { 'data-bd-row': '' },
+            h('div', { 'data-bd-grow': '' },
+              h('div', { 'data-bd-label': '' }, '每轮最多挑几条'),
+              h('div', { 'data-bd-note': '' }, '一轮里最多挑这么多，剩下的留给后面的轮；填 0 = 不限（只受上面那条约束）')),
+            h('input', {
+              'data-bd-input': '', 'data-bd-num': '', type: 'number', min: 0, max: 50,
+              value: pickPer ?? '',
+              onChange: (e) => setPickPer(e.target.value),
+              onBlur: () => { const n = Math.max(0, Math.min(Number(pickPer) || 0, 50)); setPickPer(String(n)); patch({ perRoundPick: n }, '每轮挑几条') },
             })),
           st.lastRunAt ? h('div', { 'data-bd-note': '' }, `上次跑：${new Date(st.lastRunAt).toLocaleString('zh-CN')}`) : null),
 

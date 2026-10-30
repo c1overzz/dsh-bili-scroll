@@ -52,6 +52,11 @@ export const inject = ['webServer', 'tools', 'settings']
 export const Config = !z ? undefined : z.object({
   /** 定量刷：每天最多挑几条 */
   perDay: z.natural().default(5).extra('volatile', true),
+  /** 每轮最多挑几条（0 = 不限，只受「每天最多」约束）
+   *  ⭐ 2026-10-25 加：使用者问「上限填很高的话，某一轮岂不是能一口气挑一大堆、不可控」——
+   *    原来的实现里单轮**没有任何上限**，一轮就可能把全天额度吃光（源码里 835 行的注释也承认这点）。
+   *    perRound > 0 时，提示词里给模型的是 min(全天剩余, perRound)，一轮最多只挑这么多。 */
+  perRoundPick: z.natural().default(0).extra('volatile', true),
   /** 峰谷自动刷（总开关） */
   peakValley: z.boolean().default(false).extra('volatile', true),
   /** 峰谷子开关：中午 / 晚上 */
@@ -263,7 +268,7 @@ function reportMeta() {
   const DEFAULTS = {
     dmWatch: true, dmWatchMinutes: 1, dmReplyPerDay: 0, dmOwnerUid: 0,
     personaPrompt: '',
-    perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
+    perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small', perRoundPick: 0,
     dmMode: 'only', dmUid: 0,
     keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, favFolderId: 0,
     // ⭐ 2.3.0：手动轮 / 抓取量 / 排除词 / 评论长度 —— 少一项 normalize 就会把用户存的值丢掉
@@ -297,6 +302,7 @@ function reportMeta() {
   const clampPatch = (patch) => {
     const p = { ...patch }
     if ('perDay' in p) p.perDay = Math.max(0, Math.min(Number(p.perDay) || 0, 50))
+    if ('perRoundPick' in p) p.perRoundPick = Math.max(0, Math.min(Number(p.perRoundPick) || 0, 50))
     if ('reportLevel' in p) p.reportLevel = ['full', 'brief', 'off'].includes(String(p.reportLevel)) ? String(p.reportLevel) : 'full'
     // ⭐ 2.0.5（issue #89）：人设上限 8000 → 60000；**截断时要出声**（以前静默砍，用户以为写进去了 ✗）
     if ('personaPrompt' in p) {
@@ -853,7 +859,7 @@ function reportMeta() {
   const bumpState = (patch) => {
     const st = readJson(dutyStateFile, {})
     const today = dayKey()
-    if (st.day !== today) { st.day = today; st.count = 0; st.picked = 0; st.windows = {}; st.manualExtra = 0 }   // ⭐ 2.3.0：手动轮那笔账也按天归零
+    if (st.day !== today) { st.day = today; st.count = 0; st.picked = 0; st.windows = {}; st.manualExtra = 0; st.autoRound = 0; st.roundBase = 0; st.roundStartedAt = 0 }   // ⭐ 2.3.0：手动轮那笔账也按天归零；本机补丁：本轮基线也归零
     writeJson(dutyStateFile, { ...st, ...patch })
     return st
   }
@@ -880,18 +886,78 @@ function reportMeta() {
     } catch { return 0 }
   }
   // 报告是事实来源；state 兜住"报告被删 / 手改"那一下（取两者里大的）
+  // ⭐ 2026-10-25 修（用户实测：设置页徽章恒显示 0/5）：
+  //    countPickedToday 在 reportLevel=off 时只靠 parseSeenTable() 兜底，而宿主预建的 seen.md 模板
+  //    把「看过的视频」写成 bullet 列表（`- 日期 · BV · 标题 · UP · 档位`），parseSeenTable 只认
+  //    `| 日期 | BV | ... |` 表格行 ⇒ 恒为 0 ⇒ 徽章 0/5，而实际上当天配额早用完了。
+  //    这里把「数当天挑中条数」单独拎出来，同时认表格和 bullet 两种写法，供徽章/自检用。
+  const pickedIdsFromSeen = (now = new Date()) => {
+    const today = dayKey(now)
+    try {
+      const text = readFileSync(join(stateDir, 'seen.md'), 'utf8')
+      const ids = new Set()
+      for (const raw of text.split(/\r?\n/)) {
+        const line = raw.trim()
+        // 表格写法：| 2026-10-25 | BVxxxx | 标题 | UP | 值得看 |
+        // 列表写法：- 2026-10-25 · BVxxxx · 标题 · UP · 值得看
+        let day, bvid, status
+        if (line.startsWith('|')) {
+          const c = line.split('|').map((x) => x.trim()).slice(1, -1)
+          const bi = c.findIndex((x) => /^BV[0-9A-Za-z]{10}$/.test(x))
+          if (bi < 0) continue
+          day = bi > 0 ? c[bi - 1] : ''
+          bvid = c[bi]
+          status = c[c.length - 1] || ''
+        } else if (line.startsWith('- ')) {
+          const c = line.slice(2).split(' · ')
+          if (!/^BV[0-9A-Za-z]{10}$/.test(c[1] || '')) continue
+          day = c[0]
+          bvid = c[1]
+          status = c.slice(4).join(' · ')
+        } else continue
+        if (!String(day).startsWith(today)) continue
+        const skipped = /跳过|跳了|没挑|未收/.test(status)
+        if (skipped) continue
+        if (/挑|收|选|值得看|可以看/.test(status)) ids.add(bvid)
+      }
+      return [...ids]
+    } catch { return [] }
+  }
+  const pickFromSeenToday = (now = new Date()) => pickedIdsFromSeen(now).length
+  /**
+   * ⭐ 2026-10-25（用户反馈"不知道这一轮刷了几个视频、也不知道它看过哪些"）：
+   *   parseSeenTable() 会按「天倒序 + 挑中优先」重排，拿不到"这一轮追加了哪几行"。
+   *   这里按**文件原始顺序**读，供「本轮新增」和「最近看过」用（判重表是纯追加的 ⇒ 后写的在最后）。
+   */
+  const seenRowsRaw = () => {
+    try {
+      const text = readFileSync(join(stateDir, 'seen.md'), 'utf8')
+      const out = []
+      for (const raw of text.split(/\r?\n/)) {
+        const line = raw.trim()
+        if (!line.startsWith('|')) continue
+        const c = line.split('|').map((x) => x.trim()).slice(1, -1)
+        if (c.length < 3) continue
+        const bi = c.findIndex((x) => /^BV[0-9A-Za-z]{10}$/.test(x))
+        if (bi < 0) continue
+        const dm = /^(\d{4}-\d{2}-\d{2})/.exec(bi > 0 ? c[bi - 1] : c[0])
+        if (!dm) continue
+        out.push({ day: dm[1], bvid: c[bi], title: c[bi + 1] || '', up: c[bi + 2] || '', status: c[c.length - 1] || '' })
+      }
+      return out
+    } catch { return [] }
+  }
+  const seenRowCount = () => seenRowsRaw().length
   const countPickedToday = (now = new Date()) => {
     const st = readJson(dutyStateFile, {})
     const fromState = st.day === dayKey(now) ? Number(st.picked || 0) : 0
     // ⭐ 2.0.4（issue #80）："不写日报"那档没有报告可数 ⇒ 以前恒为 0 ⇒ perDay 完全失效（一天挑到 10 条）
     //    现在退一步：去 seen.md 数**当天被标成挑中/收下**的行（那是模型自己写的账，跟报告同源）✓
     const today = dayKey(now)
+    // 2026-10-25：判重表任何一档都会写（duty.md 的硬规定）⇒ 它始终是最可靠的账本，
+    //   不再只在 reportLevel=off 时才看它（原来 brief/full 档下若报告还没落盘 ⇒ 也是 0）
     let fromSeen = 0
-    try {
-      if (String(cfg.reportLevel || 'full') === 'off') {
-        fromSeen = parseSeenTable().filter((r) => r.day === today && r.picked).length
-      }
-    } catch { /* 读不到就按 0 算 */ }
+    try { fromSeen = pickFromSeenToday(now) } catch { /* 读不到就按 0 算 */ }
     return Math.max(fromState, countPicks(reportFileOf(now)), fromSeen)
   }
   // ⭐ 2.3.0：手动轮是「额外的一次」—— 自动额度只扣自动轮挑的（manualExtra 是手动轮多挑的那部分）
@@ -1187,6 +1253,10 @@ function reportMeta() {
     // ⭐ 2.3.0：手动轮是「额外的一次」——自动额度只扣自动轮挑的（manualExtra 是手动轮多挑的那部分）
     const already = Math.max(0, countPickedToday() - manualExtra)
     const left = Math.max(0, quota - already)
+    // ⭐ 每轮上限（#118）：perRoundPick > 0 ⇒ 这一轮只给 min(全天剩余, 每轮上限)
+    //   没有它时单轮唯一的上限就是「全天剩余」⇒ 上限调高后一轮就能把全天额度吃光
+    const perRoundPick = Math.max(0, Number(cfg.perRoundPick) || 0)
+    const thisRound = perRoundPick > 0 ? Math.min(left, perRoundPick) : left
     const isManual = why === 'manual'
     const manualMax = Math.max(1, Number(cfg.manualMax) || 3)
     // ⭐ 投递方式（2026-10-17 加）：dmMode = off（只评论）· only（只私信）· both（都发）
@@ -1224,11 +1294,11 @@ function reportMeta() {
       + (cfg.reportLevel === 'off' ? '' : `⚠️ 今天那份报告里可能已经有上一轮写的东西 —— 有就**追加到末尾**，别覆盖（配额按全天算）。`)
       + (cfg.reportLevel === 'off' ? '' : '⭐ 报告里**每挑中一条**，第一行写成 `### BV号`（例：`### BV1xxxxxxx`）—— 宿主**就数这些标题行**算今天挑了几条：漏写当成没挑中，给只是提到 / 跳过的视频加上标题则当成挑中。')
       + (already > 0
-        ? `今天已经挑过 ${already} 条了 ⇒ **这一轮最多再挑 ${left} 条**（「每天最多 ${quota} 条」是全天总量，不是每轮）；`
-        : `今天最多挑 ${quota} 条；`)
+        ? `今天已经挑过 ${already} 条了 ⇒ **这一轮最多再挑 ${thisRound} 条**（「每天最多 ${quota} 条」是全天总量，不是每轮${perRoundPick > 0 ? `；另有「每轮最多 ${perRoundPick} 条」的闸` : ''}）；`
+        : `今天最多挑 ${quota} 条${perRoundPick > 0 ? `（**这一轮最多挑 ${thisRound} 条** —— 每轮上限 ${perRoundPick} 条，剩下的留给后面的轮次）` : ''}；`)
         + (isManual
             ? '\n\n⭐ **这一轮是「手动触发」**：只为"现在就想看一眼"，**不占用今天的自动额度** '
-              + `（自动那边今天还能挑 ${left} 条）。所以只挑 ${manualMax} 条以内、挑完就收，别把全天要看的量一次挑光。`
+              + `（自动那边今天还能挑 ${left} 条）。所以只挑 ${Math.min(manualMax, perRoundPick > 0 ? perRoundPick : manualMax)} 条以内、挑完就收，别把全天要看的量一次挑光。`
             : '')
               + (() => {
                   const ex = (Array.isArray(cfg.excludeWords) ? cfg.excludeWords : []).map((x) => String(x || '').trim()).filter(Boolean)
@@ -1237,7 +1307,6 @@ function reportMeta() {
                     : ''
                 })()
               + `\n\n评论长度：${({ short: '短（≤15 字）', medium: '中（≤40 字，默认）', long: '长（≤100 字）' })[cfg.commentLength] || '中（≤40 字，默认）'} —— 超了要自己删到这条线内。`
-      // ⭐ 2026-10-24：留空不再用内置关键词（那会让所有用户刷同一批视频、评论区扎堆）
       //    ⇒ 留空 = 用 `bili_recommend` 刷**这个账号的首页推荐流**，按各自画像天然散开 ✓
       + (kws.length
         ? `关键词用这些：${kws.join('、')}（用 bili_search 搜）。`
@@ -1619,6 +1688,12 @@ function reportMeta() {
       }
     const cwd = stateDir
     log(`刷B站开跑（${why}）：${dsh.command} ${args.slice(0, 3).join(' ')} …  cwd=${cwd}`)
+    // ⭐ 2026-10-25（用户反馈"不知道这一轮刷了几个视频"）：开跑前把判重表的行数记成基线，
+    //    这一轮跑的过程中它每写一行「看过」进去，/status 里的本轮条数就会跟着涨 ⇒ 界面能实时跟进。
+    try {
+      bumpState({ roundBase: seenRowCount(), roundBasePicked: countPickedToday(),
+                  roundStartedAt: Date.now(), roundWhy: why })
+    } catch { /* 记不上不影响跑 */ }
     const child = spawn(dsh.command, args, {
       cwd,
       shell: dsh.shell,
@@ -1663,18 +1738,27 @@ function reportMeta() {
       // ⭐ 这一轮挑了几条：从今天的报告里数（上一轮挑的还在同一份文件里 ⇒ 数出来就是全天的账）
       try {
         const st = readJson(dutyStateFile, {})
-        const prev = st.day === dayKey() ? Number(st.picked || 0) : 0
+        const sameDay = st.day === dayKey()
+        const prev = sameDay ? Number(st.picked || 0) : 0
         const picked = countPickedToday()   // 报告是事实来源、state 只是兜底（跟闸门同一个算法）
-        if (picked > prev) { bumpState({ picked }); log(`今天挑到 ${picked} 条（上限 ${Number(cfg.perDay) || 0} 条）`) }
-          // ⭐ 2.3.0：手动轮挑出来的那部分记进 manualExtra ⇒ 不占自动额度
-          if (why === 'manual') {
-            const delta = Math.max(0, picked - prev)
-            if (delta > 0) {
-              const st2 = readJson(dutyStateFile, {})
-              bumpState({ manualExtra: Math.max(0, Number(st2.manualExtra || 0)) + delta })
-              log(`手动轮额外挑了 ${delta} 条 ⇒ 不占今天的自动额度`)
-            }
-          }
+        // ⭐ 轮数（count）也在这里记（#117）—— 原来只有窗口轮在 tick() 里加过一次，
+        //    手动轮（面板「跑一轮」/ MCP bili_run）永远不计数 ⇒ /status 的 ranToday 恒 0
+        const rounds = (sameDay ? Number(st.count || 0) : 0) + 1
+        // ⭐ 本轮实际翻了几条（判重表增量）—— 跟"挑中几条"是两回事：配额满了照样在翻
+        const baseRows = sameDay ? Number(st.roundBase || 0) : 0
+        const seenThisRound = Math.max(0, seenRowCount() - baseRows)
+        const delta = Math.max(0, picked - prev)
+        bumpState({ picked: Math.max(prev, picked), count: rounds,
+                    lastRoundSeen: seenThisRound, lastRoundPicked: delta,
+                    lastRunAt: new Date().toISOString(), lastWhy: why })
+        // ⭐ 2.3.0：手动轮挑出来的那部分记进 manualExtra ⇒ 不占自动额度
+        if (why === 'manual' && delta > 0) {
+          const st2 = readJson(dutyStateFile, {})
+          bumpState({ manualExtra: Math.max(0, Number(st2.manualExtra || 0)) + delta })
+          log(`手动轮额外挑了 ${delta} 条 ⇒ 不占今天的自动额度`)
+        }
+        log(`本轮翻了 ${seenThisRound} 条、其中挑中 ${delta} 条`)
+        log(`今天第 ${rounds} 轮跑完（${why}）：全天已挑 ${Math.max(prev, picked)} 条（上限 ${Number(cfg.perDay) || 0} 条${Number(cfg.perRoundPick) > 0 ? `，每轮最多 ${Number(cfg.perRoundPick)} 条` : ''}）`)
       } catch (e) { log(`数挑了几条时出错（不影响这一轮）：${e?.message ?? e}`) }
       // ⭐ 发完评论之后**过一会儿再核一次**（2026-10-16 加的「评论发出后复核」）：
       //    接口回"发送成功"≠ 公开可见（新号/风控会进审核）；而"不公开"时连 @ 通知都不会推 ⇒
@@ -1711,13 +1795,16 @@ function reportMeta() {
       // ⭐ 闸门看的是「今天已经**挑到几条**」（从今天的报告里数出来），不是「跑了几轮」
       if (autoPickedToday(now) >= Number(cfg.perDay || 0)) return
       // ⭐ 「不写日报」那档没有报告可数 ⇒ 数不出条数就保守一点：一天只跑一轮
-      if (String(cfg.reportLevel || 'full') === 'off' && roundsToday(now) >= 1) return
+      // ⭐ #117：手动轮也记 count 了 ⇒ 这道「一天只跑一轮」的闸改用 autoRound（手动轮不该挤掉自动轮）
+      if (String(cfg.reportLevel || 'full') === 'off' && (st.day === today ? Number(st.autoRound || 0) : 0) >= 1) return
       for (const k of ['noon', 'night']) {
         if (!cfg[k]) continue
         if (!inWindow(now, WINDOWS[k])) continue
         const key = `${today}:${k}`
         if (st.windows?.[key]) continue
-        bumpState({ windows: { ...(st.windows || {}), [key]: true }, count: roundsToday(now) + 1, lastRunAt: now.toISOString(), lastWhy: k })
+        // 2026-10-25：count 统一挪到 runDuty 的 exit 里记（原来只有这里加 ⇒ 手动轮永远不计数）
+        bumpState({ windows: { ...(st.windows || {}), [key]: true }, lastRunAt: now.toISOString(), lastWhy: k,
+                    autoRound: (st.day === today ? Number(st.autoRound || 0) : 0) + 1 })
         runDuty(`window:${k}`)
         return
       }
@@ -2120,13 +2207,36 @@ function reportMeta() {
     } catch (error) { resolve({ ok: false, error: String(error?.message ?? error) }) }
   })
 
-  /** 从今天的报告里抠出"挑中的" BV 号（只认行首的 ### BV… 标题行；代码围栏里的不算） */
-  const pickIdsFromReport = (file) => {
+  /**
+   * 今天的「挑中」BV 号 —— 自动收藏的输入。
+   * ⭐ 2026-10-25 修：原来只认报告里行首的 `### BV号`（那是 `reportLevel: full` 的格式）：
+   *    · `brief` 档报告写的是 `- 今日已挑（…）：BVxxx、BVyyy`，一条都抠不出来；
+   *    · `off` 档根本没有报告文件 ⇒ 直接 0 条；
+   *    ⇒ 自动收藏在非 full 档下**结构性不可用**（设置页「补收藏今天的」只会回
+   *      「今天的报告里没有挑中的视频」）。现在三个来源取并集，判重表兜底。
+   * 另外原来那句 `new RegExp('```[\s\S]*?```')` 里的 `\s` 在字符串里没转义，
+   *   实际正则变成了 `[sS]` ⇒ 代码围栏从来没被剔掉过；这里换成字面量正则。
+   */
+  const BV_RE = /BV[0-9A-Za-z]{10}/g
+  const pickedIdsToday = (now = new Date()) => {
+    const ids = new Set()
+    // ① 报告里行首的 ### BV号 标题行（full 档的正式格式）
     try {
-      const fence = new RegExp('```[\s\S]*?```', 'g')
-      const text = readFileSync(file, 'utf8').replace(fence, '')
-      return [...new Set([...text.matchAll(/^#{2,3}[ \t]*(BV[0-9A-Za-z]{10})/gm)].map((m) => m[1]))]
-    } catch { return [] }
+      const text = readFileSync(reportFileOf(now), 'utf8').replace(/```[\s\S]*?```/g, '')
+      for (const m of text.matchAll(/^#{2,3}[ \t]*(BV[0-9A-Za-z]{10})/gm)) ids.add(m[1])
+    } catch { /* 报告不存在（off 档）就跳过 */ }
+    // ② 判重表里当天状态是"挑中/收下"的那些（任何一档都会写，最可靠）
+    try { for (const bv of pickedIdsFromSeen(now)) ids.add(bv) } catch { /* 读不到就算了 */ }
+    // ③ 报告里明说"今日已挑 / 本轮新增挑选"那些行上出现的 BV（brief 档的内联写法）
+    try {
+      const text = readFileSync(reportFileOf(now), 'utf8')
+      for (const line of text.split(/\r?\n/)) {
+        if (!/(今日已挑|本轮新增挑选)/.test(line)) continue
+        if (/没有|0 条/.test(line)) continue
+        for (const m of line.matchAll(BV_RE)) ids.add(m[0])
+      }
+    } catch { /* 同上 */ }
+    return [...ids]
   }
 
   let favBusy = false
@@ -2140,9 +2250,10 @@ function reportMeta() {
       if (!hasCredential()) return { ok: false, error: '还没扫码登录 B站' }
       const script = join(stateDir, 'favops.py')
       if (!existsSync(script)) return { ok: false, error: 'favops.py 不在家里（重启一次 dsh 会自动铺好）' }
-      const report = join(outDir, `${dayKey()}.md`)
-      const ids = pickIdsFromReport(report)
-      if (!ids.length) return { ok: false, error: '今天的报告里没有挑中的视频（行首 ### BV号 那些）' }
+      const ids = pickedIdsToday()
+      if (!ids.length) {
+        return { ok: false, error: '今天还没有挑中的视频（判重表和报告里都没读到）—— 先跑一轮，或把日报形态设成 full/brief 再试' }
+      }
       const failures = []
       let added = 0
       for (const bv of ids) {
@@ -2252,18 +2363,26 @@ function reportMeta() {
       const key = bvid + '@' + day
       if (seen.has(key)) continue
       seen.add(key)
-      const skipped = /跳过|跳了|没挑/.test(status)
+      const skipped = /跳过|跳了|没挑|未收/.test(status)   // 2026-10-25："可以看（未收）"不算挑中
       const picked = !skipped && /挑|收|选|值得看|可以看/.test(status)
       const commented = /评论/.test(status)
       const delivered = /评论|私信|已发|发给/.test(status) || deliveredBvs.has(bvid)
-      out.push({ day, bvid, title, up, status, picked, commented, delivered, url: 'https://www.bilibili.com/video/' + bvid })
+      out.push({ day, bvid, title, up, status, picked, commented, delivered, _i: out.length, url: 'https://www.bilibili.com/video/' + bvid })
     }
     // ⭐ 以前这里是静默丢行 ⇒ 卡片墙空了也没人知道为什么（#133）
     if (bad !== seenBadDays) {
       seenBadDays = bad
       if (bad) log('判重表有 ' + bad + ' 行日期格式认不出来，「它刷过的视频」里没显示这些行（见 seen.md）')
     }
-    out.sort((a, b) => (a.day === b.day ? (a.picked === b.picked ? 0 : a.picked ? -1 : 1) : (a.day < b.day ? 1 : -1)))
+    // ⭐ 2026-10-25（#120）：原来同一天里按**文件顺序**（最旧的在前）⇒ 刚跑完那一轮的新条目
+    //    沉到当天列表的**底下**，第一页 30 条里根本看不到，看起来就像"没更新"。
+    //    现在同一天内**新的在前**（挑中的仍然优先）。
+    out.sort((a, b) => {
+      if (a.day !== b.day) return a.day < b.day ? 1 : -1
+      if (a.picked !== b.picked) return a.picked ? -1 : 1
+      return b._i - a._i                     // 同一组里把文件顺序倒过来 = 最新在前
+    })
+    for (const r of out) delete r._i
     return out
   }
 
@@ -2532,13 +2651,40 @@ function reportMeta() {
       config: cfg,
       windows: WINDOWS,
       today,
-      ranToday: st.day === today ? Number(st.count || 0) : 0,   // 今天跑了几轮
-      pickedToday: pickedTodayCount,
-      // ⭐ 2.3.0：手动轮是"额外的一次" —— 自动额度只扣自动轮挑的，这儿把两笔账分开亮出来
-      manualExtra: Math.max(0, Number(st.manualExtra || 0)),
-      autoPicked: Math.max(0, pickedTodayCount - manualExtraCount),
-      autoLeft: Math.max(0, Number(cfg.perDay || 0) - (pickedTodayCount - manualExtraCount)),
-      lastManualAt: st.lastManualAt || null,
+        ranToday: st.day === today ? Number(st.count || 0) : 0,   // 今天跑了几轮（手动轮也计）
+        pickedToday: pickedTodayCount,
+        // ⭐ 2026-10-25（#117）：这一轮是不是还在跑 / 从几点开始 / 本轮翻了几条、挑了哪几条
+        running: Boolean(dutyChild),
+        runStartedAt: dutyChild ? (dutyStartedAt || null) : null,
+        round: (() => {
+          try {
+            const rows = seenRowsRaw()
+            const sameDay = st.day === today
+            const base = sameDay ? Number(st.roundBase || 0) : 0
+            const seen = Math.max(0, rows.length - base)
+            const picked = Math.max(0, pickedTodayCount - (sameDay ? Number(st.roundBasePicked || 0) : 0))
+            return {
+              seen,                                         // 本轮翻了几个（配额满了也照样在翻）
+              picked: dutyChild ? picked : Number(st.lastRoundPicked || 0),
+              seenLast: Number(st.lastRoundSeen || 0),
+              pickedLast: Number(st.lastRoundPicked || 0),
+              rows: seen > 0 ? rows.slice(-Math.min(seen, 15)) : [],
+            }
+          } catch { return { seen: 0, picked: 0, seenLast: 0, pickedLast: 0, rows: [] } }
+        })(),
+        // 今天看过什么（判重表里 day=今天 的所有行，按文件顺序 = 时间顺序）
+        todayRows: (() => {
+          try { return seenRowsRaw().filter((x) => x.day === today).slice(-40) } catch { return [] }
+        })(),
+        todaySeen: (() => {
+          try { return seenRowsRaw().filter((x) => x.day === today).length } catch { return 0 }
+        })(),
+        pickedSeenToday: pickFromSeenToday(),                    // 只数 seen.md（表格 / 列表都认）
+        // ⭐ 2.3.0：手动轮是"额外的一次" —— 自动额度只扣自动轮挑的，这儿把两笔账分开亮出来
+        manualExtra: Math.max(0, Number(st.manualExtra || 0)),
+        autoPicked: Math.max(0, pickedTodayCount - manualExtraCount),
+        autoLeft: Math.max(0, Number(cfg.perDay || 0) - (pickedTodayCount - manualExtraCount)),
+        lastManualAt: st.lastManualAt || null,
       lastRunAt: st.lastRunAt || null,
       lastWhy: st.lastWhy || null,
       // ⭐ 2.0.4：界面上"它会认谁当主人"那行用这个（用小号登录、大号聊天的会看错）
@@ -2632,7 +2778,8 @@ function reportMeta() {
       const body = await readBody(req)
       const patch = {}
       // ⭐⭐ 2026-10-27：白名单直接从 DEFAULTS 推导 —— 以前是手写的固定数组，
-      //    每次加新配置项都容易漏（2.3.0 就漏了 7 个 ⇒ 用户在设置页填的排除词根本存不进来）；
+      //    每次加新配置项都容易漏（2.3.0 就漏了 7 个 ⇒ 用户在设置页填的排除词根本存不进来，
+      //    2.1.0 还漏过 favFolderId ⇒ 自动收藏整条链路不可用）；
       //    DEFAULTS 是所有配置项的唯一名单，加一项就自动放行 ✓
       for (const k of Object.keys(DEFAULTS)) {
         if (k in body) patch[k] = body[k]

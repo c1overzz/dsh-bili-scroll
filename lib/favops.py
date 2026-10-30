@@ -48,20 +48,18 @@ async def folders():
 
 
 async def add(bvid, fid):
+    # ⭐ 2026-10-25 修（自动收藏「结构上根本跑不通」）：
+    #   ① 原来这里没 import favorite_list（只有 folders() 里有）⇒ 一调就是 NameError
+    #      `name 'favorite_list' is not defined`；
+    #   ② 用的 `favorite_list.FavoriteListResource` 在 bilibili-api-python 17.x 里**已经删掉了**
+    #      （本机装的是 17.4.2）⇒ AttributeError；
+    #   ③ `FavoriteList(aid, ...).get_info()` 的返回值根本没用到，白请求一次。
+    #   17.x 的正确写法是 `Video.set_favorite(add_media_ids=[收藏夹 id])`。
     from bilibili_api import video as ba_video
-    # ⭐ 必须在 add() 里也 import favorite_list —— 它只在 folders() 里 import 过一次，
-    #    而两个函数各自是独立作用域，所以下面两行用法会 NameError：
-    #    「自动收藏永远失败」的根因就是这个（issue #76）。
-    #    报错信息长得像"收藏接口坏了"，但实际是这个名字根本没绑定。
-    from bilibili_api import favorite_list
     cred, _ = load()
     v = ba_video.Video(bvid=bvid, credential=cred)
-    info = await v.get_info()
-    aid = int(info['aid'])
-    # 保持原有行为：先取一次收藏夹信息（原代码就有，不要顺手删）
-    res = await favorite_list.FavoriteList(aid, credential=cred).get_info()
     try:
-        await favorite_list.FavoriteListResource(aid, type_=2, credential=cred).add(fid)
+        await v.set_favorite(add_media_ids=[int(fid)])
     except Exception as error:  # noqa: BLE001
         msg = str(error)
         # 已经收藏过不算失败
