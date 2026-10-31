@@ -49,19 +49,21 @@ async def folders():
 
 async def add(bvid, fid):
     from bilibili_api import video as ba_video
-    # ⭐ 必须在 add() 里也 import favorite_list —— 它只在 folders() 里 import 过一次，
-    #    而两个函数各自是独立作用域，所以下面两行用法会 NameError：
-    #    「自动收藏永远失败」的根因就是这个（issue #76）。
-    #    报错信息长得像"收藏接口坏了"，但实际是这个名字根本没绑定。
-    from bilibili_api import favorite_list
     cred, _ = load()
     v = ba_video.Video(bvid=bvid, credential=cred)
-    info = await v.get_info()
-    aid = int(info['aid'])
-    # 保持原有行为：先取一次收藏夹信息（原代码就有，不要顺手删）
-    res = await favorite_list.FavoriteList(aid, credential=cred).get_info()
+    await v.get_info()          # 先确认视频能访问（保持原有行为）
+    # ⭐⭐ 2026-10-31 修（连续四天「自动收藏 0/4」的真正原因 —— 两个错叠在一起）：
+    #    ① `FavoriteList(aid, credential=…)`：它的第一个位置参数是 `type_`（收藏夹类型），不是
+    #       media_id ⇒ **视频 id 被当成了收藏夹类型**、media_id 留空 ⇒ 每轮必抛
+    #       「视频收藏夹需要 media_id」；
+    #    ② 就算修好①，`favorite_list.FavoriteListResource` 在现在这个版本的 bilibili_api 里
+    #       **已经不存在了**（`module has no attribute 'FavoriteListResource'`）。
+    #    ⇒ 改用现成的 `Video.set_favorite(add_media_ids=[fid])`：库自己取 aid、自己拼 add/del。
+    #    ⚠️ 别再回到 FavoriteList + FavoriteListResource 那套 —— 那是老版本的 API。
+    #    （附：更早还有个坑是函数内没 import favorite_list 导致 NameError，见 issue #76；
+    #      现在不走 favorite_list 了，那个坑自然不存在。）
     try:
-        await favorite_list.FavoriteListResource(aid, type_=2, credential=cred).add(fid)
+        await v.set_favorite(add_media_ids=[int(fid)])
     except Exception as error:  # noqa: BLE001
         msg = str(error)
         # 已经收藏过不算失败

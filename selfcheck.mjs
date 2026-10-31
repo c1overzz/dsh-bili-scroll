@@ -92,9 +92,14 @@ if (typeof clientMod?.apply !== 'function') fail('client.js 的 factory 必须�
 const slotsReg = []
 const styleNodes = []
 const prevDoc = globalThis.document
+const prevWin2 = globalThis.window
+// ⭐ 2026-10-31（PR #111 起）：apply 会往 window / document 挂事件监听（工作区缓存失效）——
+//    真实浏览器里这两个一定在；假环境里没有就会 TypeError。这里补一套最小的。
+globalThis.window = { addEventListener() {}, removeEventListener() {} }
 globalThis.document = {
   createElement: () => ({ setAttribute() {}, remove() {}, textContent: '' }),
   head: { appendChild: (n) => styleNodes.push(n) },
+  addEventListener() {}, removeEventListener() {}, hidden: false,
 }
 try {
   clientMod.apply({
@@ -106,9 +111,11 @@ try {
   })
 } catch (e) {
   globalThis.document = prevDoc
+  globalThis.window = prevWin2
   fail('client.js 的 apply(ctx) 抛错', e)
 }
 globalThis.document = prevDoc
+globalThis.window = prevWin2
 
 if (!slotsReg.length) fail('client.js 的 apply 没有往任何 slot 注册组件')
 if (!styleNodes.length) fail('client.js 的 apply 没有把样式挂上（页面会没样子）')
