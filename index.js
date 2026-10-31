@@ -807,7 +807,7 @@ function reportMeta() {
     description: '**立刻跑一轮**（不等窗口）：起一个 headless 会话，把 duty.md 交给它去刷、写报告。'
       + '适合"我现在就想看一份"的场合。',
     parameters: {},
-    async execute() { const r = runDuty('manual'); return { ok: true, ...r } },
+    async execute() { const r = await runDuty('manual'); return { ok: true, ...r } },
   })
 
   tool({
@@ -1128,6 +1128,7 @@ function reportMeta() {
   async function warmDmUid() {
     if (Number(cfg.dmUid) > 0) return Number(cfg.dmUid)
     if (cfg.dmMode === 'off') return 0
+    dmUidCache = 0  // 勿复用上轮收件人；昵称变化或查询失败时必须清空
     const name = String(cfg.mentionName || '').trim()
     if (!name) return 0
     try {
@@ -1784,7 +1785,10 @@ function reportMeta() {
     t.unref?.()
     return true
   }
-  const runDuty = (why = 'window') => {
+  let dutyStarting = false
+  const runDuty = async (why = 'window') => {
+   if (dutyStarting) return { started: false, why, busy: true, error: '上一轮正在启动' }
+   dutyStarting = true
    try {
       if (dutyChild) {
         const alive = dutyChild.exitCode === null && !dutyChild.killed
@@ -1795,6 +1799,8 @@ function reportMeta() {
         dutyChild = null
       }
     refreshCfg()          // ⭐ 设置页刚改过的值要立刻生效（config 是就地改的，快照会过期）
+    // #122：统一在启动入口解析 UID，避免定时轮 / bili_run 漏掉预热
+    if (cfg.dmMode !== 'off' && !(Number(cfg.dmUid) > 0)) await warmDmUid()
     const dsh = resolveDsh()
     // ⭐ 找不到 dsh 就别硬跑：以前会退化成裸 `dsh` ⇒ spawn 失败、只留 exit 1 + 一串乱码 ✗
     if (dsh.missing) {
@@ -1914,6 +1920,8 @@ function reportMeta() {
    } catch (e) {
     log(`刷B站开跑失败（${why}）：${e?.stack ?? e}`)
     return { started: false, why, error: String(e?.message ?? e) }
+   } finally {
+     dutyStarting = false
    }
   }
 
@@ -1923,7 +1931,7 @@ function reportMeta() {
    *    （`dsh: fatal uncaught exception`）。⇒ **定时器回调必须自己兜住所有异常**：
    *    插件再错也只该"这一轮没跑成"，绝不该杀宿主。
    */
-  const tick = () => {
+  const tick = async () => {
     try {
       refreshCfg()                    // ⭐ 定时器活得比设置页久：每一跳都重新读一遍配置
       if (!cfg.peakValley) return
@@ -1940,7 +1948,7 @@ function reportMeta() {
         const key = `${today}:${k}`
         if (st.windows?.[key]) continue
         bumpState({ windows: { ...(st.windows || {}), [key]: true }, count: roundsToday(now) + 1, lastRunAt: now.toISOString(), lastWhy: k })
-        runDuty(`window:${k}`)
+        await runDuty(`window:${k}`)
         return
       }
     } catch (e) {
@@ -2989,8 +2997,7 @@ function reportMeta() {
     }
 
     if (req.method === 'POST' && path === '/api/bili-duty/run') {
-      if (cfg.dmMode !== 'off' && !(Number(cfg.dmUid) > 0)) await warmDmUid()
-      return sendJson(res, 200, { ok: true, ...runDuty('manual') })
+      return sendJson(res, 200, { ok: true, ...(await runDuty('manual')) })
     }
 
     // 建 venv + 装依赖（**不等它**：几分钟的活，进度写 install.log）
