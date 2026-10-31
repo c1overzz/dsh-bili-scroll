@@ -643,6 +643,16 @@ async def bili_video_info(bvid: str) -> str:
     }, ensure_ascii=False)
 
 
+def _normalize_mention(text: str) -> str:
+    """把「@ 昵称」压成「@昵称」。
+
+    B站 只认紧挨着的写法：`@ No3799` 会被当成普通文字，**不会真的 @ 到人**，
+    而且不会有任何报错 —— 评论照样发出去、接口照样返回成功，只是对方收不到通知。
+    模型写中文时习惯在 @ 后面加一个空格，所以这里在发送前统一压一遍。
+    """
+    return re.sub(r"@\s+", "@", text or "")
+
+
 # ========== Tool 6: 回复评论 ==========
 
 @tool()
@@ -661,6 +671,8 @@ async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0) -> str:
     """
     _deny = _guard("bili_reply")
     if _deny: return _deny
+    # ⭐「@ 昵称」压成「@昵称」：B站 只认紧挨着的写法，带空格等于没 @ 到人（而且不报错）
+    text = _normalize_mention(text)
     # ⭐ 语感闸门：撞八股 / 撞自己以前的 / 撞这条视频的热评 ⇒ 不发，把改法告诉模型
     _style = await _style_reason(text, bvid, get_cred())
     if _style:
@@ -1196,6 +1208,16 @@ async def bili_send_message(receiver_uid: int, text: str) -> str:
                 "error": "接口回了成功，但**没有投递回执（msg_key）** ⇒ 可能没真正送到（常见于：对方不接受陌生人私信 / 被风控）",
                 "data": data,
             }, ensure_ascii=False)
+        # 仅值班轮：真实拿到 msg_key 后记录私信中的 BV 号，普通聊天不会标记。
+        duty_day = os.environ.get("BILI_DUTY_RUN_DAY", "")
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", duty_day):
+            bvids = sorted(set(re.findall(r"(?<![0-9A-Za-z])BV[0-9A-Za-z]{10}(?![0-9A-Za-z])", text)))
+            if bvids:
+                try:
+                    with (Path(__file__).parent / "dm-deliveries.jsonl").open("a", encoding="utf-8") as f:
+                        f.write(json.dumps({"day": duty_day, "bvids": bvids}, ensure_ascii=False) + "\n")
+                except OSError as e:
+                    print(f"私信已成功，但记录投递失败：{e}", file=sys.stderr)
         return json.dumps({
             "success": True,
             "message": f"私信已投递（回执 {str(msg_key)[:12]}…）",
