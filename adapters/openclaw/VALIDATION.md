@@ -24,6 +24,7 @@ Environment: macOS arm64, CPython 3.12.14, Node 24.22.1; adapter dependencies in
 | `git diff --check` | Passed |
 | Added-content personal-path/identity/token-pattern scan and staged runtime-artifact check | Passed; only synthetic credential fixtures |
 | DSH core, vendor source and both MIT licenses versus baseline | Unchanged |
+| Real operator QR scan, confirmation, credential receipt and authenticated nav | Passed through the original local integration; the same authorized login was reused for standalone-adapter acceptance |
 | Authenticated nav through new adapter stdio, then a fresh stdio process | Passed with an explicitly authorized existing login |
 | Real video details and first-part Chinese subtitles with an evidence receipt | Passed |
 | Real personalized recommendation read | Passed |
@@ -58,7 +59,6 @@ Each CI job installed the hash-locked dependencies in its runner environment and
 
 ## Not executed / not claimed
 
-- Fresh QR scan/confirmation through this new adapter. QR continuity and cookie receipt remain covered by synthetic cross-process tests; the real account test reused an already established login.
 - Private favorite-list access and other account-dependent reads beyond the explicitly verified subtitles/recommendations.
 - Human verification of generated summaries or host vision behavior on returned frames.
 - Live-account retesting of the revised subtitle/storyboard readers. The authenticated acceptance above predates those reader changes.
@@ -67,10 +67,10 @@ Each CI job installed the hash-locked dependencies in its runner environment and
 
 These are integration acceptance steps, not results inferred from mocks. The anonymous smoke result does not prove any account-side feature.
 
-## Account acceptance checklist (explicit operator login only)
+## Reproducing account acceptance
 
-1. Use a dedicated private state directory; connect the adapter and request login.
-2. Present the QR only to the requesting person. Stop/restart the MCP process before polling to verify real cross-process continuity.
+1. Use a dedicated private state directory and connect the adapter. Reuse an existing explicitly authorized login when valid; request a new QR login only if needed. The completed live QR login is recorded above; do not require the operator to scan again merely to repeat it.
+2. If generating a QR, present it only to the requesting person. Cross-process QR continuity and cookie receipt are additionally covered by the synthetic contract tests. For an existing login, restart the MCP process and verify authenticated status.
 3. Confirm `valid` only after authenticated nav returns `isLogin=true`; never print cookie fields.
 4. Read one explicitly chosen public video with account-required subtitles; verify evidence ID, first-part scope, and successful local note/report export. If subtitles are absent, distinguish that from API failure.
 5. Check one account-specific read requested by the operator. Do not post comments, messages, uploads or favorite writes.
