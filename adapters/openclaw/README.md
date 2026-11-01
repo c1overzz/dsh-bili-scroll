@@ -80,7 +80,7 @@ Data layout:
 | `min_views` | `0` | Minimum views; 0 disables |
 | `dedupe_days` | `30` | Exclude previously selected BV IDs in this local-date lookback; 0 disables |
 
-`1 <= max_selected <= max_reviews <= max_candidates <= 50`. Missing fields needed by active filters produce `missing_age` / `missing_duration` / `missing_views`, not fabricated values. Use search when filtering on publication date; some other feeds omit it. Each batch deduplicates before returning candidates. `max_reviews` is a host workflow budget, not a global API request counter. Repeated explicit reviews are possible; selected-history filtering is not an irreversible ban. A note is unique per local date/BV; repeating identical content does not change its timestamp. Changing the timezone changes future day grouping, not stored dates.
+`1 <= max_selected <= max_reviews <= max_candidates <= 50`. Missing fields needed by active filters produce `missing_age` / `missing_duration` / `missing_views`, not fabricated values. The filter accepts both `duration`/`pubdate` (search and other feeds) and `length`/`created` (UP uploads); canonical fields take precedence when both are present. Use search or UP uploads when filtering on publication date; some other feeds omit it. Each batch deduplicates before returning candidates. `max_reviews` is a host workflow budget, not a global API request counter. Repeated explicit reviews are possible; selected-history filtering is not an irreversible ban. A note is unique per local date/BV; repeating identical content does not change its timestamp. Changing the timezone changes future day grouping, not stored dates.
 
 ## Login and one round
 
@@ -94,7 +94,9 @@ A cookie grants account authority; it is **not a read-only token**. The adapter'
 
 For a review round, ask the host to follow `bili_workflow`: discover → deterministic filtering/dedup → details/subtitles or explicitly limited storyboard fallback → host-model judgement → local note → daily export. Selected notes require a matching evidence receipt returned by a real subtitle/frame read; cover images and metadata are insufficient. Receipts prove retrieval, not correctness of the model's summary or that a non-vision host saw an image. Multi-part coverage is explicitly limited. The database stores receipt identity/scope/time/URL, not full transcript copies.
 
-Errors have machine-readable codes; see the skill. Platform risk-control errors stop the round. No identity/proxy rotation. Exporting a digest does not send it: message delivery and scheduling stay with the host, under the current task's authorization. This adapter never creates cron jobs or runs a background model loop.
+Subtitle/storyboard requests use adapter-local control flow while reusing the vendor SDK and storyboard helpers. Only an explicit empty subtitle-track list returns `no_subtitles`. Failed HTTP/API responses and malformed subtitle documents return errors; a valid but empty document returns `empty_subtitles`. Neither failure creates evidence.
+
+Errors have machine-readable codes; see the skill. Platform risk-control errors stop the round. Snapshot, pvdata and sheet-download risk errors abort immediately, without a second request or a partial-content receipt. Only a successful but empty snapshot can be retried internally, once. No identity/proxy rotation. Exporting a digest does not send it: message delivery and scheduling stay with the host, under the current task's authorization. This adapter never creates cron jobs or runs a background model loop.
 
 ## Verify
 
@@ -128,4 +130,4 @@ Remove only this MCP entry (`openclaw mcp unset bili-scroll` on supported versio
 
 ## Source and license
 
-Based on `c1overzz/dsh-bili-scroll` v2.4.0, commit `398e4724a481b09b6383a950bcd08723c632da59`. Adapter files use the repository's [MIT license](../../LICENSE), Copyright (c) 2026 c1overzz. The reused `vendor/bilibili-mcp` has its own [MIT license](../../vendor/bilibili-mcp/LICENSE), Copyright (c) 2026 AGI_Ananas. Both copyright notices and license texts must travel with redistributions. The repository [NOTICE.md](../../NOTICE.md) remains applicable. No vendored code or DSH behavior was rewritten for this entry point.
+Based on `c1overzz/dsh-bili-scroll` v2.4.0, commit `398e4724a481b09b6383a950bcd08723c632da59`. Adapter files use the repository's [MIT license](../../LICENSE), Copyright (c) 2026 c1overzz. The reused `vendor/bilibili-mcp` has its own [MIT license](../../vendor/bilibili-mcp/LICENSE), Copyright (c) 2026 AGI_Ananas. Both copyright notices and license texts must travel with redistributions. The repository [NOTICE.md](../../NOTICE.md) remains applicable. Vendored source and DSH behavior remain unchanged; the adapter owns subtitle/storyboard request validation and early-stop handling.

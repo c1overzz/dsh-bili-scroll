@@ -190,9 +190,9 @@ class Store:
             text = str(item.get("title", "")) + " " + str(item.get("description", item.get("desc", "")))
             if not reason and any(x.casefold() in text.casefold() for x in f["exclude_keywords"]):
                 reason = "excluded_keyword"
-            duration = number(item.get("duration"), True)
+            duration = number(item.get("duration", item.get("length")), True)
             views = number(item.get("play", (item.get("stat") or {}).get("view")))
-            published = number(item.get("pubdate"))
+            published = number(item.get("pubdate", item.get("created")))
             for enabled, known, bad, label in [
                 (f["max_age_days"], published is not None and published > 0, published is not None and (self.now().timestamp()-published > f["max_age_days"]*86400), "age"),
                 (f["min_duration_seconds"] or f["max_duration_seconds"], duration is not None, duration is not None and (duration < f["min_duration_seconds"] or bool(f["max_duration_seconds"] and duration > f["max_duration_seconds"])), "duration"),

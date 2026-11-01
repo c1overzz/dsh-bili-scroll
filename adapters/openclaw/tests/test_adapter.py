@@ -118,11 +118,12 @@ class AdapterTests(unittest.TestCase):
     def test_relative_config_and_env_override(self):
         config_path = self.root / "config.json"
         config_path.write_text(json.dumps({"data_dir":"relative-state","media_dir":"relative-media","timezone":"Asia/Tokyo","filters":{"max_age_days":0}}))
-        env = {"BILI_SCROLL_CONFIG":str(config_path), "BILI_SCROLL_TIMEZONE":"Europe/London"}
+        env = {k: v for k, v in os.environ.items() if not k.startswith("BILI_")}
+        env.update(BILI_SCROLL_CONFIG=str(config_path), BILI_SCROLL_TIMEZONE="Europe/London")
         with patch.dict(os.environ, env, clear=True):
             c = Config.load()
-        self.assertEqual(c.data_dir, self.root / "relative-state")
-        self.assertEqual(c.media_dir, self.root / "relative-media")
+        self.assertEqual(c.data_dir, (self.root / "relative-state").resolve())
+        self.assertEqual(c.media_dir, (self.root / "relative-media").resolve())
         self.assertEqual(c.timezone, "Europe/London")
         self.assertEqual(c.filters["max_age_days"], 0)
 
@@ -211,7 +212,7 @@ class AdapterTests(unittest.TestCase):
 
     def test_subtitle_absence_vs_error_and_scope_receipt(self):
         app = self.app()
-        missing = json.loads(app.normalize("bili_subtitle",{"bvid":BV1},'{"message":"no subtitles"}'))
+        missing = json.loads(app.normalize("bili_subtitle",{"bvid":BV1},'{"status":"no_subtitles"}'))
         self.assertEqual(missing["status"], "no_subtitles")
         failure = json.loads(app.normalize("bili_subtitle",{"bvid":BV1},'{"error":"network -412 synthetic-secret"}'))
         self.assertEqual(failure["error"]["code"], "risk_control")
@@ -246,7 +247,7 @@ class AdapterTests(unittest.TestCase):
             self.assertEqual(process.returncode, 0, stderr)
         report = self.store.report()
         self.assertEqual(report["reviewed"], 6)
-        self.assertEqual(Path(report["path"]).read_text(), report["markdown"])
+        self.assertEqual(Path(report["path"]).read_text(encoding="utf-8"), report["markdown"])
 
     def test_forward_database_version_fails_closed(self):
         with self.store.db() as c:

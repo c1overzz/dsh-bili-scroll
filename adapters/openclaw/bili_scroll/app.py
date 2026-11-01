@@ -13,6 +13,8 @@ from mcp.types import ImageContent, TextContent, ToolAnnotations
 from .auth import Auth
 from .config import Config, ROOT
 from .storage import Store, bvid
+from .errors import classify, error
+from .readers import Readers
 
 READ_TOOLS = frozenset({
     "bili_search", "bili_comments", "bili_subtitle", "bili_danmaku",
@@ -21,23 +23,6 @@ READ_TOOLS = frozenset({
     "bili_favorite_content", "bili_cover", "bili_frames", "bili_recommend",
 })
 LOCAL_TOOLS = frozenset({"bili_check_credential", "bili_login", "bili_login_check", "bili_candidates_filter", "bili_note_save", "bili_notes_recent", "bili_report_read", "bili_workflow"})
-
-
-def error(code, retryable=False):
-    return {"ok": False, "error": {"code": code, "retryable": retryable}}
-
-
-def classify(value):
-    text = str(value).lower()
-    if any(t in text for t in ("-412", "-352", "-509", "429", "风控")):
-        return error("risk_control")
-    if any(t in text for t in ("-101", "未登录", "credential", "sessdata", "bili_jct")):
-        return error("auth_required")
-    if any(t in text for t in ("62002", "-404", "不可见", "不存在")):
-        return error("not_found")
-    if any(t in text for t in ("timeout", "connection", "network")):
-        return error("network", True)
-    return error("upstream_error", True)
 
 
 class App:
@@ -55,9 +40,10 @@ class App:
         self.up.CRED_FILE = self.auth.credential_file
         self.up.load_credential = self.load_credential
         self.up.get_cred = lambda: self.load_credential() or self.up.Credential()
+        self.readers = Readers(self.up, self.load_credential)
         self.mcp = FastMCP("bili-scroll-openclaw")
         for name in sorted(READ_TOOLS):
-            fn = getattr(self.up, name)
+            fn = getattr(self.readers, name, None) or getattr(self.up, name)
             wrapped = self.wrap_read(name, fn)
             self.mcp.add_tool(wrapped, name=name, annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=True))
         for name in sorted(LOCAL_TOOLS):
@@ -107,7 +93,7 @@ class App:
             except TimeoutError:
                 return json.dumps(error("timeout", True))
             except Exception as exc:
-                return json.dumps(classify(f"{type(exc).__name__}: {exc}"))
+                return json.dumps(classify(exc))
         return wrapped
 
     def normalize(self, name, params, value):
@@ -126,8 +112,11 @@ class App:
             if data.get("comments"):
                 failure["partial"] = {"comments": data["comments"], "count": len(data["comments"])}
             return json.dumps(failure, ensure_ascii=False)
-        if name == "bili_subtitle" and not data.get("text"):
-            return json.dumps({"ok": True, "status": "no_subtitles", "bvid": params["bvid"], "evidence": None})
+        if name == "bili_subtitle":
+            if data.get("status") == "no_subtitles":
+                return json.dumps({"ok": True, "status": "no_subtitles", "bvid": params["bvid"], "evidence": None})
+            if not isinstance(data.get("text"), str) or not data["text"].strip():
+                return json.dumps(error("invalid_upstream_response"))
         evidence = None
         if name in {"bili_subtitle", "bili_frames", "bili_video_info"}:
             kind = {"bili_subtitle": "subtitle", "bili_frames": "frames", "bili_video_info": "metadata"}[name]

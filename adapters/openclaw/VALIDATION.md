@@ -8,7 +8,7 @@ Environment: macOS arm64, CPython 3.12.14, Node 24.22.1; adapter dependencies in
 
 | Check | Result |
 | --- | --- |
-| Adapter unit/integration suite | 25 passed |
+| Adapter unit/integration suite after review fixes | 44 passed (25 existing + 19 new contract tests) |
 | Cross-process QR generation → poll → cookie receipt → authenticated nav → fresh-process status | Passed with synthetic API fixtures |
 | Concurrent QR generation and concurrent note/report processes | Passed |
 | Allowlist and forbidden MCP/private-message call | Exactly 23 tools; write call rejected |
@@ -16,9 +16,10 @@ Environment: macOS arm64, CPython 3.12.14, Node 24.22.1; adapter dependencies in
 | Anonymous real Bilibili hot-list read through stdio | Passed, one video, no credentials |
 | Fresh source export + fresh Python environment + public PyPI `pip install --no-cache-dir --require-hashes` | Passed |
 | `pip check` in that fresh environment | No broken requirements |
-| All 25 tests + offline stdio probe in that fresh source/environment | Passed |
+| Original 25 tests + offline stdio probe in that fresh source/environment | Passed before review fixes; not a fresh-install claim for the revised readers |
 | Existing `node --test` | 7 passed, 1 Windows-only test skipped on macOS |
 | Existing `node selfcheck.mjs` | DSH host and client checks passed |
+| Existing `tools/check-vision.py` | Pure storyboard/image helpers passed |
 | Skill frontmatter validator | Passed |
 | `git diff --check` | Passed |
 | Added-content personal-path/identity/token-pattern scan and staged runtime-artifact check | Passed; only synthetic credential fixtures |
@@ -30,12 +31,29 @@ Environment: macOS arm64, CPython 3.12.14, Node 24.22.1; adapter dependencies in
 
 The clean-install check exported the staged tree, created a separate temporary environment, removed inherited BILI/PIP/UV configuration overrides, used the public PyPI index explicitly and reran tests/probe. It did not reuse the running instance or its environment/state.
 
+## Review-fix verification
+
+The review-fix pass was based on `433fb4f`. All 44 adapter tests, the offline stdio probe (23 tools, forbidden write rejected, idempotent local export), existing DSH regressions (7 passed / 1 platform skip), host/client selfcheck and vision-helper checks passed locally after the fixes. No real credentials or live network reads were used in this pass.
+
+The 19 new registered-MCP contract tests cover:
+
+- Explicitly empty subtitle tracks versus HTTP 429/500, API -412/-352/-509, missing/malformed listing/body/JSON, empty documents and successful receipt-backed reads.
+- First snapshot risk stops after one request; pvdata and first/later sheet risk stops further requests and leaves no receipt, including when a previous frame succeeded.
+- Successful image output with first-part coverage, real Pillow cropping, pvdata fallback and the bounded retry for a successful but empty snapshot.
+- Actual vendored `bili_user_videos` output flowing into filtering with `length`/`created`, age/duration rejection, same-batch and selected-history deduplication, canonical-field precedence and explicit missing metadata.
+
+The original authenticated-read acceptance above was performed before the reader changes. It remains evidence for the tested revision, not a claim that revised readers have been live-account retested.
+
+## Remote CI history
+
+[Initial fork CI run](https://github.com/FireworksRainFromAbove/dsh-bili-scroll/actions/runs/41284266503): Linux passed; macOS and Windows failed. The failure log identified test portability issues: unresolved `/var` versus `/private/var` expectations, removal of Windows home environment variables in a config test, and locale-default decoding of a UTF-8 report. This patch resolves expected paths, preserves non-BILI system environment and explicitly decodes the report as UTF-8. A remote rerun of this patch is pending; local success does not establish remote platform success.
+
 ## Not executed / not claimed
 
 - Fresh QR scan/confirmation through this new adapter. QR continuity and cookie receipt remain covered by synthetic cross-process tests; the real account test reused an already established login.
 - Private favorite-list access and other account-dependent reads beyond the explicitly verified subtitles/recommendations.
 - Human verification of generated summaries or host vision behavior on returned frames.
-- Execution on Windows/Linux. A three-platform offline CI workflow is provided but has not been run on a remote service for this draft; Windows ACL behavior is not established by POSIX mode tests.
+- A passing three-platform remote CI run after the review fixes. Initial Linux CI passed, while the macOS/Windows failures and their fixes are recorded above. Windows ACL behavior is not established by POSIX mode tests.
 - Installation into a live OpenClaw instance. CLI syntax was checked against OpenClaw 2026.10.7; the native MCP protocol was proven with its SDK. No live host configuration was changed.
 
 These are integration acceptance steps, not results inferred from mocks. The anonymous smoke result does not prove any account-side feature.
