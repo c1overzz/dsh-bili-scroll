@@ -46,14 +46,23 @@ The original authenticated-read acceptance above was performed before the reader
 
 ## Remote CI history
 
-[Initial fork CI run](https://github.com/FireworksRainFromAbove/dsh-bili-scroll/actions/runs/41284266503): Linux passed; macOS and Windows failed. The failure log identified test portability issues: unresolved `/var` versus `/private/var` expectations, removal of Windows home environment variables in a config test, and locale-default decoding of a UTF-8 report. This patch resolves expected paths, preserves non-BILI system environment and explicitly decodes the report as UTF-8. A remote rerun of this patch is pending; local success does not establish remote platform success.
+[Initial fork CI run](https://github.com/FireworksRainFromAbove/dsh-bili-scroll/actions/runs/41284266503): Linux passed; macOS and Windows failed. The failure log identified test portability issues: unresolved `/var` versus `/private/var` expectations, removal of Windows home environment variables in a config test, and locale-default decoding of a UTF-8 report. This patch resolves expected paths, preserves non-BILI system environment and explicitly decodes the report as UTF-8. The fixed reader revision `91649f610ae78234ffc280e4ecb0c6ae561a2275` then passed all three jobs in [fork CI run 41285121344](https://github.com/FireworksRainFromAbove/dsh-bili-scroll/actions/runs/41285121344).
+
+| Platform | Adapter tests | Stdio probe | Existing DSH tests | Result |
+| --- | --- | --- | --- | --- |
+| [Linux / ubuntu-latest](https://github.com/FireworksRainFromAbove/dsh-bili-scroll/actions/runs/41285121344/job/124784756972) | 44 passed | 23 tools; write denied; local workflow passed | 7 passed, 1 skipped | Passed |
+| [macOS / macos-latest](https://github.com/FireworksRainFromAbove/dsh-bili-scroll/actions/runs/41285121344/job/124784757020) | 44 passed | 23 tools; write denied; local workflow passed | 7 passed, 1 skipped | Passed |
+| [Windows / windows-latest](https://github.com/FireworksRainFromAbove/dsh-bili-scroll/actions/runs/41285121344/job/124784756796) | 44 passed | 23 tools; write denied; local workflow passed | 7 passed, 1 skipped | Passed |
+
+Each CI job installed the hash-locked dependencies in its runner environment and used Python 3.12 / Node 22. These are offline fork-CI results for the exact revision above, not upstream maintainer approval, live-account acceptance or host integration tests.
 
 ## Not executed / not claimed
 
 - Fresh QR scan/confirmation through this new adapter. QR continuity and cookie receipt remain covered by synthetic cross-process tests; the real account test reused an already established login.
 - Private favorite-list access and other account-dependent reads beyond the explicitly verified subtitles/recommendations.
 - Human verification of generated summaries or host vision behavior on returned frames.
-- A passing three-platform remote CI run after the review fixes. Initial Linux CI passed, while the macOS/Windows failures and their fixes are recorded above. Windows ACL behavior is not established by POSIX mode tests.
+- Live-account retesting of the revised subtitle/storyboard readers. The authenticated acceptance above predates those reader changes.
+- Windows ACL behavior beyond the tested offline file operations; POSIX mode tests do not establish Windows ACL semantics.
 - Installation into a live OpenClaw instance. CLI syntax was checked against OpenClaw 2026.10.7; the native MCP protocol was proven with its SDK. No live host configuration was changed.
 
 These are integration acceptance steps, not results inferred from mocks. The anonymous smoke result does not prove any account-side feature.
