@@ -92,18 +92,37 @@ if (typeof clientMod?.apply !== 'function') fail('client.js 的 factory 必须�
 const slotsReg = []
 const styleNodes = []
 const prevDoc = globalThis.document
-const prevWin2 = globalThis.window
-// ⭐ 2026-10-31（PR #111 起）：apply 会往 window / document 挂事件监听（工作区缓存失效）——
-//    真实浏览器里这两个一定在；假环境里没有就会 TypeError。这里补一套最小的。
-globalThis.window = { addEventListener() {}, removeEventListener() {} }
+const prevWin = globalThis.window
+// ⭐ 2026-11-02：2.4.0 的 client.js 在 apply 里挂了 window/document 的事件监听
+//    （切回前台就重查"这个会话在哪个工作区"）。以前的桩只有 window.__ModuleLoader__，
+//    没有 addEventListener ⇒ **上游 2.4.0 原版跑自检就会抛 TypeError**（不是我们合并弄坏的）。
+//    这里把 window 补成能加/删监听的假对象，并记下注册了什么，方便断言。
+const listeners = []
+const fakeWin = {
+  __ModuleLoader__: globalThis.window?.__ModuleLoader__,
+  addEventListener: (type, fn) => listeners.push({ type, fn, target: 'window' }),
+  removeEventListener: () => {},
+  location: { search: '', href: 'http://localhost/' },
+  matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
+  setTimeout: (fn) => { try { fn() } catch { /* 忽略 */ } return 0 },
+  clearTimeout: () => {},
+}
+globalThis.window = fakeWin
 globalThis.document = {
   createElement: () => ({ setAttribute() {}, remove() {}, textContent: '' }),
   head: { appendChild: (n) => styleNodes.push(n) },
-  addEventListener() {}, removeEventListener() {}, hidden: false,
+  addEventListener: (type, fn) => listeners.push({ type, fn, target: 'document' }),
+  removeEventListener: () => {},
+  hidden: false,
+  visibilityState: 'visible',
+  querySelector: () => null,
+  querySelectorAll: () => [],
+  body: { appendChild() {}, classList: { add() {}, remove() {}, toggle() {} } },
 }
 try {
   clientMod.apply({
     effect: (fn) => { try { return fn() } catch { return undefined } },
+    get: () => undefined,
     slots: {
       inject: (name, fn) => { fn() },
       register: (opts, Component) => { slotsReg.push({ ...opts, hasComponent: typeof Component === 'function' }); return {} },
@@ -111,11 +130,11 @@ try {
   })
 } catch (e) {
   globalThis.document = prevDoc
-  globalThis.window = prevWin2
+  globalThis.window = prevWin
   fail('client.js 的 apply(ctx) 抛错', e)
 }
 globalThis.document = prevDoc
-globalThis.window = prevWin2
+globalThis.window = prevWin
 
 if (!slotsReg.length) fail('client.js 的 apply 没有往任何 slot 注册组件')
 if (!styleNodes.length) fail('client.js 的 apply 没有把样式挂上（页面会没样子）')
