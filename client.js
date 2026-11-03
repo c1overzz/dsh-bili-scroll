@@ -263,6 +263,7 @@ function WatchTab() {
       const [favFolders, setFavFolders] = React.useState(null)   // 收藏夹列表（下拉用，null = 还没读）
       const [favId, setFavId] = React.useState(null)             // 选中的收藏夹 fid（字符串）
       const [modelList, setModelList] = React.useState(null)     // 可选模型（null = 还没读；[] = 读到了但没有）
+      const [wsList, setWsList] = React.useState(null)           // DSH 里已建好的工作区（下拉用，null = 还没读）
       const [persona, setPersona] = React.useState(null)   // 人设提示词草稿
       const [excl, setExcl] = React.useState(null)              // 排除词草稿（一行一个）
       const [cLen, setCLen] = React.useState(null)              // 评论长度 short/medium/long
@@ -342,6 +343,13 @@ function WatchTab() {
         jget('/models').then((r) => { if (alive.current) setModelList(r && r.ok ? (r.providers || []) : []) })
           .catch(() => { if (alive.current) setModelList([]) })
       }, [modelList])
+
+      // ⭐ 2026-11-04：已建好的工作区列表（宿主查 workspaceRegistry）—— 只读一次
+      React.useEffect(() => {
+        if (wsList !== null) return
+        jget('/workspaces').then((r) => { if (alive.current) setWsList(r && r.ok ? (r.workspaces || []) : []) })
+          .catch(() => { if (alive.current) setWsList([]) })
+      }, [wsList])
 
       const win = { ...DEFAULT_WINDOWS, ...(st?.windows || {}) }
 
@@ -601,6 +609,13 @@ function WatchTab() {
       const modelOptions = []
       for (const p of usableList) for (const m of (p.models || [])) modelOptions.push(p.id + '|' + m.id)
       const modelValue = (cfg.modelProvider && cfg.modelName) ? String(cfg.modelProvider) + '|' + String(cfg.modelName) : ''
+      /* ⭐ 2026-11-04：工作区下拉的当前值 —— 配置里存的可能是带斜杠/反斜杠的路径，和注册表里的写法不一定一样 */
+      const normWs = (x) => { let v = String(x || '').split(String.fromCharCode(92)).join('/'); while (v.endsWith('/')) v = v.slice(0, -1); return v.toLowerCase() }
+      const wsValue = (() => {
+        const cur = String(cfg.workspace || '')
+        const hit = (wsList || []).find((w) => normWs(w.path) === normWs(cur))
+        return hit ? hit.path : cur
+      })()
       /* ⭐ 分组标题上写清楚这条路怎么用：deepseek-official 要 API key，账号登录的机器选它跑不起来 */
       const providerLabel = (p) => p.id === 'deepseek-account' ? p.name + ' · 账号登录'
         : p.id === 'deepseek-official' ? p.name + ' · 需要 API key'
@@ -833,6 +848,24 @@ function WatchTab() {
             st.asrTail ? h('div', null,
               h('div', { 'data-bd-note': '' }, st.asrInstalling ? '正在装转写依赖（进度）：' : '转写依赖的日志（末尾）—— 只有「没字幕的视频」用得到它：'),
               h('pre', { 'data-bd-pre': '' }, st.asrTail)) : null) : null),
+
+        /* ── 工作区（值班轮跑在哪儿 / 会话归到哪儿）── */
+        h('div', { 'data-bd-sec': '', 'data-bd-group': 'taste', 'data-bd-away': tab === 'taste' ? undefined : '' },
+          h('div', { 'data-bd-h': '' }, '工作区'),
+          h('select', {
+            'data-bd-input': '', value: wsValue,
+            onChange: (e) => patch({ workspace: e.target.value }, '工作区'),
+          },
+            h('option', { value: '' }, '不限定（会话留在插件家，不归任何工作区）'),
+            ...(wsList || []).map((w) => h('option', { key: w.id, value: w.path },
+              (w.title || w.path) + '（' + w.path + '）')),
+            (wsValue && !(wsList || []).some((w) => normWs(w.path) === normWs(wsValue)))
+              ? h('option', { value: wsValue }, wsValue + '（当前设置，不在列表里）') : null),
+          h('div', { 'data-bd-note': '' },
+            '值班轮就跑在这个目录里：会话会归到这个工作区（而不是侧栏「未分组」）、它的 AGENTS.md 会作为人设参考，'
+            + '「刷过的视频」tab 也只在这个工作区的会话里出现。'),
+          wsList === null ? h('div', { 'data-bd-note': '' }, '工作区列表读取中…') : null,
+          (wsList && wsList.length === 0) ? h('div', { 'data-bd-note': '' }, 'DSH 里还没建过工作区 —— 先在左侧新建一个，再回来选。') : null),
 
         /* ── 关注什么 / 在哪儿刷 ── */
         h('div', { 'data-bd-sec': '', 'data-bd-group': 'taste', 'data-bd-away': tab === 'taste' ? undefined : '' },
