@@ -113,7 +113,7 @@ export const Config = !z ? undefined : z.object({
     /** 手动跑一轮最多挑几条（手动是「额外的一次」，不占每天额度） */
     manualMax: z.natural().default(3).extra('volatile', true),
     /** 两次手动之间至少隔几分钟（防手滑狂点、防烧 token） */
-    manualCooldownMin: z.natural().default(10).extra('volatile', true),
+    manualCooldownMin: z.natural().default(3).extra('volatile', true),
     /** 填了关键词时用哪种排序（pubdate=最新 / click=播放 / dm=弹幕 / totalrank=综合） */
     searchSort: z.string().default('pubdate').extra('volatile', true),
     /** 关键词搜索翻几页（一页约 20 条，默认 2 页 ≈ 40 条候选） */
@@ -273,7 +273,7 @@ function reportMeta() {
     dmMode: 'only', dmUid: 0,
     keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, favFolderId: 0,
     // ⭐ 2.3.0：手动轮 / 抓取量 / 排除词 / 评论长度 —— 少一项 normalize 就会把用户存的值丢掉
-    manualMax: 3, manualCooldownMin: 10, searchSort: 'pubdate', searchPages: 2, fetchPerRound: 8, excludeWords: [], commentLength: 'medium',
+    manualMax: 3, manualCooldownMin: 3, searchSort: 'pubdate', searchPages: 2, fetchPerRound: 8, excludeWords: [], commentLength: 'medium',
     modelProvider: '', modelName: '', runTimeoutMinutes: 20,
   }
   const normalize = (src, base) => {
