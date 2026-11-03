@@ -2946,6 +2946,16 @@ function reportMeta() {
       })
     }
 
+    // ⭐ 2026-11-04：设置页「工作区」下拉的数据源 —— DSH 里**已经建好**的工作区（不是一个要手填的路径字符串）
+    if (req.method === 'GET' && path === '/api/bili-duty/workspaces') {
+      let list = []
+      try {
+        const reg = ctx.get('workspaceRegistry')
+        list = (reg?.list?.() || []).map((w) => ({ id: String(w.id || ''), path: String(w.path || ''), title: String(w.title || '') }))
+      } catch { /* 拿不到注册表 ⇒ 空列表，界面会提示"还没建过工作区" */ }
+      return sendJson(res, 200, { ok: true, workspaces: list, current: String(cfg.workspace || '') })
+    }
+
     // ⭐ 2026-10-23：设置页「模型」下拉的数据源（provider / model 全从宿主 llm 服务取，不写死）
     if (req.method === 'GET' && path === '/api/bili-duty/models') {
       const cat = await listModelCatalog()
