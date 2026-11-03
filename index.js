@@ -1590,6 +1590,35 @@ function reportMeta() {
    * ⚠️ 只在"报告本来该有却没有"时补（`reportLevel: off` 不补），不覆盖已有报告。
    */
     const writeRoundNotesToReport = () => {
+      // ⭐ #172：原地替换某一节（不是"删掉后面全部再重写"）—— 多轮时后面的正文不能再被剪掉。
+      //   规则：找出所有 marker 节 → 全删掉 → 在第一个出现的位置插回合并后的那一节。
+      const replaceSect = (cur, marker, block) => {
+        const ranges = []
+        let idx = 0
+        for (;;) {
+          const at = cur.indexOf(marker, idx)
+          if (at < 0) break
+          const after = cur.slice(at + marker.length)
+          const m = after.match(/\n## /)
+          const end = m ? at + marker.length + m.index + 1 : cur.length
+          ranges.push([at, end])
+          idx = end
+        }
+        const body = block.replace(/^\s*\n/, '').replace(/\s*$/, '')
+        if (!ranges.length) return cur.replace(/\s*$/, '') + '\n\n' + body + '\n'
+        const firstStart = ranges[0][0]
+        let stripped = ''
+        let cursor = 0
+        for (const [s, e] of ranges) { stripped += cur.slice(cursor, s); cursor = e }
+        stripped += cur.slice(cursor)
+        const before = stripped.slice(0, firstStart).replace(/\s*$/, '')
+        const after = stripped.slice(firstStart).replace(/^\s*\n/, '').replace(/\s*$/, '')
+        let out = before ? before + '\n\n' : ''
+        out += body
+        if (after) out += '\n\n' + after
+        return out + '\n'
+      }
+
       try {
         if (!roundNotes.length) return
         if (String(cfg.reportLevel || 'full') === 'off') return
@@ -1597,9 +1626,7 @@ function reportMeta() {
         const block = '## 投递\n\n' + roundNotes.map((n) => '- ' + n).join('\n') + '\n'
         if (!existsSync(f)) { writeFileSync(f, `# 刷B站 · ${dayKey()}\n\n` + block, 'utf8'); return }
         let cur = readFileSync(f, 'utf8')
-        const at = cur.indexOf('## 投递')
-        if (at >= 0) cur = cur.slice(0, at).replace(/\s*$/, '') + '\n'
-        writeFileSync(f, cur.replace(/\s*$/, '') + '\n' + block, 'utf8')
+        writeFileSync(f, replaceSect(cur, '## 投递', block), 'utf8')
       } catch { /* 宁可没这段，也不能让这一轮挂掉 */ }
     }
 
