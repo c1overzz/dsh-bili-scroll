@@ -205,13 +205,20 @@ select[data-bd-input] option,select[data-bd-input] optgroup{
 function WatchTab() {
   const PAGE = 30
   const onOpenUrl = (u) => { jpost('/open', { what: 'url', u }).catch(() => {}) }
+  // ⭐ 2026-11-04：DSH 切视图 / 切浏览器标签回来会卸载重挂这个组件 ⇒ 筛选和滚动位置得存到 sessionStorage，
+  //    否则点开视频再回来就跳回「全部」了（页面关掉才清，这个重置才算合理）。
+  const BD_WT_KEY = 'bd-watched-tab'
+  const readSaved = () => { try { return JSON.parse(sessionStorage.getItem(BD_WT_KEY) || '{}') || {} } catch { return {} } }
+  const writeSaved = (patch) => { try { sessionStorage.setItem(BD_WT_KEY, JSON.stringify({ ...readSaved(), ...patch })) } catch { /* 隐私模式等禁用了就算了 */ } }
+  const saved = readSaved()
   const [rows, setRows] = React.useState(null)
-  const [st, setSt] = React.useState('')      // '' | picked | skipped | commented
-  const [tier, setTier] = React.useState('')  // '' | 值得看 / 可以看 / 不值当
-  const [offset, setOffset] = React.useState(0)
+  const [st, setSt] = React.useState(saved.st || '')      // '' | picked | skipped | commented
+  const [tier, setTier] = React.useState(saved.tier || '')  // '' | 值得看 / 可以看 / 不值当
+  const [offset, setOffset] = React.useState(Number(saved.off) || 0)
   const [total, setTotal] = React.useState(0)
   const load = (s, t, off) => {
-    setRows(null)
+    // ⭐ 2026-11-04：别在筛选时清空列表 —— 一清空页面高度塌下来，滚动就跳回顶部（用户以为"跳回一开始的页面"）。
+    //    首次加载时 rows 本来就是 null，"读取中…"照样会显示。
     const q = `/watched?limit=${PAGE}&offset=${off}` + (s ? '&state=' + s : '') + (t ? '&tier=' + encodeURIComponent(t) : '')
     jget(q).then((r) => {
       if (!r || !r.ok) { setRows([]); return }
@@ -219,14 +226,26 @@ function WatchTab() {
       setTotal(Number(r.total) || 0)
     }).catch(() => setRows([]))
   }
-  React.useEffect(() => { load("", "", 0) }, [])
+  React.useEffect(() => {
+    load(saved.st || '', saved.tier || '', Number(saved.off) || 0)
+    // 恢复滚动位置（等列表渲染出来再滚，250ms 足够）
+    if (Number(saved.scrollY) > 0) setTimeout(() => { try { window.scrollTo(0, Number(saved.scrollY)) } catch { /* ignore */ } }, 250)
+    return () => { writeSaved({ scrollY: (() => { try { return window.scrollY } catch { return 0 } })() }) }
+  }, [])
   const pick = (kind, v) => {
     const next = (kind === 'state' ? st : tier) === v ? '' : v
     if (kind === 'state') setSt(next); else setTier(next)
     setOffset(0)
+    writeSaved({ st: kind === 'state' ? next : st, tier: kind === 'tier' ? next : tier, off: 0 })
     load(kind === 'state' ? next : st, kind === 'tier' ? next : tier, 0)
   }
-  const go = (d) => { const n = Math.max(0, Math.min(offset + d, Math.max(0, total - 1))); setOffset(n); load(st, tier, n) }
+  const go = (d) => {
+    const n = Math.max(0, Math.min(offset + d, Math.max(0, total - 1)))
+    setOffset(n)
+    writeSaved({ off: n })
+    load(st, tier, n)
+    try { window.scrollTo(0, 0) } catch { /* 翻页才滚到顶；筛选时不滚，保住用户的位置 */ }
+  }
   const chip = (label, on, active) => h('button', { 'data-bd-chip': '', 'aria-selected': active ? 'true' : 'false', onClick: on }, label)
   return h('div', { 'data-bd-page': '', 'data-bd-wide': '' },
     h('div', { 'data-bd-row': '' },
