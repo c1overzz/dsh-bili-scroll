@@ -695,8 +695,8 @@ function WatchTab() {
             })),
           st.lastRunAt ? h('div', { 'data-bd-note': '' }, `上次跑：${new Date(st.lastRunAt).toLocaleString('zh-CN')}`) : null),
 
-        /* ── 用哪个模型跑 ── */
-        h('div', { 'data-bd-sec': '', 'data-bd-group': 'daily', 'data-bd-away': tab === 'daily' ? undefined : '' },
+        /* ── 用哪个模型跑 ──（⭐ 2026-11-04：挪到「高级」—— 它装的时候定一次就好，不是每天会动的东西；摆在「日常」里会让人以为要天天调） */
+        h('div', { 'data-bd-sec': '', 'data-bd-group': 'adv', 'data-bd-away': tab === 'adv' ? undefined : '' },
           h('div', { 'data-bd-h': '' }, '用哪个模型跑'),
           h('select', {
             'data-bd-input': '', value: modelValue,
