@@ -1431,12 +1431,24 @@ function reportMeta() {
   const BASE_PROVIDERS = ['deepseek-account', 'deepseek-official']
   /** 这些 provider 只装在某个特定 profile 里：{ provider: profile 名 } */
   const PROFILE_ONLY_PROVIDERS = { 'google-antigravity': 'headless' }
-  const providerUsable = (p) => {
+  const providerUsable = (p) => providerState(p) !== 'no'
+  /**
+   * ⭐ 2026-11-04（#175 / #130 / #163）：三态判断 —— 设置页的模型下拉需要"能选"和"确定能用"分开。
+   *   'yes'   = 白名单里的（值班轮那个 profile 一定有适配器）
+   *   'no'    = 绑定了别的 profile，这一轮肯定没有
+   *   'maybe' = 宿主里有、但**这一轮 profile 装没装我们看不到**（插件跑在 web 进程，值班轮是另一个进程）
+   * ⇒ 以前 'maybe' 一律当 false ⇒ 用户自己往值班 profile 里装了驱动也被挡（#175）。
+   *   现在放开可选，真没有驱动时由 runDuty 的失败兜底说清楚（见 lib/diagnose.mjs）。
+   */
+  const providerState = (p) => {
     const id = String(p || '')
-    if (BASE_PROVIDERS.includes(id)) return true
+    if (!id) return 'no'
+    if (BASE_PROVIDERS.includes(id)) return 'yes'
     const needProfile = PROFILE_ONLY_PROVIDERS[id]
-    if (!needProfile) return false
-    try { return effectiveProfile() === needProfile } catch { return false }
+    if (needProfile) {
+      try { return effectiveProfile() === needProfile ? 'yes' : 'no' } catch { return 'no' }
+    }
+    return 'maybe'
   }
   const usableProviders = () => BASE_PROVIDERS.concat(
     Object.keys(PROFILE_ONLY_PROVIDERS).filter((p) => providerUsable(p)),
@@ -2802,9 +2814,10 @@ function reportMeta() {
     let providers = []
     try {
       const llm = ctx.get('llm')
+      /* ⭐ 2026-11-04：不再 filter 掉"不确定"的 —— 全都列出来，各带 usable 标记，让用户自己看见 */
       const routes = (llm?.listProviders?.() || [])
-        .map((p) => ({ id: String(p?.id || ''), name: String(p?.name || p?.id || '') }))
-        .filter((p) => p.id && providerUsable(p.id))
+        .map((p) => ({ id: String(p?.id || ''), name: String(p?.name || p?.id || ''), state: providerState(p?.id) }))
+        .filter((p) => p.id && p.state !== 'no')
       // ⚠️ 并行问、每个都有 4 秒上限：串行问的话 provider 一多，设置页能等十几秒
       const ask = async (route) => {
         if (typeof llm?.listModels !== 'function') return null
@@ -2816,7 +2829,13 @@ function reportMeta() {
           ])
         } catch { models = [] }
         if (!Array.isArray(models) || !models.length) return null
-        return { id: route.id, name: route.name || route.id, models: models.map((m) => ({ id: String(m.id), name: String(m.name || m.id) })) }
+        return {
+          id: route.id,
+          name: route.name || route.id,
+          usable: route.state,
+          why: route.state === 'yes' ? '' : '这个只在你的主 profile 里装了；值班轮那个 profile 里有没有，插件看不到 —— 选了之后如果那一轮报「没有适配器」，说明要往值班 profile 里补一份 provider 定义',
+          models: models.map((m) => ({ id: String(m.id), name: String(m.name || m.id) })),
+        }
       }
       providers = (await Promise.all(routes.map(ask))).filter(Boolean)
     } catch { /* 老版本 / 没 llm 服务 ⇒ 空列表：界面只留「跟随当前会话」 */ }

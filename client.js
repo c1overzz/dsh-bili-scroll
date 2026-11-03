@@ -604,8 +604,9 @@ function WatchTab() {
        *    这样「跟随当前会话」（空值）和"钉死某一个"用同一个 select 就能表达。
        *    ⚠️ 前端也再筛一遍：万一接的是旧版宿主（/models 还是把所有 provider 都吐出来），
        *       至少下拉里不会出现必然 NO_ADAPTER 的那些。 */
-      const USABLE_PROVIDERS = ['deepseek-account', 'deepseek-official', 'google-antigravity']
-      const usableList = (modelList || []).filter((p) => USABLE_PROVIDERS.includes(p.id))
+      /* ⭐ 2026-11-04（#175）：不再按写死的名单筛 —— 后端已经给每个 provider 带了 usable，全都列出来；
+       *    'yes' 是白名单里的（值班轮一定有），'maybe' 是宿主有、但值班那个 profile 装没装看不到。 */
+      const usableList = (modelList || [])
       const modelOptions = []
       for (const p of usableList) for (const m of (p.models || [])) modelOptions.push(p.id + '|' + m.id)
       const modelValue = (cfg.modelProvider && cfg.modelName) ? String(cfg.modelProvider) + '|' + String(cfg.modelName) : ''
@@ -617,10 +618,12 @@ function WatchTab() {
         return hit ? hit.path : cur
       })()
       /* ⭐ 分组标题上写清楚这条路怎么用：deepseek-official 要 API key，账号登录的机器选它跑不起来 */
-      const providerLabel = (p) => p.id === 'deepseek-account' ? p.name + ' · 账号登录'
-        : p.id === 'deepseek-official' ? p.name + ' · 需要 API key'
-        : p.id === 'google-antigravity' ? p.name + ' · Antigravity 订阅'
-        : p.name
+      const PROVIDER_HINT = { 'deepseek-account': ' · 账号登录', 'deepseek-official': ' · 需要 API key', 'google-antigravity': ' · Antigravity 订阅' }
+      const UNCERTAIN_TAG = ' · 不确定值班轮有没有'
+      const providerLabel = (p) => {
+        const base = (p.name || p.id) + (PROVIDER_HINT[p.id] || '')
+        return p.usable === 'maybe' ? base + UNCERTAIN_TAG : base
+      }
       const pickModel = (v) => {
         if (!v) { patch({ modelProvider: '', modelName: '' }, '模型'); return }
         const i = v.indexOf('|')
@@ -709,18 +712,19 @@ function WatchTab() {
             '它每轮是另起一个 headless 会话跑的 —— 默认用你在会话里选的那个模型；'
             + '想让它固定用某个（比如更省 / 更强），就在这里选。改完下一轮生效，不用重启。'),
           h('div', { 'data-bd-note': '' },
-            '⚠️ 这里只列「这一轮那个 profile 里装了的」provider。2.1.0 起值班轮默认跑最小权限的 `bili-duty` profile，'
-            + '里面只有 DeepSeek 两条路由；Antigravity 只在老的 `headless` profile 里，所以默认不出现。'),
+            '⚠️ 这里列的是「你的主 profile 里装了的」provider。值班轮跑在另一个 profile（默认 `bili-duty`），'
+            + '两边不一定一样 —— 标着「不确定」的那些，只有你自己往值班那个 profile 里装了对应驱动才能用；'
+            + '真没有的话，那一轮会退回 DeepSeek 兜底，并写明原因。'),
           st.model && st.model.ignored ? h('div', { 'data-bd-msg': '', 'data-warn': '' },
             '你指定的 ' + st.model.ignored.provider + ' / ' + st.model.ignored.model
-            + ' 刷B站这一轮用不了（headless 里没有这个适配器）⇒ 已自动改回'
+            + ' 刷B站这一轮用不了（值班那个 profile 里没有这个适配器）⇒ 已自动改回'
             + (st.model.source === 'session' ? '跟随当前会话：' + st.model.provider + ' / ' + st.model.model
               : ' DeepSeek 兜底：' + st.model.provider + ' / ' + st.model.model)
             + '。换一个上面列表里的，或把「跟随当前会话」留空。') : null,
           st.model && st.model.source === 'fallback' ? h('div', { 'data-bd-msg': '', 'data-warn': '' },
             '你当前会话用的模型'
             + (st.model.sessionIgnored ? ' ' + st.model.sessionIgnored.provider + ' / ' + st.model.sessionIgnored.model : '')
-            + ' 刷B站这一轮用不了（headless 里没有这个适配器）⇒ 这一轮会改用 '
+            + ' 刷B站这一轮用不了（值班那个 profile 里没有这个适配器）⇒ 这一轮会改用 '
             + st.model.provider + ' / ' + st.model.model + ' 跑，不会白跑。'
             + '想固定它的话，在上面选一个。') : null,
           modelList === null ? h('div', { 'data-bd-note': '' }, '模型列表读取中…') : null,
