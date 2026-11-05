@@ -2384,7 +2384,7 @@ function reportMeta() {
   /** 从今天的报告里抠出"挑中的" BV 号（只认行首的 ### BV… 标题行；代码围栏里的不算） */
   const pickIdsFromReport = (file) => {
     try {
-      const fence = new RegExp('```[\s\S]*?```', 'g')
+      const fence = /```[\s\S]*?```/g
       const text = readFileSync(file, 'utf8').replace(fence, '')
       return [...new Set([...text.matchAll(/^#{2,3}[ \t]*(BV[0-9A-Za-z]{10})/gm)].map((m) => m[1]))]
     } catch { return [] }
