@@ -9,8 +9,13 @@ import { join } from 'node:path'
 import { dayKey } from '../lib/state.mjs'
 
 const root = mkdtempSync(join(tmpdir(), 'bili-rounds-'))
-process.env.DSH_HOME = join(root, 'import-home')   // 别让 hostdeps 去翻这台机器真实的 ~/.dsh
-const { apply } = await import('../index.js')
+// 只在 import 期间换 DSH_HOME：别让 hostdeps 去翻这台机器真实的 ~/.dsh。之后的路径用桩 ctx 的 dshHomePath，不读它
+const realDshHome = process.env.DSH_HOME
+process.env.DSH_HOME = join(root, 'import-home')
+const { apply } = await import('../index.js').finally(() => {
+  if (realDshHome === undefined) delete process.env.DSH_HOME
+  else process.env.DSH_HOME = realDshHome
+})
 
 // 假 dsh：和 duty_report_append 一样，把这一轮的正文原样追加到当天日报末尾
 const fakeDsh = join(root, 'fake-dsh.mjs')
