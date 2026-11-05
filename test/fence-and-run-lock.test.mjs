@@ -73,3 +73,33 @@ test('收藏：围栏外挑中的照收，围栏里的不带上', async (t) => {
   assert.equal(r.total, 1, JSON.stringify(r))
   assert.match(r.failures[0], /^BV1aaaaaaaaa: /)
 })
+
+/* ─────────── 这一轮没跑起来，跨宿主运行锁就得放开 ─────────── */
+
+const lockOf = (host) => JSON.parse(readFileSync(join(host.stateDir, 'run-lock.json'), 'utf8'))
+
+test('手动轮被冷却拒绝：不留运行锁', async (t) => {
+  const host = startHost(t, { config: { manualCooldownMin: 3 }, state: { lastManualAt: Date.now() - 1000 } })
+  const r = await host.post('/api/bili-duty/run')
+  assert.equal(r.started, false)
+  assert.match(r.error, /手动轮刚跑过/)
+  assert.notEqual(lockOf(host).pid, process.pid)
+})
+
+test('开跑时同步抛错（外层 catch）：不留运行锁', async (t) => {
+  // 参数里带 NUL ⇒ spawn 直接同步抛 ERR_INVALID_ARG_VALUE，子进程根本起不来
+  const host = startHost(t, { config: { personaPrompt: 'a\u0000b' } })
+  const r = await host.post('/api/bili-duty/run')
+  assert.equal(r.started, false)
+  assert.match(readFileSync(join(host.stateDir, 'duty.log'), 'utf8'), /刷B站开跑失败/)
+  assert.notEqual(lockOf(host).pid, process.pid)
+})
+
+test('另一个宿主真在跑：让路，也不动它的锁', async (t) => {
+  const host = startHost(t)
+  const theirs = { pid: process.ppid, ts: Date.now(), why: 'window:noon' }
+  writeFileSync(join(host.stateDir, 'run-lock.json'), JSON.stringify(theirs), 'utf8')
+  const r = await host.post('/api/bili-duty/run')
+  assert.equal(r.busy, true)
+  assert.deepEqual(lockOf(host), theirs)
+})
