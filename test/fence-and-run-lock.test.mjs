@@ -8,9 +8,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 const home = mkdtempSync(join(tmpdir(), 'bili-host-'))
+// DSH_HOME 只在 import 时要用（lib/hostdeps.mjs 加载时按它找宿主的包），之后的路径都走假 ctx 的 dshHomePath，所以 import 完就还原
+const savedDshHome = process.env.DSH_HOME
 process.env.DSH_HOME = home
 const { apply } = await import('../index.js')
 const { dayKey } = await import('../lib/state.mjs')
+if (savedDshHome === undefined) delete process.env.DSH_HOME
+else process.env.DSH_HOME = savedDshHome
 test.after(() => rmSync(home, { recursive: true, force: true, maxRetries: 5 }))
 
 const NO_PYTHON = join(home, 'no-such-python')
