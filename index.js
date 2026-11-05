@@ -29,6 +29,7 @@ import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { McpClient } from './lib/mcp.mjs'
 import { verifyRecent, appendVerifyToReport } from './lib/verify.mjs'
+import { replaceSect } from './lib/report-sect.mjs'
 import { WINDOWS, stateDirOf, readJson, writeJson, ensureHomeFiles, ensureCharter, charterPath, inWindow, dayKey, seenDay } from './lib/state.mjs'
 import { diagnoseRound } from './lib/diagnose.mjs'
 import { loginStart, loginPoll, saveCredential, renderQrPng } from './lib/login.mjs'
@@ -1387,7 +1388,7 @@ function reportMeta() {
         log('   目标目录：' + dutyProfileDir)
         log('   常见原因：杀软或 OneDrive 正在占用、盘符长路径、目标被别的进程锁住')
         log('   ⚠️ 这一轮只能用 headless（权限更大：能看到文件系统）—— 修好后重启 dsh 就回到最小权限')
-        roundNotes.push('⚠️ 最小权限 profile 没铺上，这一轮退回了 headless（权限更大）：' + why)
+        startupNotes.push('⚠️ 最小权限 profile 没铺上，这一轮退回了 headless（权限更大）：' + why)
         return false
     }
   }
@@ -1572,14 +1573,17 @@ function reportMeta() {
    */
   let verifying = false
     // ⭐ #137：这一轮"投递层面"的实情，收尾写进报告（免得以为发了、晚上才发现没收到）
+    // ⭐ #155：roundNotes 只管这一轮（runDuty 开跑前清空）；startupNotes 是启动时的告警，要重启才变，每轮都还算数
     const roundNotes = []
+    const startupNotes = []
   const runVerify = async (why = 'manual') => {
     if (verifying) return { ok: false, error: '上一次复核还没跑完，等它完事' }
     verifying = true
     try {
       log(`评论复核开始（${why}）`)
       const r = await verifyRecent(stateDir, { log })
-      const f = appendVerifyToReport(stateDir, r.text)
+      // ⭐ #135：没有结果时 r.text 只是一句没标题的提示，写进去每轮多一行，还会把已有的真结果冲掉
+      const f = r.checked.length ? appendVerifyToReport(stateDir, r.text) : null
       // ⭐ 2026-10-19：没有可核的记录时**别往 duty.log 里刷**（用户截图里看到同一句连了 4 行，
       //    那是每轮 90 秒后自动核一次 + 手动点，读起来像在报错 ✗）⇒ 只在有活干的时候记日志 ✓
       if (r.checked.length) log(`评论复核结束（${why}）：查了 ${r.checked.length} 条${f ? `，已写进 ${f}` : ''}`)
@@ -1602,41 +1606,13 @@ function reportMeta() {
    * ⚠️ 只在"报告本来该有却没有"时补（`reportLevel: off` 不补），不覆盖已有报告。
    */
     const writeRoundNotesToReport = () => {
-      // ⭐ #172：原地替换某一节（不是"删掉后面全部再重写"）—— 多轮时后面的正文不能再被剪掉。
-      //   规则：找出所有 marker 节 → 全删掉 → 在第一个出现的位置插回合并后的那一节。
-      const replaceSect = (cur, marker, block) => {
-        const ranges = []
-        let idx = 0
-        for (;;) {
-          const at = cur.indexOf(marker, idx)
-          if (at < 0) break
-          const after = cur.slice(at + marker.length)
-          const m = after.match(/\n## /)
-          const end = m ? at + marker.length + m.index + 1 : cur.length
-          ranges.push([at, end])
-          idx = end
-        }
-        const body = block.replace(/^\s*\n/, '').replace(/\s*$/, '')
-        if (!ranges.length) return cur.replace(/\s*$/, '') + '\n\n' + body + '\n'
-        const firstStart = ranges[0][0]
-        let stripped = ''
-        let cursor = 0
-        for (const [s, e] of ranges) { stripped += cur.slice(cursor, s); cursor = e }
-        stripped += cur.slice(cursor)
-        const before = stripped.slice(0, firstStart).replace(/\s*$/, '')
-        const after = stripped.slice(firstStart).replace(/^\s*\n/, '').replace(/\s*$/, '')
-        let out = before ? before + '\n\n' : ''
-        out += body
-        if (after) out += '\n\n' + after
-        return out + '\n'
-      }
-
       try {
-        if (!roundNotes.length) return
+        const notes = [...startupNotes, ...roundNotes]
+        if (!notes.length) return
         if (String(cfg.reportLevel || 'full') === 'off') return
         const f = join(outDir, `${dayKey()}.md`)
-        const block = '## 投递\n\n' + roundNotes.map((n) => '- ' + n).join('\n') + '\n'
-        if (!existsSync(f)) { writeFileSync(f, `# 刷B站 · ${dayKey()}\n\n` + block, 'utf8'); return }
+        const block = '## 投递\n\n' + notes.map((n) => '- ' + n).join('\n') + '\n'
+        if (!existsSync(f)) { writeFileSync(f, `# 刷B站 · ${dayKey()}\n\n` + block + '\n', 'utf8'); return }
         let cur = readFileSync(f, 'utf8')
         writeFileSync(f, replaceSect(cur, '## 投递', block), 'utf8')
       } catch { /* 宁可没这段，也不能让这一轮挂掉 */ }
@@ -1847,6 +1823,7 @@ function reportMeta() {
     const overlay = ensureOverlay()
       const args = [...dsh.args, '--profile', effectiveProfile()]
     if (overlay) args.push('--patch', overlay)
+    roundNotes.length = 0
     args.push(promptFor(why))
     // ⭐ 这一轮的工作目录 = 使用者（或别的用户）的**工作区** —— 只有这样它的 `AGENTS.md` 才会自动加载。
     // ⭐ 工作目录 = **插件家**：那一轮**被沙箱关着**，只写得了自己工作目录里的东西 ✗
