@@ -624,7 +624,8 @@ function WatchTab() {
        *    ⚠️ 前端也再筛一遍：万一接的是旧版宿主（/models 还是把所有 provider 都吐出来），
        *       至少下拉里不会出现必然 NO_ADAPTER 的那些。 */
       /* ⭐ 2026-11-04（#175）：不再按写死的名单筛 —— 后端已经给每个 provider 带了 usable，全都列出来；
-       *    'yes' 是白名单里的（值班轮一定有），'maybe' 是宿主有、但值班那个 profile 装没装看不到。 */
+       *    'yes' 是白名单里的（值班轮一定有），'maybe' 是宿主有、但值班那个 profile 装没装看不到。
+       *    出厂的 bili-duty 上后端不给 'maybe'，只有自建 profile 或改过 bundles 的模板才有。 */
       const usableList = (modelList || [])
       const modelOptions = []
       for (const p of usableList) for (const m of (p.models || [])) modelOptions.push(p.id + '|' + m.id)
@@ -731,9 +732,9 @@ function WatchTab() {
             '它每轮是另起一个 headless 会话跑的 —— 默认用你在会话里选的那个模型；'
             + '想让它固定用某个（比如更省 / 更强），就在这里选。改完下一轮生效，不用重启。'),
           h('div', { 'data-bd-note': '' },
-            '⚠️ 这里列的是「你的主 profile 里装了的」provider。值班轮跑在另一个 profile（默认 `bili-duty`），'
-            + '两边不一定一样 —— 标着「不确定」的那些，只有你自己往值班那个 profile 里装了对应驱动才能用；'
-            + '真没有的话，那一轮会退回 DeepSeek 兜底，并写明原因。'),
+            '⚠️ 值班轮跑在另一个 profile（默认 `bili-duty`），和你的主 profile 不一定一样。自带的 `bili-duty` 只有 DeepSeek 两条，这里也就只列这两条；'
+            + '换成自建 profile，或者改过模板的 bundles，主 profile 里的其他 provider 才会列出来并标「不确定」。'
+            + '钉了这种 provider 不会被悄悄换掉：值班 profile 里真没有驱动的话，那一轮会直接失败（NO_ADAPTER），原因写进 duty.log，当天还没有日报时也会写进占位报告。'),
           st.model && st.model.ignored ? h('div', { 'data-bd-msg': '', 'data-warn': '' },
             '你指定的 ' + st.model.ignored.provider + ' / ' + st.model.ignored.model
             + ' 刷B站这一轮用不了（值班那个 profile 里没有这个适配器）⇒ 已自动改回'
