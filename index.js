@@ -2509,7 +2509,10 @@ function reportMeta() {
     for (const raw of text.split(/\r?\n/)) {
       const line = raw.trim()
       if (!line.startsWith('|')) continue
-      const cells = line.split('|').map((s) => s.trim())
+      /* ⭐ 2026-11-07（#191）：标题里的竖线会被模型按 Markdown 规范转义成 `\|`，
+       *   裸 split('|') 照样切开 ⇒ 列错位、标题被截、UP 吃进标题后半截。
+       *   只按"未转义"的竖线切，切完再把 `\|` 还原成 `|`。 */
+      const cells = line.split(/(?<!\\)\|/).map((s) => s.replace(/\\\|/g, '|').trim())
       const c = cells.slice(1, cells.length - 1)
       if (c.length < 3) continue
       // ⭐ BV 用扫描定位，不再假设在第 2 列（标题里带竖线也不会错位）
@@ -2523,6 +2526,15 @@ function reportMeta() {
       const title = c[bvIdx + 1] || ''
       const up = c[bvIdx + 2] || ''
       const status = c[c.length - 1] || ''
+      /* ⭐ 2026-11-04：状态列里括号内是"为什么跳过"，以前只留整串、卡片上没地方显示它
+       *   ⇒ 「刷过的视频」里点开只知道"跳过"、不知道为什么。这里单独抽出来，前端直接显示。
+       *   例：跳过（无字幕·转写关；下轮若开转写优先看） ⇒ reason = 无字幕·转写关；下轮若开转写优先看 */
+      const reason = (() => {
+        const m = /[（(]([^）)]+)[）)]/.exec(status)
+        const r = m ? m[1].trim() : ''
+        // 「挑了（第1条）」括号里是序号，不是理由 ⇒ 不算
+        return /^第\s*\d+\s*条$/.test(r) ? '' : r
+      })()
       const key = bvid + '@' + day
       if (seen.has(key)) continue
       seen.add(key)
@@ -2530,7 +2542,7 @@ function reportMeta() {
       const picked = !skipped && /挑|收|选|值得看|可以看/.test(status)
       const commented = /评论/.test(status)
       const delivered = /评论|私信|已发|发给/.test(status) || deliveredBvs.has(bvid) || (picked && dmDelivered.has(`${day}@${bvid}`))
-      out.push({ day, bvid, title, up, status, picked, commented, delivered, url: 'https://www.bilibili.com/video/' + bvid })
+      out.push({ day, bvid, title, up, status, reason, picked, commented, delivered, url: 'https://www.bilibili.com/video/' + bvid })
     }
     // ⭐ 以前这里是静默丢行 ⇒ 卡片墙空了也没人知道为什么（#133）
     if (bad !== seenBadDays) {
@@ -3076,7 +3088,8 @@ function reportMeta() {
         const offset = Math.max(0, Number(url.searchParams.get('offset')) || 0)
         const meta = reportMeta()
           const notes = (() => { try { return new Set(readdirSync(notesDir).map((f) => f.split('-')[0])) } catch { return new Set() } })()
-        const allRows = all.map((x) => { const m = meta.get(x.bvid) || {}; return { ...x, tier: m.tier || '', why: m.why || '', note: notes.has(x.bvid) } })
+        // ⭐ 2026-11-04：跳过的理由在 seen.md 的状态列里（x.reason），挑中的理由在日报里（m.why）
+        const allRows = all.map((x) => { const m = meta.get(x.bvid) || {}; return { ...x, tier: m.tier || '', why: x.reason || m.why || '', note: notes.has(x.bvid) } })
         const onlyPicked = url.searchParams.get('picked') === '1'
         const tier = String(url.searchParams.get('tier') || '')
         const state = String(url.searchParams.get('state') || '')   // picked | skipped | commented
