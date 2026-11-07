@@ -1838,6 +1838,7 @@ function reportMeta() {
         if (last && cd > 0 && Date.now() - last < cd) {
           const wait = Math.ceil((cd - (Date.now() - last)) / 60_000)
           log(`手动轮刚跑过（${Math.round((Date.now() - last) / 60_000)} 分钟前）⇒ 再等 ${wait} 分钟`)
+          releaseRunLock()        // ⭐ 这一轮不跑了，锁留着会让另一个宿主的定时轮白白让路（还在跑的子进程上面已经挡掉了）
           return { ok: false, started: false, error: `手动轮刚跑过，再等 ${wait} 分钟（防手滑狂点）` }
         }
         bumpState({ lastManualAt: Date.now() })
@@ -1928,6 +1929,7 @@ function reportMeta() {
     })
     return { started: true, why, profile: cfg.headlessProfile, cwd, log: logFile }
    } catch (e) {
+    if (!dutyChild) releaseRunLock()   // ⭐ 没起来就放锁（子进程已经起来的话，由它的 exit 放）
     log(`刷B站开跑失败（${why}）：${e?.stack ?? e}`)
     return { started: false, why, error: String(e?.message ?? e) }
    }
@@ -2361,7 +2363,7 @@ function reportMeta() {
   /** 从今天的报告里抠出"挑中的" BV 号（只认行首的 ### BV… 标题行；代码围栏里的不算） */
   const pickIdsFromReport = (file) => {
     try {
-      const fence = new RegExp('```[\s\S]*?```', 'g')
+      const fence = /```[\s\S]*?```/g
       const text = readFileSync(file, 'utf8').replace(fence, '')
       return [...new Set([...text.matchAll(/^#{2,3}[ \t]*(BV[0-9A-Za-z]{10})/gm)].map((m) => m[1]))]
     } catch { return [] }
