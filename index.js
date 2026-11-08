@@ -34,7 +34,7 @@ import { WINDOWS, stateDirOf, readJson, writeJson, ensureHomeFiles, ensureCharte
 import { diagnoseRound } from './lib/diagnose.mjs'
 import { loginStart, loginPoll, saveCredential, renderQrPng } from './lib/login.mjs'
 import { resolveUid } from './lib/uid.mjs'
-import { loadCred as dmCred, listSessions as dmList, fetchMsgs as dmFetch } from './lib/dm.mjs'
+import { loadCred as dmCred, listSessions as dmList, fetchMsgs as dmFetch, fetchAt as dmFetchAt } from './lib/dm.mjs'
 import { ensureUv } from './lib/uvfetch.mjs'
 
 export const name = 'bili-scroll'
@@ -96,6 +96,8 @@ export const Config = !z ? undefined : z.object({
   personaPrompt: z.string().default('').extra('volatile', true),
   /** 私信监听：只认主人本人发来的私信，有新消息就回一句 · 2.0 起默认开（查私信不花 token，只有真有人发消息才回一句） */
   dmWatch: z.boolean().default(true).extra('volatile', true),
+  /** @ 监听：主人在视频评论区 @ 它 → 读字幕 → 私信回（独立于私信监听的开关 · 默认开） */
+  atWatch: z.boolean().default(true).extra('volatile', true),
   /** 私信监听间隔（分钟，最小 3） */
   dmWatchMinutes: z.natural().default(1).extra('volatile', true),
   /** 私信回复每天最多几条（防刷） */
@@ -268,7 +270,7 @@ function reportMeta() {
    *     ② **定时器回调里绝不让异常外冒**（见 tick）—— 未捕获异常会杀掉整个宿主进程。
    */
   const DEFAULTS = {
-    dmWatch: true, dmWatchMinutes: 1, dmReplyPerDay: 0, dmOwnerUid: 0,
+    dmWatch: true, atWatch: true, dmWatchMinutes: 1, dmReplyPerDay: 0, dmOwnerUid: 0,
     personaPrompt: '',
     perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
     dmMode: 'only', dmUid: 0,
@@ -2076,7 +2078,35 @@ function reportMeta() {
       + '\n⚠️ 只回纯文本：**不要 markdown 星号/加粗**、不要括号里写"（多少字…可继续发送…）"这类说明，不要复述这条要求。'
   }
 
-  function runDmReply(fromUid, text) {
+  // ⭐ @ 通知专用提示词：主人在视频评论区 @ 了它 → 读字幕 → 私信回。
+  //    跟 dmPromptFor 分开写，因为：① @ 是"要你干活"（总结/讲讲），不是寒暄，回复可长一点（私信 500 字内）；
+  //    ② 视频上下文（BV 号 / 他 @ 你时的原话）得讲清楚，别让它瞎猜是哪条视频。
+  function atPromptFor(fromUid, at) {
+    const persona = (() => {
+      try {
+        const t = String(cfg.personaPrompt || '').trim()
+        if (t) return t
+        const ws = String(cfg.workspace || '').trim()
+        if (!ws) return ''
+        const p = join(ws, 'AGENTS.md')
+        return existsSync(p) ? readFileSync(p, 'utf8').slice(0, 4000) : ''
+      } catch { return '' }
+    })()
+    // 去掉开头的"@某人 "，剩下的才是他真正的要求
+    const req = String(at.text || '').replace(/^@\S+\s*/, '').trim() || '看看这个视频、跟我讲讲'
+    const bv = String(at.bvid || '')
+    return (persona ? '（说话风格按这份人设来：\n' + persona + '\n）\n' : '')
+      + `账号持有者本人（uid=${Number(fromUid)}）在 B站 一条视频的评论区里 @ 了你，要你帮个忙。\n`
+      + `视频：${bv || '（没拿到 BV 号，让他补一下）'}\n`
+      + `他 @ 你时的原话：` + JSON.stringify(req) + '\n'
+      + '⭐ 先用 bili_subtitle 读这条视频的字幕，再按他的要求做（"总结一下"就给一段人话总结、'
+      + '"讲了啥"就讲内容、"值不值得看"就给判断）—— 说点只有读了才知道的具体细节，别空泛。\n'
+      + `然后用 bili_send_message 私信回他（receiver_uid=${Number(fromUid)}），把结果发给他。\n`
+      + '⚠️ 私信 500 字以内、纯文本、不要 markdown 星号加粗、不要"（多少字…可继续发送…）"这类尾巴、不要复述这条要求。'
+  }
+
+  // promptOverride：@ 路径传 atPromptFor(...) 进来；私信路径不传，走 dmPromptFor
+  function runDmReply(fromUid, text, promptOverride) {
     try {
       refreshCfg()
       const dsh = resolveDsh()
@@ -2087,7 +2117,8 @@ function reportMeta() {
       if (dmReplyRunning) { log('私信回复：上一条还在跑 ⇒ 这条等下一跳'); return { ok: false, busy: true } }
       dmReplyRunning = true
       const savedSid = readDmSession()
-      const args = savedSid ? [...base, '--session-id', savedSid, dmPromptFor(fromUid, text)] : [...base, dmPromptFor(fromUid, text)]
+      const _prompt = promptOverride || dmPromptFor(fromUid, text)
+      const args = savedSid ? [...base, '--session-id', savedSid, _prompt] : [...base, _prompt]
       log(`私信回复开跑：来自 uid=${fromUid}` + (savedSid ? '（续会话 ' + savedSid.slice(0, 20) + '…）' : '（开新会话）'))
       const startedAt = Date.now()
       const child = spawn(dsh.command, args, {
@@ -2174,6 +2205,46 @@ function reportMeta() {
           writeJsonFile(join(stateDir, 'dm-others.json'), { sig })
         }
       }
+      // ── @ 通知：只认主人本人的 @ → 读视频 → 私信回 ─────────────────
+      // ⚠️ 必须放在下面 `if (!mine.length) return` 之前 —— 否则"只 @ 没发私信"时 dmTick 提前
+      //    return，@ 检查永远跑不到（实测踩过：@ 了不私信 ⇒ @ 块一次都不执行）。
+      // 独立开关 cfg.atWatch（设置页可单独关，不影响私信监听）；通知按 id 去重，每个 @ 只反应一次。
+      // 只信 dmOwnerUid() 判出的主人（别人 @ 的一律不理，免得被陌生人指挥着发声）。
+      if (cfg.atWatch !== false) try {
+        const ats = await dmFetchAt(cred)
+        const mineAt = ats.filter((a) => a.fromUid === owner)
+        if (mineAt.length) {
+          const atSeenFile = join(stateDir, 'at-seen.json')
+          const seenAt = readJsonFile(atSeenFile, { processed: {} })
+          if (!seenAt.processed || typeof seenAt.processed !== 'object') seenAt.processed = {}
+          const now = Date.now()
+          let atChanged = false
+          for (const at of mineAt) {
+            if (seenAt.processed[at.id]) continue            // 这个 @ 已经处理过 ⇒ 跳过
+            if (dmReplyRunning) break                        // 上一条还在跑 ⇒ 这条下一跳再处理（不标记，不会丢）
+            const r = runDmReply(owner, '', atPromptFor(owner, at))
+            if (r && r.ok) {
+              seenAt.processed[at.id] = now
+              atChanged = true
+              log(`@ 监听：主人（${owner}）在视频 ${at.bvid || '?'} @ 了我 —— 已触发私信回复`)
+            } else if (r && r.busy) {
+              break                                          // 忙 ⇒ 下一跳重试这条（不标记）
+            } else {
+              seenAt.processed[at.id] = now                  // 失败也标记，避免每分钟无限重试刷屏
+              atChanged = true
+              log('@ 监听：触发回复没成（不重试，避免刷屏）；主人可再 @ 一次')
+            }
+          }
+          // 清理 7 天前的旧记录，免得账本无限膨胀
+          for (const [k, ts] of Object.entries(seenAt.processed)) {
+            if (now - Number(ts) > 7 * 24 * 3600_000) delete seenAt.processed[k]
+          }
+          if (atChanged) writeJsonFile(atSeenFile, seenAt)
+        }
+      } catch (e) {
+        log('@ 监听出错（已兜住）：' + String(e?.message ?? e))
+      }
+
       if (!mine.length) return
       const seen = readJsonFile(dmSeenFile, {})
       const quota = readJsonFile(dmQuotaFile, { day: '', n: 0 })
