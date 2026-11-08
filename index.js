@@ -32,6 +32,7 @@ import { verifyRecent, appendVerifyToReport } from './lib/verify.mjs'
 import { replaceSect } from './lib/report-sect.mjs'
 import { WINDOWS, stateDirOf, readJson, writeJson, ensureHomeFiles, ensureCharter, charterPath, inWindow, dayKey, seenDay } from './lib/state.mjs'
 import { diagnoseRound } from './lib/diagnose.mjs'
+import { BASE_PROVIDERS, PROFILE_ONLY_PROVIDERS, providerState as modelProviderState, isStockTemplate, chooseModel } from './lib/model-select.mjs'
 import { loginStart, loginPoll, saveCredential, renderQrPng } from './lib/login.mjs'
 import { resolveUid } from './lib/uid.mjs'
 import { loadCred as dmCred, listSessions as dmList, fetchMsgs as dmFetch } from './lib/dm.mjs'
@@ -857,8 +858,9 @@ function reportMeta() {
       + '例：`{"perDay":5,"peakValley":true,"noon":true,"night":true,"autoComment":false,"transcribe":false,"keywords":["DeepSeek Harness"]}`；'
       + '私信投递：`{"dmMode":"only","dmUid":12345678}`（dmMode = off / only / both）；'
       + '⭐ 指定这一轮用哪个模型：`{"modelProvider":"deepseek-account","modelName":"deepseek-flash"}`'
-      + '（两个都留空 = 跟随你当前会话选的模型。⚠️ 只有 headless profile 里装了的 provider 真能用：`deepseek-account` / `deepseek-official` / `google-antigravity`；'
-      + '填别的（headless 里没装的插件提供的模型）那一轮会退回跟随当前会话，并在 `status.model.ignored` 里标出来）。',
+      + '（两个都留空 = 跟随你当前会话选的模型；会话的 provider 在自带的 `bili-duty` profile 里没有时，那一轮改用 DeepSeek 兜底，并在 `status.model.sessionIgnored` 里标出来。'
+      + '⚠️ `bili-duty` 里确定有的只有 `deepseek-account` / `deepseek-official`。`google-antigravity` 只在 `headless` profile 里有，跑别的 profile 时填它会被忽略，并在 `status.model.ignored` 里标出来；'
+      + '填别的就照用、不换模型，那个 profile 里真没有驱动的话那一轮会直接失败（`NO_ADAPTER`），原因写进 `duty.log`）。',
     parameters: { patch: { type: 'object', additionalProperties: true, description: '要改的字段（可省）' } },
     async execute(args) {
       let host = null
@@ -1429,33 +1431,17 @@ function reportMeta() {
    *    Antigravity 只装在老的 `headless` profile 里。所以白名单不能写死，要按**这一轮实际用的 profile** 判断，
    *    否则钉着 Antigravity 的配置会直接 NO_ADAPTER、整轮白跑。
    */
-  const BASE_PROVIDERS = ['deepseek-account', 'deepseek-official']
-  /** 这些 provider 只装在某个特定 profile 里：{ provider: profile 名 } */
-  const PROFILE_ONLY_PROVIDERS = { 'google-antigravity': 'headless' }
-  const providerUsable = (p) => providerState(p) !== 'no'
-  /**
-   * ⭐ 2026-11-04（#175 / #130 / #163）：三态判断 —— 设置页的模型下拉需要"能选"和"确定能用"分开。
-   *   'yes'   = 白名单里的（值班轮那个 profile 一定有适配器）
-   *   'no'    = 绑定了别的 profile，这一轮肯定没有
-   *   'maybe' = 宿主里有、但**这一轮 profile 装没装我们看不到**（插件跑在 web 进程，值班轮是另一个进程）
-   * ⇒ 以前 'maybe' 一律当 false ⇒ 用户自己往值班 profile 里装了驱动也被挡（#175）。
-   *   现在放开可选，真没有驱动时由 runDuty 的失败兜底说清楚（见 lib/diagnose.mjs）。
-   */
-  const providerState = (p) => {
-    const id = String(p || '')
-    if (!id) return 'no'
-    if (BASE_PROVIDERS.includes(id)) return 'yes'
-    const needProfile = PROFILE_ONLY_PROVIDERS[id]
-    if (needProfile) {
-      try { return effectiveProfile() === needProfile ? 'yes' : 'no' } catch { return 'no' }
-    }
-    return 'maybe'
+  const modelEnv = {
+    profile: effectiveProfile,
+    // 读铺好的那份，不读插件里的模板：`dsh plugin --profile bili-duty add` 改的是这份，这一轮用的也是这份
+    templateIsStock: () => isStockTemplate(readJson(join(dutyProfileDir, 'package.json'), null)),
   }
+  /** 三态和两条选择路径的规矩见 lib/model-select.mjs */
+  const providerState = (p) => modelProviderState(p, modelEnv)
+  const providerUsable = (p) => providerState(p) !== 'no'
   const usableProviders = () => BASE_PROVIDERS.concat(
     Object.keys(PROFILE_ONLY_PROVIDERS).filter((p) => providerUsable(p)),
   )
-  /** ⭐ 连「当前会话的模型」都用不了时兜底的那一对（账号登录的机器上一定能跑） */
-  const FALLBACK_MODEL = { provider: 'deepseek-account', model: 'deepseek-flash' }
   /** 设置页/工具里钉死的那一对（两个都填了才算） */
   const pinnedModel = () => {
     const provider = String(cfg.modelProvider || '').trim()
@@ -1478,23 +1464,7 @@ function reportMeta() {
     } catch { /* 老版本没有这个服务 —— 不写就退回原行为 */ }
     return null
   }
-  const chosenModel = () => {
-    const pin = pinnedModel()
-    if (pin && providerUsable(pin.provider)) return { ...pin, source: 'plugin' }
-    const ses = sessionModel()
-    // 指定了但 headless 用不了 ⇒ 带上 `ignored`（调用方据此告警），实际用会话那个
-    if (ses && providerUsable(ses.provider)) {
-      return pin ? { ...ses, source: 'session', ignored: pin } : ses
-    }
-    // 🔴 当前会话用的也是刷B站用不了的（桌面版切到 Antigravity / Claude 就这情况）⇒
-    //    再兜底到 DeepSeek 账号路由：宁可换模型，也别让这一轮在第一个请求前就死掉
-    return {
-      ...FALLBACK_MODEL,
-      source: 'fallback',
-      ...(pin ? { ignored: pin } : {}),
-      ...(ses ? { sessionIgnored: { provider: ses.provider, model: ses.model } } : {}),
-    }
-  }
+  const chosenModel = () => chooseModel({ pin: pinnedModel(), session: sessionModel() }, modelEnv)
 
   const ensureOverlay = () => {
     const file = join(stateDir, 'headless-overlay.yml')
@@ -1524,7 +1494,7 @@ function reportMeta() {
     //    ⚠️ YAML 里这几个值一律加引号（用上面的 yq）—— 用户手填的 provider/model 带空格或冒号时不加引号会写坏整份 overlay
     try {
       const sel = chosenModel()
-      // ⭐ 指定了/当前会话是这一轮 profile 里没有的 provider ⇒ 别带它（带了必 NO_ADAPTER），但要留一句明白话
+      // ⭐ 当前会话是这一轮 profile 里没有的 provider，或者钉的绑定了别的 profile ⇒ 别带它（带了必 NO_ADAPTER），但要留一句明白话
       if (sel?.source === 'fallback') {
         log('⚠️ ' + (sel.sessionIgnored ? `当前会话的模型 ${sel.sessionIgnored.provider} / ${sel.sessionIgnored.model}` : '当前模型')
           + ` 在 ${effectiveProfile()} 里没有适配器（那一轮只用得了 ${usableProviders().join(' / ')}）`
@@ -2805,7 +2775,7 @@ function reportMeta() {
     let providers = []
     try {
       const llm = ctx.get('llm')
-      /* ⭐ 2026-11-04：不再 filter 掉"不确定"的 —— 全都列出来，各带 usable 标记，让用户自己看见 */
+      /* ⭐ 2026-11-04：不再 filter 掉"不确定"的 —— 全都列出来，各带 usable 标记，让用户自己看见（出厂的 bili-duty 上没有"不确定"，只列 DeepSeek 两条） */
       const routes = (llm?.listProviders?.() || [])
         .map((p) => ({ id: String(p?.id || ''), name: String(p?.name || p?.id || ''), state: providerState(p?.id) }))
         .filter((p) => p.id && p.state !== 'no')
