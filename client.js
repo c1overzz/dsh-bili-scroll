@@ -673,6 +673,13 @@ function WatchTab() {
           }, st.running ? '跑着…' : '现在跑一轮')),
           runNote ? h('div', { 'data-bd-msg': '', 'data-good': runNote.tone === 'good' ? '' : undefined,
             'data-warn': runNote.tone === 'warn' ? '' : undefined }, runNote.t) : null,
+          /* 钉的模型在自带的 bili-duty 里多半没有驱动：照用不换，每一轮都会一启动就失败。
+           *  「用哪个模型跑」在「高级」页签里，平时看不到 ⇒ 这句摆在顶上，哪个页签都看得见 */
+          st.model && st.model.likelyNoAdapter ? h('div', { 'data-bd-msg': '', 'data-warn': '' },
+            '⚠️ 指定的模型 ' + st.model.provider + ' / ' + st.model.model
+            + '，值班轮那个 profile（自带的 bili-duty）里多半没有它的驱动。钉了的照用、不会悄悄换，'
+            + '所以每一轮都会一启动就失败（NO_ADAPTER），出不了日报。'
+            + '去「高级 → 用哪个模型跑」换一个列表里的，或改回「跟随当前会话」（会话的模型用不了时会用 DeepSeek 兜底）。') : null,
 
 
         /* ── 定时 ── */
@@ -765,7 +772,7 @@ function WatchTab() {
               }))) : null,
           st.model ? h('div', { 'data-bd-note': '' },
             '下一轮会用：' + st.model.provider + ' / ' + st.model.model
-            + (st.model.source === 'plugin' ? '（这里指定的）'
+            + (st.model.source === 'plugin' ? (st.model.likelyNoAdapter ? '（这里指定的；值班轮里多半没有它，见页面顶上的提示）' : '（这里指定的）')
               : st.model.source === 'fallback' ? '（兜底，见上面的提示）'
                 : '（跟随当前会话）')) : null),
 

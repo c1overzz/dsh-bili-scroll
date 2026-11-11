@@ -36,11 +36,30 @@ test('没钉也没有会话 ⇒ 兜底，不带 sessionIgnored', () => {
   assert.deepEqual(chooseModel({ pin: null, session: null }, STOCK), { ...FALLBACK_MODEL, source: 'fallback' })
 })
 
-test('出厂 bili-duty + 钉了未知 provider ⇒ 照用，不悄悄换（失败由 diagnose 说清楚）', () => {
+test('出厂 bili-duty + 钉了未知 provider ⇒ 照用，不悄悄换，但标上 likelyNoAdapter（设置页和日志在跑之前说出来）', () => {
   for (const session of [ses('deepseek-account'), ses('community-x'), null]) {
     assert.deepEqual(chooseModel({ pin: pin('custom-gw', 'gw-model'), session }, STOCK),
-      { provider: 'custom-gw', model: 'gw-model', source: 'plugin' })
+      { provider: 'custom-gw', model: 'gw-model', source: 'plugin', likelyNoAdapter: true })
   }
+})
+
+test('likelyNoAdapter 只标「出厂 bili-duty 上钉了白名单以外的」：DeepSeek、看不到的 profile、绑定到这一轮的都不标', () => {
+  for (const env of [STOCK, EDITED, CUSTOM, HEADLESS]) {
+    assert.equal('likelyNoAdapter' in chooseModel({ pin: pin('deepseek-account'), session: null }, env), false)
+  }
+  for (const env of [EDITED, CUSTOM, HEADLESS]) {
+    assert.equal('likelyNoAdapter' in chooseModel({ pin: pin('custom-gw'), session: null }, env), false)
+  }
+  assert.equal('likelyNoAdapter' in chooseModel({ pin: pin('google-antigravity'), session: null }, HEADLESS), false)
+  // 判断 profile 时抛错 ⇒ 看不到 ⇒ 不标（宁可不说，也别把可能能用的说成用不了）
+  const boom = () => { throw new Error('boom') }
+  assert.equal('likelyNoAdapter' in chooseModel({ pin: pin('custom-gw'), session: null }, { profile: boom, templateIsStock: () => true }), false)
+  // 没钉时不会有这个标记（跟随会话走的是兜底那条路）
+  for (const m of [chooseModel({ pin: null, session: ses('custom-gw') }, STOCK), chooseModel({ pin: null, session: null }, STOCK)]) {
+    assert.equal('likelyNoAdapter' in m, false)
+  }
+  // 钉了 Antigravity 但这一轮不是 headless ⇒ 被忽略，结果上也不标
+  assert.equal('likelyNoAdapter' in chooseModel({ pin: pin('google-antigravity'), session: ses('deepseek-account') }, STOCK), false)
 })
 
 test('钉 DeepSeek ⇒ 哪个 profile 都照用', () => {
