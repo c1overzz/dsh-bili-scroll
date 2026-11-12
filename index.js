@@ -1724,7 +1724,8 @@ function reportMeta() {
     try {
       let lock = null
       try { lock = JSON.parse(readFileSync(runLockFile, 'utf8')) } catch { lock = null }
-      if (lock && Number(lock.pid) !== process.pid) {
+      // releaseRunLock 放锁时留下的是 {"pid":0,"ts":0}：pid 不是正数 ⇒ 没人占着，不算「过期的锁」、不记日志
+      if (lock && Number(lock.pid) > 0 && Number(lock.pid) !== process.pid) {
         const fresh = Number(lock.ts) > Date.now() - RUN_LOCK_TTL
         if (fresh && pidAlive(Number(lock.pid))) {
           log(`这一轮没跑（${why}）：另一个宿主正在跑（pid=${lock.pid}）⇒ 让给它`)
@@ -1740,7 +1741,7 @@ function reportMeta() {
       return true
     }
   }
-  /** 放锁：只放自己的那张（别把别人的删了） */
+  /** 放锁：只放自己的那张（别把别人的删了）；放过的锁是 pid 0，acquireRunLock 当它没有 */
   const releaseRunLock = () => {
     try {
       const lock = JSON.parse(readFileSync(runLockFile, 'utf8'))
