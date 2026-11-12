@@ -99,6 +99,28 @@ test('开跑时同步抛错（外层 catch）：不留运行锁', async (t) => {
   assert.notEqual(lockOf(host).pid, process.pid)
 })
 
+/* ─────────── 放过的锁不是「过期的锁」 ─────────── */
+
+const dutyLog = (host) => { try { return readFileSync(join(host.stateDir, 'duty.log'), 'utf8') } catch { return '' } }
+
+test('上一轮放过锁，下一轮占锁时不记「运行锁已过期」', async (t) => {
+  // 冷却挡掉的手动轮也是先占锁、再放锁：连点两次就是「上一轮放过锁，下一轮又来占」
+  const host = startHost(t, { config: { manualCooldownMin: 3 }, state: { lastManualAt: Date.now() - 1000 } })
+  await host.post('/api/bili-duty/run')
+  assert.deepEqual(lockOf(host), { pid: 0, ts: 0 })
+  const r = await host.post('/api/bili-duty/run')
+  assert.match(r.error, /手动轮刚跑过/)
+  assert.doesNotMatch(dutyLog(host), /运行锁已过期/)
+})
+
+test('别的宿主留下的旧锁：照样记「运行锁已过期」，这一轮照跑', async (t) => {
+  const host = startHost(t, { config: { manualCooldownMin: 3 }, state: { lastManualAt: Date.now() - 1000 } })
+  writeFileSync(join(host.stateDir, 'run-lock.json'), JSON.stringify({ pid: process.ppid, ts: Date.now() - 20 * 60_000, why: 'window:noon' }), 'utf8')
+  const r = await host.post('/api/bili-duty/run')
+  assert.notEqual(r.busy, true)
+  assert.match(dutyLog(host), /运行锁已过期（20 分钟前那个）/)
+})
+
 test('另一个宿主真在跑：让路，也不动它的锁', async (t) => {
   const host = startHost(t)
   const theirs = { pid: process.ppid, ts: Date.now(), why: 'window:noon' }
