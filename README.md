@@ -176,3 +176,6 @@ MIT（内置的 `vendor/bilibili-mcp/` 另见该目录下的 LICENSE）
 - **演示视频**：<https://www.bilibili.com/video/BV1d8pU6xEZX/>
 
 *反馈请不要去打扰素材作者（上善 / ZipZipPipe 等），他们只管角色形象，不管这个插件。*
+
+## 反馈
+装不上或者跑不动，把设置页的日志发我就行

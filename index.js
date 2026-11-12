@@ -432,6 +432,20 @@ function reportMeta() {
     }
     return clampPatch(out)
   }
+  /**
+   * ⭐ 2.5.2（#198）：插件被「在线安装 / 热重载」激活时，apply() 跑在宿主的
+   *    `hmr.executing`（AsyncLocalStorage）上下文里；此时再调 ctx.settings.update()
+   *    会二次进入 hmr.runExclusive ⇒ 抛 "HMR transactions cannot be nested"，
+   *    同步 DSH 原生设置就静默失败。
+   *    ⇒ 调用前先退出这个 store（只在它非空时退）；其它路径行为不变。
+   */
+  const outsideHmr = (fn) => {
+    try {
+      const ex = ctx.get('hmr')?.executing
+      if (ex && typeof ex.exit === 'function' && ex.getStore()) return ex.exit(fn)
+    } catch { /* 拿不到 hmr 服务，或者老版本没有这个字段 ⇒ 照常调 */ }
+    return fn()
+  }
   const cfg = loadCfg()
   // ⭐ 配置是"随时可能被设置页就地改掉"的东西 ⇒ 每个入口用之前重算一遍（cfg 这个对象要一直指向同一份）
   const refreshCfg = () => { Object.assign(cfg, loadCfg()) }
@@ -451,7 +465,7 @@ function reportMeta() {
       if (!row?.ns || typeof ctx.settings?.update !== 'function') {
         throw Object.assign(new Error('DSH 这边没有可写的设置表单（值只落在插件自己的 config.json 里）'), { noForm: true })
       }
-      await ctx.settings.update(row.ns, patch, row.revision)
+      await outsideHmr(() => ctx.settings.update(row.ns, patch, row.revision))
       // ⭐ READBACK（2026-10-18）：update() 不报错 ≠ 值真的生效 ✗
       //   三四位用户装了 0.1.9 后开关照样弹回，而界面**没有**出现"没同步"提示
       //   ⇒ 说明 host.ok 判成了成功、值却没落进生效层 ⇒ 必须**回读用户层**再确认一遍 ✓
@@ -1862,6 +1876,7 @@ function reportMeta() {
         const t = setTimeout(() => { archiveDutyBucket(startedAt - 5000) }, 1200)
         t.unref?.()
       } catch { /* 忽略 */ }
+      finishWindowRound(code)     // ⭐ 2.5.2（#195）：必须在补占位报告之前判断"这一轮到底写没写"
       stubReportIfMissing(code)   // ⭐ 没写报告就补一份占位 —— 别让使用者什么都看不到
       try { writeRoundNotesToReport() } catch { /* 写不进去也不能炸 */ }
     // ⭐ 2026-10-20：这一轮跑成了、并且使用者选了收藏夹 ⇒ 把挑中的存进去（后台做，别拖住收尾）
@@ -1911,6 +1926,49 @@ function reportMeta() {
    *    （`dsh: fatal uncaught exception`）。⇒ **定时器回调必须自己兜住所有异常**：
    *    插件再错也只该"这一轮没跑成"，绝不该杀宿主。
    */
+  /* ─────────────── #195：窗口标记改成"跑完看结果" ───────────────
+   * 以前 tick 在 runDuty 之前就把 windows[key] 写成 true，这一轮没产出报告时
+   * 没有任何地方回滚 ⇒ 这一档谷时窗口当天永久作废（60 秒一跳的 tick 再也进不来）。
+   * 现在：开跑前只在内存里挡"同一档正在跑"，`true` 等 exit 时按结果补；
+   * 失败按 windowTries 计数，试满 MAX_WINDOW_TRIES 次才认栽（免得持续失败每 60 秒烧一次 token）。 */
+  const MAX_WINDOW_TRIES = 3
+  let windowInFlight = null
+  let windowReportBefore = null
+  const windowReportStamp = () => {
+    try {
+      const f = join(outDir, `${dayKey()}.md`)
+      const s = statSync(f)
+      return `${s.mtimeMs}:${s.size}`
+    } catch { return null }
+  }
+  const finishWindowRound = (code) => {
+    if (!windowInFlight) return
+    const key = windowInFlight
+    windowInFlight = null
+    // reportLevel=off 时压根没有报告可看 ⇒ 只能信退出码
+    const produced = String(cfg.reportLevel || 'full') === 'off'
+      ? code === 0
+      : windowReportStamp() !== windowReportBefore
+    try {
+      const s = readJson(dutyStateFile, {})
+      const tries = { ...(s.windowTries || {}) }
+      const kname = key.split(':')[1] || key
+      if (produced) {
+        delete tries[key]
+        bumpState({ windows: { ...(s.windows || {}), [key]: true }, windowTries: tries })
+        log(`这一档（${kname}）跑成了 ⇒ 记为今天用过`)
+      } else {
+        tries[key] = Number(tries[key] || 0) + 1
+        if (tries[key] >= MAX_WINDOW_TRIES) {
+          bumpState({ windows: { ...(s.windows || {}), [key]: true }, windowTries: tries })
+          log(`这一档（${kname}）试了 ${tries[key]} 次都没产出报告 ⇒ 今天不再重试`)
+        } else {
+          bumpState({ windowTries: tries })
+          log(`这一档（${kname}）这一轮没产出报告（第 ${tries[key]} 次）⇒ 下一跳会再试，最多 ${MAX_WINDOW_TRIES} 次`)
+        }
+      }
+    } catch (e) { log('记窗口结果出错（已兜住）：' + String(e?.message ?? e)) }
+  }
   const tick = () => {
     try {
       refreshCfg()                    // ⭐ 定时器活得比设置页久：每一跳都重新读一遍配置
@@ -1927,8 +1985,18 @@ function reportMeta() {
         if (!inWindow(now, WINDOWS[k])) continue
         const key = `${today}:${k}`
         if (st.windows?.[key]) continue
-        bumpState({ windows: { ...(st.windows || {}), [key]: true }, count: roundsToday(now) + 1, lastRunAt: now.toISOString(), lastWhy: k })
-        runDuty(`window:${k}`)
+        if (windowInFlight === key) continue            // 同一档正在跑，等它的 exit 说话
+        if (Number(st.windowTries?.[key] || 0) >= MAX_WINDOW_TRIES) {
+          bumpState({ windows: { ...(st.windows || {}), [key]: true } })
+          log(`这一档（${k}）已经试了 ${MAX_WINDOW_TRIES} 次都没产出报告 ⇒ 今天不再重试`)
+          continue
+        }
+        windowInFlight = key
+        windowReportBefore = windowReportStamp()
+        bumpState({ count: roundsToday(now) + 1, lastRunAt: now.toISOString(), lastWhy: k })
+        const started = runDuty(`window:${k}`)
+        // 没起来（上一轮没完 / 跨宿主锁 / 找不到 dsh）⇒ 别让它卡在"进行中"
+        if (!started?.started) windowInFlight = null
         return
       }
     } catch (e) {
