@@ -860,7 +860,8 @@ function reportMeta() {
       + '⭐ 指定这一轮用哪个模型：`{"modelProvider":"deepseek-account","modelName":"deepseek-flash"}`'
       + '（两个都留空 = 跟随你当前会话选的模型；会话的 provider 在自带的 `bili-duty` profile 里没有时，那一轮改用 DeepSeek 兜底，并在 `status.model.sessionIgnored` 里标出来。'
       + '⚠️ `bili-duty` 里确定有的只有 `deepseek-account` / `deepseek-official`。`google-antigravity` 只在 `headless` profile 里有，跑别的 profile 时填它会被忽略，并在 `status.model.ignored` 里标出来；'
-      + '填别的就照用、不换模型，那个 profile 里真没有驱动的话那一轮会直接失败（`NO_ADAPTER`），原因写进 `duty.log`）。',
+      + '填别的就照用、不换模型，那个 profile 里真没有驱动的话那一轮会直接失败（`NO_ADAPTER`），原因写进 `duty.log`；'
+      + '出厂 `bili-duty` 上能看出没有的，返回的 `model.likelyNoAdapter` 是 true）。',
     parameters: { patch: { type: 'object', additionalProperties: true, description: '要改的字段（可省）' } },
     async execute(args) {
       let host = null
@@ -868,7 +869,8 @@ function reportMeta() {
         // ⭐ 设置页显式设过的键以宿主为准 ⇒ 必须跟着写一份，否则"改了没反应"（钳范围也在这里）
         host = (await persistCfg(args.patch)).host
       }
-      return { ok: true, config: cfg, windows: WINDOWS, home: stateDir, venvReady: venvReadyNow(), host }
+      // 这一轮会用哪个模型：刚钉的那个要是值班 profile 里多半没有，调用方马上能看到 likelyNoAdapter
+      return { ok: true, config: cfg, windows: WINDOWS, home: stateDir, venvReady: venvReadyNow(), host, model: chosenModel() }
     },
   })
 
@@ -1502,6 +1504,11 @@ function reportMeta() {
       } else if (sel?.ignored) {
         log(`⚠️ 设置里指定的模型 ${sel.ignored.provider} / ${sel.ignored.model} 在 ${effectiveProfile()} 里没有适配器`
           + `（那一轮只用得了 ${usableProviders().join(' / ')}）⇒ 这一轮改为跟随当前会话：${sel.provider} / ${sel.model}`)
+      } else if (sel?.likelyNoAdapter) {
+        // 钉了的照用、不换（见 lib/model-select.mjs）；这里只是在开跑前把话说在前头
+        log(`⚠️ 设置里指定的模型 ${sel.provider} / ${sel.model} 在 ${effectiveProfile()} 里多半没有适配器`
+          + `（出厂的 ${effectiveProfile()} 只有 ${usableProviders().join(' / ')}）⇒ 钉了的照用、不换，这一轮多半一启动就 NO_ADAPTER；`
+          + '换一个能用的，或把「用哪个模型跑」改回跟随当前会话')
       }
       if (sel?.provider && sel?.model) {
         yml.push(
