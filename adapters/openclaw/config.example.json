@@ -1,0 +1,15 @@
+{
+  "timezone": "UTC",
+  "filters": {
+    "keywords": ["open source"],
+    "exclude_keywords": [],
+    "max_candidates": 8,
+    "max_reviews": 5,
+    "max_selected": 3,
+    "max_age_days": 7,
+    "min_duration_seconds": 0,
+    "max_duration_seconds": 3600,
+    "min_views": 0,
+    "dedupe_days": 30
+  }
+}

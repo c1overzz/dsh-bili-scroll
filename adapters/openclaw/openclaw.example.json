@@ -1,0 +1,13 @@
+{
+  "mcp": {
+    "servers": {
+      "bili-scroll": {
+        "command": "/absolute/path/to/checkout/adapters/openclaw/.venv/bin/python",
+        "args": ["/absolute/path/to/checkout/adapters/openclaw/server.py"],
+        "env": {
+          "BILI_SCROLL_CONFIG": "/absolute/path/to/private-config/config.json"
+        }
+      }
+    }
+  }
+}

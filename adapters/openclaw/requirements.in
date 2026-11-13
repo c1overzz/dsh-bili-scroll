@@ -1,0 +1,7 @@
+# CPython 3.12; no ASR/model service or DSH runtime needed.
+bilibili-api-python==17.4.2
+aiohttp==3.14.5
+mcp==1.30.0
+qrcode[pil]==8.2
+filelock>=3.16,<4
+tzdata>=2025.2

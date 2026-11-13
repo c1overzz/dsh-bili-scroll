@@ -16,3 +16,11 @@ log/
 __pycache__/
 *.pyc
 style-probe-*/
+
+# OpenClaw adapter: operator config, credentials and transient verification files
+adapters/openclaw/config.local.json
+login-pending.json
+login.png
+*.sqlite
+*.sqlite-*
+.backup-*/
