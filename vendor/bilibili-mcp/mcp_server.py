@@ -1463,6 +1463,67 @@ _TRANSCRIBE_JOBS = {}          # job_id -> {"state": running|done|error, "text":
 _TRANSCRIBE_TIMEOUT = 900      # 15 分钟硬顶（原来是 1800，太长）
 _TRANSCRIBE_WAIT = 25         # 直接调用时最多等这么久（客户端单次调用常见 60s 超时）
 _TRANSCRIBE_KEEP = 8           # 只留最近 8 个 job 的结果，避免内存里堆一堆长文本
+_TRANSCRIBE_JOBS_DIR = DUTY_HOME / "tmp" / "jobs"   # job_id → bvid 的落盘映射（跨轮取结果要用）
+
+
+def _pid_alive(pid: int) -> bool:
+    """判断一个 pid 还活着。
+
+    ⚠️ Windows 上不能用 os.kill(pid, 0) —— 那里只认 CTRL_C / CTRL_BREAK，
+    传 0 会真的去 TerminateProcess（等于把别人的转写杀掉）。
+    """
+    try:
+        pid = int(pid)
+    except Exception:
+        return False
+    if pid <= 0:
+        return False
+    try:
+        if os.name == "nt":
+            import ctypes
+            k32 = ctypes.windll.kernel32
+            h = k32.OpenProcess(0x1000, False, pid)   # PROCESS_QUERY_LIMITED_INFORMATION
+            if not h:
+                return False
+            code = ctypes.c_ulong()
+            ok = k32.GetExitCodeProcess(h, ctypes.byref(code))
+            k32.CloseHandle(h)
+            return bool(ok) and code.value == 259     # STILL_ACTIVE
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
+
+
+def _job_note(job_id: str, bv: str):
+    """把 job_id → bvid 落盘。
+
+    MCP 服务每轮临时挂载、内存 job 表活不过一轮，下一轮 bili_transcribe_result
+    得靠这份映射找回 bvid，再去 tmp/<bv>.txt 取结果。
+    """
+    try:
+        _TRANSCRIBE_JOBS_DIR.mkdir(parents=True, exist_ok=True)
+        p = _TRANSCRIBE_JOBS_DIR / (job_id + ".json")
+        p.write_text(json.dumps({"bvid": bv, "started": _dt.datetime.now().timestamp()}, ensure_ascii=False), encoding="utf-8")
+        cutoff = _dt.datetime.now().timestamp() - 7 * 86400
+        for f in _TRANSCRIBE_JOBS_DIR.glob("*.json"):
+            try:
+                if f.stat().st_mtime < cutoff:
+                    f.unlink()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _job_bvid(job_id: str) -> str:
+    try:
+        p = _TRANSCRIBE_JOBS_DIR / (job_id + ".json")
+        if p.exists():
+            return str(json.loads(p.read_text(encoding="utf-8")).get("bvid") or "")
+    except Exception:
+        pass
+    return ""
 
 
 def _transcribe_paths(bv: str):
@@ -1498,32 +1559,118 @@ def _transcribe_read(out) -> str:
 
 
 async def _transcribe_run(bv: str) -> str:
-    """真正跑转写（非阻塞）。信号量保证同一时间只有一条在跑。"""
+    """真正跑转写（非阻塞）。信号量保证同一时间只有一条在跑。
+
+    ⭐ 2026-11-20 修 #201：以前转写子进程跟着 MCP 进程一起被带走 ——
+    MCP 服务每轮临时挂载、轮次结束就退出，job 表在内存、子进程没了，
+    结果文件 tmp/<bv>.txt 根本没生成，报告里却写着“待转写，下一轮取”。
+    现在两条腿：
+      ① 子进程 **detach**（Windows DETACHED_PROCESS / POSIX start_new_session），
+         轮次结束后继续跑完并写出 tmp/<bv>.txt；
+      ② 起进程之前**先看磁盘**：命中产物就直接读，不再重复跑；
+      ③ 跨进程用 tmp/<bv>.running（里面写 pid）去重，别让两个轮次各跑一份。
+    """
     py, script, out = _transcribe_paths(bv)
     if not py:
         return str(script)      # script 位置放的是错误文案
-    async with _TRANSCRIBE_SEM:
+    # ① 磁盘命中：上一轮（同进程或跨进程）已经写好了，直接读
+    if out.exists():
+        return _transcribe_read(out)
+    running = out.parent / (bv + ".running")
+    # ② 别的进程起的转写还活着 ⇒ 别再起一份（whisper 吃 CPU，多开互相拖死）
+    if running.exists():
         try:
-            proc = await asyncio.create_subprocess_exec(
-                py, str(script), bv, "-o", str(out),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            other = int(running.read_text(encoding="utf-8").strip() or "0")
+        except Exception:
+            other = 0
+        if other and _pid_alive(other):
+            return "这条视频已经在转写了（另一个进程还活着）—— 下一轮再来取结果"
+        try:
+            running.unlink()
+        except Exception:
+            pass
+    async with _TRANSCRIBE_SEM:
+        if out.exists():
+            return _transcribe_read(out)
+        try:
+            running.write_text(str(os.getpid()), encoding="utf-8")
+        except Exception:
+            pass
+        log = out.parent / (bv + ".log")
+        logf = None
+        try:
+            logf = open(log, "ab")
+        except Exception:
+            logf = None
+        try:
+            kwargs = {}
+            if os.name == "nt":
+                kwargs["creationflags"] = (subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS)
+            else:
+                kwargs["start_new_session"] = True
+            # ⭐ 用同步 Popen，不用 asyncio.create_subprocess_exec：
+            #    asyncio 的 subprocess transport 在事件循环关闭时会把自己的子进程收掉
+            #    （实测父进程退出后子进程跑不到 3 秒）；Popen + DETACHED_PROCESS 才是真脱身。
+            proc = subprocess.Popen(
+                [py, str(script), bv, "-o", str(out)],
+                stdin=subprocess.DEVNULL,
+                # 输出重定向到日志文件：父进程（MCP）退出后管道不会跟着断，子进程能安心写完
+                stdout=logf if logf else subprocess.DEVNULL,
+                stderr=logf if logf else subprocess.DEVNULL,
                 env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
+                **kwargs,
             )
         except Exception as e:
-            return "转写启动失败：" + str(e)
-        try:
-            _, err = await asyncio.wait_for(proc.communicate(), timeout=_TRANSCRIBE_TIMEOUT)
-        except asyncio.TimeoutError:
+            if logf:
+                try:
+                    logf.close()
+                except Exception:
+                    pass
             try:
-                proc.kill()
+                running.unlink()
             except Exception:
                 pass
-            return f"转写超时（{_TRANSCRIBE_TIMEOUT // 60} 分钟）—— 这条按「读不到」处理，跳过它"
-        if not out.exists():
-            tail = (err or b"")[-400:].decode("utf-8", "replace")
-            return "转写没产出文件（exit " + str(proc.returncode) + "）：" + tail
-    return _transcribe_read(out)
+            return "转写启动失败：" + str(e)
+        try:
+            running.write_text(str(proc.pid), encoding="utf-8")
+        except Exception:
+            pass
+        # ③ 轮询等它跑完（最多 15 分钟）：拿「结果文件出现」当完成信号，
+        #    不依赖管道 —— 这样父进程提前退出也不会影响子进程。
+        import time as _time
+        deadline = _time.monotonic() + _TRANSCRIBE_TIMEOUT
+        try:
+            while _time.monotonic() < deadline:
+                if out.exists():
+                    return _transcribe_read(out)
+                if proc.poll() is not None:
+                    break
+                await asyncio.sleep(0.5)
+            else:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                return f"转写超时（{_TRANSCRIBE_TIMEOUT // 60} 分钟）—— 这条按「读不到」处理，跳过它"
+        finally:
+            try:
+                running.unlink()
+            except Exception:
+                pass
+            if logf:
+                try:
+                    logf.close()
+                except Exception:
+                    pass
+        if out.exists():
+            return _transcribe_read(out)
+        tail = ""
+        try:
+            if log.exists():
+                tail = log.read_text(encoding="utf-8", errors="replace")[-400:]
+        except Exception:
+            pass
+        return "转写没产出文件（exit " + str(proc.returncode) + "）：" + tail
 
 
 def _job_prune():
@@ -1565,10 +1712,16 @@ async def bili_transcribe(bvid: str) -> str:
     #    那一轮白等一次、还记了句"转写超时"✗
     #    ⇒ 现在只等 _TRANSCRIBE_WAIT 秒：跑完就回文本，没跑完就**把 job_id 交回去**，
     #      由模型下一轮用 bili_transcribe_result 取（比"超时"有用得多）
-    py, why, _out = _transcribe_paths(bv)
+    # ⭐ 上一轮已经转好了 ⇒ 直接给，别重跑（#201）。
+    #    先看磁盘、不先看环境：结果已经在，就不该因为 venv 探测失败把已有结果丢掉。
+    _out0 = DUTY_HOME / "tmp" / (bv + ".txt")
+    if _out0.exists():
+        return _transcribe_read(_out0)
+    py, why, out = _transcribe_paths(bv)
     if not py:
         return str(why)
     job_id = "tj" + _dt.datetime.now().strftime("%H%M%S") + "-" + bv[-4:]
+    _job_note(job_id, bv)
     _TRANSCRIBE_JOBS[job_id] = {"state": "running", "text": "", "bvid": bv, "started": _dt.datetime.now().timestamp()}
     _job_prune()
     task = asyncio.create_task(_job_run(job_id, bv))
@@ -1601,10 +1754,18 @@ async def bili_transcribe_start(bvid: str) -> str:
     bv = str(bvid or "").strip()
     if not bv.startswith("BV"):
         return json.dumps({"ok": False, "error": "参数不对：要给 BV 号"}, ensure_ascii=False)
-    py, why, _out = _transcribe_paths(bv)
+    # ⭐ 已经转好了 ⇒ 直接回结果，不再起进程（#201）
+    _out0 = DUTY_HOME / "tmp" / (bv + ".txt")
+    if _out0.exists():
+        return json.dumps({
+            "ok": True, "state": "done", "bvid": bv, "text": _transcribe_read(_out0),
+            "hint": "这条之前已经转过了，直接用这份结果；没有新起进程。",
+        }, ensure_ascii=False)
+    py, why, out = _transcribe_paths(bv)
     if not py:
         return json.dumps({"ok": False, "error": why}, ensure_ascii=False)
     job_id = "tj" + _dt.datetime.now().strftime("%H%M%S") + "-" + bv[-4:]
+    _job_note(job_id, bv)
     _TRANSCRIBE_JOBS[job_id] = {"state": "running", "text": "", "bvid": bv, "started": _dt.datetime.now().timestamp()}
     _job_prune()
     asyncio.create_task(_job_run(job_id, bv))
@@ -1632,6 +1793,28 @@ async def bili_transcribe_result(job_id: str) -> str:
     jid = str(job_id or "").strip()
     job = _TRANSCRIBE_JOBS.get(jid)
     if not job:
+        # ⭐ 内存里没有 ⇒ 上一轮那个进程早退了，但转写结果可能已经落盘（#201）
+        bv = _job_bvid(jid)
+        if bv:
+            out = DUTY_HOME / "tmp" / (bv + ".txt")
+            if out.exists():
+                return json.dumps({"ok": True, "state": "done", "bvid": bv, "text": _transcribe_read(out)},
+                                  ensure_ascii=False)
+            running = DUTY_HOME / "tmp" / (bv + ".running")
+            pid = 0
+            try:
+                if running.exists():
+                    pid = int(running.read_text(encoding="utf-8").strip() or "0")
+            except Exception:
+                pid = 0
+            if pid and _pid_alive(pid):
+                return json.dumps({
+                    "ok": True, "state": "running", "bvid": bv, "text": "",
+                    "hint": "转写进程还活着（轮次结束后它自己继续跑），这一轮先干别的",
+                }, ensure_ascii=False)
+            return json.dumps({
+                "ok": True, "state": "error", "bvid": bv, "text": "转写进程已经结束，但没产出结果文件 —— 这条按「读不到」跳过",
+            }, ensure_ascii=False)
         return json.dumps({"ok": False, "state": "unknown", "error": "没有这个 job（可能已经过期，或者 id 打错了）"}, ensure_ascii=False)
     return json.dumps({
         "ok": True,

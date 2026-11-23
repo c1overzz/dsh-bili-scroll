@@ -1,3 +1,19 @@
+## 2.5.3 — 2026-11-23
+
+**本地转写的 job 活不过一轮：跨轮取不回结果，转写子进程也被一起带走**（#201）
+
+MCP 服务每轮临时挂载、轮次结束就退出：job 表在内存、转写子进程跟着消失，`tmp/<bvid>.txt` 根本没生成，报告里却写着「待转写，下一轮取」—— 模型照章程排了转写，结果永远拿不到，无字幕长视频等于一直没转。
+
+现在三处：
+
+- 转写子进程改用 `subprocess.Popen` + `DETACHED_PROCESS`（POSIX `start_new_session`）真脱身，父进程退出也会继续跑完并落盘；stdout/stderr 改写 `tmp/<bvid>.log`，不再依赖会被带走的管道。
+- 起进程前先看 `tmp/<bvid>.txt`：上一轮已经转好就直接返回，不重跑。
+- `job_id → bvid` 落到 `tmp/jobs/<job_id>.json`，下一轮 MCP 进程起来后 `bili_transcribe_result` 也能找回结果；另加 `tmp/<bvid>.running`（写 pid）跨进程去重，避免两个轮次各跑一份 whisper。
+
+（实测：Popen detach 后父进程退出、子进程 3 秒后仍写出文件；磁盘命中 / 跨轮 result / 活 pid 去重 / 死 pid 清理四条路径都过。）
+
+---
+
 ## 2.5.2 — 2026-11-13
 
 **① 热重载 / 在线安装之后，改设置会静默失败**（#198，感谢 @xueyue33）

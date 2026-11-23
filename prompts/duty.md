@@ -113,6 +113,7 @@
 
   · ⭐ **推荐**：`bili_transcribe_start(bvid="BV...")` 立刻拿到 `job_id` ⇒ **这一轮先干别的**（写报告 / 记判重 / 发私信），
     下一轮或收尾前再用 `bili_transcribe_result(job_id)` 取；还是 `running` 就记一行「已排队，下一轮再判」
+    （⭐ 转写进程会跨轮继续跑、结果落盘；已经转过的视频再调 `bili_transcribe` / `bili_transcribe_start` 会直接返回结果，不会重跑）
   · **一轮最多排一条**转写（whisper 吃 CPU，多开只会互相拖死）
   · `bili_transcribe(bvid)` 现在**最多只等 25 秒**：跑不完就把 `job_id` 交回给你（不会再让你干等到客户端超时）
     ⇒ 看到「已排进后台：job_id=…」就**别等**，先干别的，之后用 `bili_transcribe_result` 取
