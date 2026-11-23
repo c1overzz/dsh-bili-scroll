@@ -3393,11 +3393,17 @@ function reportMeta() {
     return sendJson(res, 404, { ok: false, error: `unknown ${req.method} ${path}` })
   }
 
+  // 这里的职责只剩「挡住浏览器里别的网页」—— 真鉴权是上面的信任栅栏（cookie/token）✓
+  // ⭐（issue #158 / #178 / #180 / #181）**不再要求 Host 是回环地址**：
+  //    经反代 / 域名 / 隧道访问时，上游看到的 Host 是域名（或被反代改写的地址），旧判据直接 return false，
+  //    于是设置页每个请求都 403「只接受本机同源请求」，前端轮询失败累加后显示
+  //    「读不到插件配置（已经试了 N 次）」—— 把排查方向带到「版本旧 / 没重启」，其实与之无关 ✗
   const sameOriginOk = (req) => {
     try {
       const host = String(req.headers.host || '')
       if (!host) return true   // 没有 Host 头 = 不是浏览器/不是外来的 HTTP 请求
-      if (!/^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(host)) return false
+      const hostAuthority = String(host).toLowerCase()
+      const loopbackHost = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(host)
       const pick = String(req.headers.origin || req.headers.referer || '')
       if (!pick) return true   // 不是浏览器发的（本机脚本/宿主内部）
       try {
@@ -3405,11 +3411,14 @@ function reportMeta() {
         // ⭐ 2.0.5（采纳 PR #94）：**端口也要比** —— 只比 hostname 的话，
         //    本机上另一个端口的页面（dev server / Jupyter / 有 XSS 的本地页）也能驱动这些写接口 ✗
         const originAuthority = String(u.host || '').toLowerCase()
-        const hostAuthority = String(host).toLowerCase()
         if (originAuthority && originAuthority === hostAuthority) return true
         const defaultPort = u.protocol === 'https:' ? '443' : '80'
         const withPort = (u.hostname + ':' + (u.port || defaultPort)).toLowerCase()
-        return withPort === hostAuthority
+        if (withPort === hostAuthority) return true
+        // 反代把上游 Host 改写成回环、Origin/Referer 却还是外部地址（fnOS 网关会删 Origin、留 Referer）：
+        // 浏览器里别的网页不可能让 Host 变成回环（Host 由浏览器按 URL 填，页面改不了）⇒
+        // 这种请求只可能来自反代链路，信任栅栏（cookie/token 已验过）放行了就放行 ✓
+        return loopbackHost && getConnection() !== null
       } catch { return false }
     } catch { return false }
   }
