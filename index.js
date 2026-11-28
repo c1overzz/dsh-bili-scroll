@@ -30,6 +30,9 @@ import { fileURLToPath } from 'node:url'
 import { McpClient } from './lib/mcp.mjs'
 import { verifyRecent, appendVerifyToReport } from './lib/verify.mjs'
 import { trimCharterForConfig } from './lib/charter.mjs'
+// 效率账（轮结束自动记一行）
+import { readRoundMetrics, formatRoundMetrics } from './lib/metrics.mjs'
+import { trimCharterForConfig } from './lib/charter.mjs'
 import { replaceSect } from './lib/report-sect.mjs'
 import { WINDOWS, stateDirOf, readJson, writeJson, ensureHomeFiles, ensureCharter, charterPath, inWindow, dayKey, seenDay } from './lib/state.mjs'
 import { diagnoseRound } from './lib/diagnose.mjs'
@@ -1164,6 +1167,7 @@ function reportMeta() {
     //    章程内容还是让那一轮自己去读，里面 5 处占位符原样进了模型的眼睛（它读成 ~）。
     //    现在改成：宿主读内容 → 把占位符换成真路径 → 内联进提示词（也省掉它一次读文件）✓
     let charterText = ''
+      charterText = readFileSync(duty, 'utf8').split('<家目录>').join(stateDir)
     try {
       // ⭐ 2026-11-27：私信关着时把章程里「私信投递」那一节摘掉（约 1.3k 字，每轮白读）；
       //    每次取章程都现算，私信一开回来下一轮自动恢复。裁不了就原样用。
@@ -1659,6 +1663,44 @@ function reportMeta() {
       log('这一轮没写报告 ⇒ 宿主补了一份占位报告')
     } catch (e) { log(`补占位报告失败：${e?.message ?? e}`) }
   }
+  /**
+   * ⭐ 2026-11-27 本机加：报告缺正文护栏（零 token，纯宿主代码）
+   *   现象：评论发出去了、comments.md 也记了 rpid，但当天报告里没有这条的 `### BV` 段
+   *   （2026-11-27 的 BV1br1sznE2D 就是这样：汇报只看到复核行、看不到讲了什么）。
+   *   做法：每轮结束时对账一次 —— 今天评论过的 BV 若报告里没有正文段，就补一段补记。
+   *   用 `####` 而不是 `###`：countPickedToday 只数 `##/###`，补记不能虚增当天挑中数。
+   *   幂等：已有段（### 或 ####）就不再补。
+   */
+  const stubMissingCommentSections = () => {
+    try {
+      if (String(cfg.reportLevel || 'full') === 'off') return 0
+      const day = dayKey()
+      const ledger = join(stateDir, 'comments.md')
+      if (!existsSync(ledger)) return 0
+      const f = join(outDir, `${day}.md`)
+      const rep = existsSync(f) ? readFileSync(f, 'utf8') : ''
+      const have = new Set()
+      for (const m of rep.matchAll(/^#{2,4}[ \t]*(BV[0-9A-Za-z]{10})/gm)) have.add(m[1])
+      const want = []
+      for (const raw of readFileSync(ledger, 'utf8').split('\n')) {
+        const t = raw.trim()
+        if (!t.startsWith('- ') || !t.includes(day)) continue
+        const bv = (t.match(/(BV[0-9A-Za-z]{10})/) || [])[1]
+        if (!bv || have.has(bv) || want.some((x) => x.bv === bv)) continue
+        const rpid = (t.match(/rpid=(\d+)/) || [])[1] || ''
+        const body = t.includes('·') ? t.split('·').slice(1).join('·').trim() : ''
+        want.push({ bv, rpid, body })
+      }
+      if (!want.length) return 0
+      const block = '\n\n## 评论补记（评论已发、报告原本缺正文段）\n\n'
+        + want.map((x) => `#### ${x.bv}\n\n- 评论：${x.body || '（正文没记下来）'}\n- rpid=${x.rpid}\n`).join('\n')
+      if (!rep.trim()) writeFileSync(f, `# 刷B站 · ${day}\n` + block, 'utf8')
+      else appendFileSync(f, block, 'utf8')
+      log('报告补正文：' + want.map((x) => x.bv).join('、') + '（评论已发但报告缺段）')
+      return want.length
+    } catch (e) { log('报告补正文失败（不影响使用）：' + String(e?.message ?? e)); return 0 }
+  }
+
 
   /* ── 值班会话的「隐形」处理 ──
    * 🔴 2026-10-25（本人反馈）：每点一次「现在跑一轮」，左侧「未分组」就多一个对话。
@@ -1710,6 +1752,41 @@ function reportMeta() {
     } catch { return 0 }
   }
 
+   * ⭐ 2026-11-28 本机加：这一轮的「效率账」。
+   *    每轮跑完自己数一遍：几步、工具吐了多少字符、输出多少 token、总共多少秒（口径见 lib/metrics.mjs），
+   *    往 duty.log 记一行，并把这行追加到当天日报末尾 —— 12:40 / 18:40 的汇报直接用这行，不用再人工翻会话文件。
+   *    ⚠️ 会话文件要等子进程写完才落盘 ⇒ 先等 2 秒，没算出来最多再试 4 次（间隔 1.5 秒）。
+   *    ⚠️ 任何失败都只记一句，绝不影响这一轮的收尾。
+   */
+  // ⭐ 2026-11-28 本机加：轮结束后把这一轮的效率账（步数/工具字符/输出 token/耗时）记进 duty.log 与日报尾。
+  const scheduleRoundMetrics = (startedAt) => {
+    const since = Math.max(0, Number(startedAt) - 5000)
+    let tries = 0
+    const attempt = () => {
+      tries += 1
+      try {
+        const bucket = dutySessionBucket()
+        // ⚠️ 只认值班会话桶，别拿 sessionRoot 去全局找 —— 2026-11-28 试跑时挑到了**当前这个会话**的
+        //   文件（它一直在写、mtime 更新），把 run_code 的字符数记成了一轮的成本 ✗
+        const m = bucket?.dir ? readRoundMetrics({ bucketDir: bucket.dir, since }) : { ok: false, why: '没找到值班会话桶' }
+        if (m?.ok) {
+          const line = formatRoundMetrics(m)
+          log('本轮指标：' + line)
+          try {
+            bumpState({ lastRound: { at: Date.now(), steps: m.steps, toolChars: m.toolChars, outTokens: m.outTokens, ms: m.ms, sessionId: m.sessionId } })
+          } catch { /* 记不上不影响这一轮 */ }
+          try {
+            appendFileSync(reportFileOf(), `\n---\n\n**本轮效率**（自动记）：${line}\n`, 'utf8')
+          } catch { /* 写不进报告就算了 */ }
+          return
+        }
+      } catch { /* 落到下面重试 */ }
+      if (tries < 4) { const t = setTimeout(attempt, 1500); t.unref?.() }
+    }
+    try { const t0 = setTimeout(attempt, 2000); t0.unref?.() } catch { /* 忽略 */ }
+  }
+
+  /**
   /**
    * ⭐ 2026-10-25（本人反馈：「明明指定了工作区，能不能让它显示在工作区中」）：
    *    DSH 侧栏按**会话的 cwd** 归工作区 —— cwd 在插件家（没登记成工作区）⇒ 显示成「未分组」。
