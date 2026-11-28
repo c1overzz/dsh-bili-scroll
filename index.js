@@ -29,14 +29,10 @@ import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { McpClient } from './lib/mcp.mjs'
 import { verifyRecent, pendingVerifyRecent, appendVerifyToReport } from './lib/verify.mjs'
-import { trimCharterForConfig } from './lib/charter.mjs'
-// 效率账（轮结束自动记一行）
-import { readRoundMetrics, formatRoundMetrics } from './lib/metrics.mjs'
-import { trimCharterForConfig } from './lib/charter.mjs'
-// 效率账（轮结束自动记一行）
-import { readRoundMetrics, formatRoundMetrics } from './lib/metrics.mjs'
-import { trimCharterForConfig } from './lib/charter.mjs'
 import { replaceSect } from './lib/report-sect.mjs'
+import { trimCharterForConfig } from './lib/charter.mjs'
+// ⭐ 2026-11-28 本机加：效率账（轮结束自动记一行）+ 策略文件（挂载时把 setting.config 载入 config.json）
+import { readRoundMetrics, formatRoundMetrics } from './lib/metrics.mjs'
 import { WINDOWS, stateDirOf, readJson, writeJson, ensureHomeFiles, ensureCharter, charterPath, inWindow, dayKey, seenDay } from './lib/state.mjs'
 import { diagnoseRound } from './lib/diagnose.mjs'
 import { BASE_PROVIDERS, PROFILE_ONLY_PROVIDERS, providerState as modelProviderState, isStockTemplate, chooseModel } from './lib/model-select.mjs'
@@ -113,6 +109,12 @@ export const Config = !z ? undefined : z.object({
   workspace: z.string().default('').extra('volatile', true),
   /** 日报形态：full=完整（现状）· brief=每条一两行 · off=不写报告（只发评论） */
   reportLevel: z.string().default('full').extra('volatile', true),
+  /** ⭐ 2026-11-28：写日报的细节策略（都能在 setting.config 里改；默认值 = 现在的写法）
+   *  每条正文目标字数（0 = 不限）· 要不要「为什么值得」那段 · 跳过要不要单列一段 · 要不要轮次标题与计数行 */
+  reportEntryChars: z.natural().default(180).extra('volatile', true),
+  reportWhy: z.boolean().default(true).extra('volatile', true),
+  reportSkipSection: z.boolean().default(false).extra('volatile', true),
+  reportHeader: z.boolean().default(true).extra('volatile', true),
   /** 回复评论：默认关。开了之后只回「直接回复到它那条评论下面的人」 */
   replyToComments: z.boolean().default(false).extra('volatile', true),
   /** 每轮最多回几条 */
@@ -278,9 +280,10 @@ function reportMeta() {
   const DEFAULTS = {
     dmWatch: true, dmWatchMinutes: 1, dmReplyPerDay: 0, dmOwnerUid: 0,
     personaPrompt: '',
+    // ⭐ 2026-11-28 加：报告四开关（默认值 = 原来的写法；只在 setting.config / config.json 里改）
     perDay: 5, peakValley: false, noon: true, night: true, autoComment: false, transcribe: false, asrModel: 'small',
     dmMode: 'only', dmUid: 0,
-    keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', replyToComments: false, replyPerRound: 1, favFolderId: 0,
+    keywords: [], commentPerRound: 1, mentionName: '', pythonPath: 'python', dshBin: '', headlessProfile: 'headless', overlayMcp: true, workspace: '', reportLevel: 'full', reportEntryChars: 180, reportWhy: true, reportSkipSection: false, reportHeader: true, replyToComments: false, replyPerRound: 1, favFolderId: 0,
     // ⭐ 2.3.0：手动轮 / 抓取量 / 排除词 / 评论长度 —— 少一项 normalize 就会把用户存的值丢掉
     manualMax: 3, manualCooldownMin: 3, searchSort: 'pubdate', searchPages: 2, fetchPerRound: 8, excludeWords: [], commentLength: 'medium',
     modelProvider: '', modelName: '', runTimeoutMinutes: 20,
@@ -313,9 +316,9 @@ function reportMeta() {
   const clampPatch = (patch) => {
     const p = { ...patch }
     if ('perDay' in p) p.perDay = Math.max(0, Math.min(Number(p.perDay) || 0, 50))
+    if ('reportLevel' in p) p.reportLevel = ['full', 'brief', 'off'].includes(String(p.reportLevel)) ? String(p.reportLevel) : 'full'
     // ⭐ 2026-11-28：报告每条正文字数上限 0~600（0 = 不限），非数字回落 180
     if ('reportEntryChars' in p) { const n = Number(p.reportEntryChars); p.reportEntryChars = Number.isFinite(n) ? Math.max(0, Math.min(Math.round(n), 600)) : 180 }
-    if ('reportLevel' in p) p.reportLevel = ['full', 'brief', 'off'].includes(String(p.reportLevel)) ? String(p.reportLevel) : 'full'
     // ⭐ 2.0.5（issue #89）：人设上限 8000 → 60000；**截断时要出声**（以前静默砍，用户以为写进去了 ✗）
     if ('personaPrompt' in p) {
       const raw = String(p.personaPrompt || '')
@@ -1172,8 +1175,8 @@ function reportMeta() {
     //    章程内容还是让那一轮自己去读，里面 5 处占位符原样进了模型的眼睛（它读成 ~）。
     //    现在改成：宿主读内容 → 把占位符换成真路径 → 内联进提示词（也省掉它一次读文件）✓
     let charterText = ''
-      charterText = readFileSync(duty, 'utf8').split('<家目录>').join(stateDir)
     try {
+      charterText = readFileSync(duty, 'utf8').split('<家目录>').join(stateDir)
       // ⭐ 2026-11-27：私信关着时把章程里「私信投递」那一节摘掉（约 1.3k 字，每轮白读）；
       //    每次取章程都现算，私信一开回来下一轮自动恢复。裁不了就原样用。
       const charterLenBefore = charterText.length
@@ -1181,7 +1184,6 @@ function reportMeta() {
       if (charterText.length !== charterLenBefore) {
         log(`章程按配置裁剪：私信关着 ⇒ 摘掉「私信投递」一节（${charterLenBefore} → ${charterText.length} 字）`)
       }
-      charterText = readFileSync(duty, 'utf8').split('<家目录>').join(stateDir)
     } catch { /* 读不到就退回"让它自己读路径"（下面提示词里会说） */ }
     const kws = Array.isArray(cfg.keywords) ? cfg.keywords.filter(Boolean) : []
     // ⭐ 开场先让它读**工作区**的 AGENTS.md —— 这一轮的工作目录就是使用者的工作区，
@@ -1281,6 +1283,17 @@ function reportMeta() {
           : `把报告写到 ${join(outDir, `${dayKey()}.md`)}。`)
       + (cfg.reportLevel === 'off' ? '' : `⚠️ 今天那份报告里可能已经有上一轮写的东西 —— 有就**追加到末尾**，别覆盖（配额按全天算）。`)
       + (cfg.reportLevel === 'off' ? '' : '⭐ 报告里**每挑中一条**，第一行写成 `### BV号`（例：`### BV1xxxxxxx`）—— 宿主**就数这些标题行**算今天挑了几条：漏写当成没挑中，给只是提到 / 跳过的视频加上标题则当成挑中。')
+      // ⭐ 2026-11-28：报告写法四开关（setting.config 里可改）；这里只在**偏离默认**时加规则，
+      //    默认组合一个字都不加（等于原来的写法）。
+      + ((() => {
+          const parts = []
+          const chars = Number(cfg.reportEntryChars)
+          if (Number.isFinite(chars) && chars > 0 && chars !== 180) parts.push(`每条正文控制在约 ${Math.round(chars)} 字以内`)
+          if (cfg.reportWhy === false) parts.push('每条只写 `**档位**：…` 与 `我的一句话：…` 两行，**不要**写「为什么值得」那段正文')
+          if (cfg.reportSkipSection === true) parts.push('报告末尾再单列一段「跳过」，每行 `- 跳过：BV… · 一句原因`（这些行本来就要写，别混进散文）')
+          if (cfg.reportHeader === false) parts.push('不要写轮次标题和「扫 N 条 / 挑 N 条」计数行')
+          return parts.length ? '\n\n⭐ 报告写法（来自设置）：' + parts.join('；') + '。' : ''
+        })())
       + (already > 0
         ? `今天已经挑过 ${already} 条了 ⇒ **这一轮最多再挑 ${left} 条**（「每天最多 ${quota} 条」是全天总量，不是每轮）；`
         : `今天最多挑 ${quota} 条；`)
@@ -1297,11 +1310,15 @@ function reportMeta() {
               + `\n\n评论长度：${({ short: '短（≤15 字）', medium: '中（≤40 字，默认）', long: '长（≤100 字）' })[cfg.commentLength] || '中（≤40 字，默认）'} —— 超了要自己删到这条线内。`
       // ⭐ 2026-10-24：留空不再用内置关键词（那会让所有用户刷同一批视频、评论区扎堆）
       //    ⇒ 留空 = 用 `bili_recommend` 刷**这个账号的首页推荐流**，按各自画像天然散开 ✓
+      // ⭐ 2026-11-28 调优提示（跟着工具一起改）：批量搜索 / 批量字幕 1600 字 / 无字幕顺带抽帧 / 热评同趟取
       + (kws.length
-        ? `关键词用这些：${kws.join('、')}（用 bili_search 搜）。`
+        ? `关键词用这些：${kws.join('、')}（一次发完：bili_search_batch(keywords="…", pages=N)；工具列表里没有它才退回 bili_search 一个词一次）。`
         + `排序用 ${cfg.searchSort || 'pubdate'}（pubdate=最新 · click=播放 · dm=弹幕 · totalrank=综合）；`
-        + `翻页：${Math.max(1, Number(cfg.searchPages) || 2)} 页 —— 用 bili_search(page=1..N)，每页扫一眼标题再决定，别只看第一页；`
+        + `翻页：${Math.max(1, Number(cfg.searchPages) || 2)} 页 —— bili_search_batch 的 pages 参数就是它，每页都扫标题再决定，别只看第一页；`
         + `这一轮最多**细看** ${Math.max(1, Number(cfg.fetchPerRound) || 8)} 条（读字幕 / 评论都算一次请求），其余的只扫标题，别把候选全读一遍；`
+        + `读字幕也一批发完：bili_subtitle_batch(bvids="BV1x,BV2y,…", max_chars=1600) 一次取多条（工具列表里没有它才一条一条 bili_subtitle）；`
+        + `没字幕的那几条**加 frames=2 让工具顺带把画面带回来**（bili_subtitle_batch(bvids="…", frames=2)）—— 别等看完字幕再单独调一次 bili_frames，那是白多一个回合；`
+        + `细看一条视频**字幕和热评一趟取完**：bili_subtitle_batch(bvids="BV1x,BV2y,…", comments=5) —— 带 comments 就把热评一并返回；只有"单看评论"才用 bili_comments_batch(bvids="…", num=10)（工具列表里没有才退回 bili_subtitle / bili_comments）；`
         : '没填关键词 ⇒ **这一轮用 bili_recommend 刷首页推荐流**（不要用 bili_search 搜固定词）。')
       + `本地转写：${cfg.transcribe
         ? (asrReadyNow()
@@ -1388,7 +1405,7 @@ function reportMeta() {
       'bili_cover', 'bili_frames', 'bili_danmaku', 'bili_recommend']  // 看封面 / 画面帧 / 弹幕：只读，不需要额外的闸
     // ⭐⭐ 2.0.5（issue #96 安全加固）：值班轮改成最小权限 profile（没有 fs / shell / web）⇒
     //    写日报 / 判重表 / 归档、以及无字幕转写，全走这几只**固定路径的窄口工具** ✓
-    list.push('duty_paths', 'duty_report_append', 'duty_seen_append', 'duty_digest_append', 'duty_seen_recent')
+    list.push('duty_paths', 'duty_report_append', 'duty_seen_append', 'duty_seen_append_batch', 'duty_digest_append', 'duty_seen_recent')
     // ⭐ 2026-10-25：转写改成 job 模型（start / result）—— 慢活不该占住一次工具调用；
     //    老的 bili_transcribe 还留着（仍能用，但它会等到跑完，别在一轮里连用两条）
     if (cfg.asrInstalled !== false) list.push('bili_transcribe', 'bili_transcribe_start', 'bili_transcribe_result')
@@ -1671,6 +1688,7 @@ function reportMeta() {
       log('这一轮没写报告 ⇒ 宿主补了一份占位报告')
     } catch (e) { log(`补占位报告失败：${e?.message ?? e}`) }
   }
+
   /**
    * ⭐ 2026-11-27 本机加：报告缺正文护栏（零 token，纯宿主代码）
    *   现象：评论发出去了、comments.md 也记了 rpid，但当天报告里没有这条的 `### BV` 段
@@ -1759,6 +1777,7 @@ function reportMeta() {
     } catch { return 0 }
   }
 
+  /**
    * ⭐ 2026-11-28 本机加：这一轮的「效率账」。
    *    每轮跑完自己数一遍：几步、工具吐了多少字符、输出多少 token、总共多少秒（口径见 lib/metrics.mjs），
    *    往 duty.log 记一行，并把这行追加到当天日报末尾 —— 12:40 / 18:40 的汇报直接用这行，不用再人工翻会话文件。
@@ -1793,7 +1812,6 @@ function reportMeta() {
     try { const t0 = setTimeout(attempt, 2000); t0.unref?.() } catch { /* 忽略 */ }
   }
 
-  /**
   /**
    * ⭐ 2026-10-25（本人反馈：「明明指定了工作区，能不能让它显示在工作区中」）：
    *    DSH 侧栏按**会话的 cwd** 归工作区 —— cwd 在插件家（没登记成工作区）⇒ 显示成「未分组」。
@@ -1976,8 +1994,11 @@ function reportMeta() {
         const t = setTimeout(() => { archiveDutyBucket(startedAt - 5000) }, 1200)
         t.unref?.()
       } catch { /* 忽略 */ }
+      // ⭐ 2026-11-28 本机加：顺手算这一轮的效率账（步数 / 工具字符 / 输出 token / 耗时）
+      try { scheduleRoundMetrics(startedAt) } catch { /* 算不出来不影响收尾 */ }
       finishWindowRound(code)     // ⭐ 2.5.2（#195）：必须在补占位报告之前判断"这一轮到底写没写"
       stubReportIfMissing(code)   // ⭐ 没写报告就补一份占位 —— 别让使用者什么都看不到
+      try { stubMissingCommentSections() } catch { /* 补记失败不能影响收尾 */ }   // ⭐ 2026-11-27 本机加：评论有 rpid、报告缺正文时补一段
       try { writeRoundNotesToReport() } catch { /* 写不进去也不能炸 */ }
     // ⭐ 2026-10-20：这一轮跑成了、并且使用者选了收藏夹 ⇒ 把挑中的存进去（后台做，别拖住收尾）
     if (code === 0 && Number(cfg.favFolderId) > 0) {
@@ -3582,6 +3603,22 @@ function reportMeta() {
   if (dutyProfileState === 'ok') log('值班轮用最小权限 profile：bili-duty（无文件系统 / 无命令 / 无联网）')
   else log('⚠️ 最小权限 profile 不可用（' + dutyProfileState + '）⇒ 值班轮仍用 headless（这一轮能力偏大）')
   log(`已挂载（家=${stateDir}，python=${cfg.pythonPath}，峰谷=${cfg.peakValley ? '开' : '关'}）`)
+  // ⭐ 2026-11-28：复核补跑。轮结束 90 秒后的自动复核会被宿主重载打断 —— 2026-11-28 中午轮
+  //    12:02:51 卸载重载，那条被压审的评论（state=17）就没核到，报告里也就没提示。
+  //    这里挂载后 25 秒补一次：只补最近 36 小时、还没核过的；没活干就一声不响（不刷 duty.log）。
+  try {
+    const t = setTimeout(() => {
+      Promise.resolve()
+        .then(() => {
+          const p = pendingVerifyRecent(stateDir, { withinHours: 36, max: 12 })
+          if (!p.rows) return null
+          log(`复核补跑：有 ${p.rows} 条最近没核过（挂载时补）`)
+          return runVerify('补跑', { max: 12, withinHours: 36 })
+        })
+        .catch((e) => log('复核补跑异常：' + (e?.message ?? e)))
+    }, 25_000)
+    t.unref?.()
+  } catch { /* 忽略 */ }
   // ⭐ 2026-10-25：历史清理 —— 以前每轮留下的值班会话也归档掉（只碰 bili-duty 桶）。
   //    延迟几秒：workspaceRegistry 服务未必比这个插件先就绪。
   try {
