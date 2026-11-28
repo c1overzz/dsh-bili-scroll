@@ -29,6 +29,7 @@ import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { McpClient } from './lib/mcp.mjs'
 import { verifyRecent, appendVerifyToReport } from './lib/verify.mjs'
+import { trimCharterForConfig } from './lib/charter.mjs'
 import { replaceSect } from './lib/report-sect.mjs'
 import { WINDOWS, stateDirOf, readJson, writeJson, ensureHomeFiles, ensureCharter, charterPath, inWindow, dayKey, seenDay } from './lib/state.mjs'
 import { diagnoseRound } from './lib/diagnose.mjs'
@@ -1164,6 +1165,13 @@ function reportMeta() {
     //    现在改成：宿主读内容 → 把占位符换成真路径 → 内联进提示词（也省掉它一次读文件）✓
     let charterText = ''
     try {
+      // ⭐ 2026-11-27：私信关着时把章程里「私信投递」那一节摘掉（约 1.3k 字，每轮白读）；
+      //    每次取章程都现算，私信一开回来下一轮自动恢复。裁不了就原样用。
+      const charterLenBefore = charterText.length
+      charterText = trimCharterForConfig(charterText, cfg)
+      if (charterText.length !== charterLenBefore) {
+        log(`章程按配置裁剪：私信关着 ⇒ 摘掉「私信投递」一节（${charterLenBefore} → ${charterText.length} 字）`)
+      }
       charterText = readFileSync(duty, 'utf8').split('<家目录>').join(stateDir)
     } catch { /* 读不到就退回"让它自己读路径"（下面提示词里会说） */ }
     const kws = Array.isArray(cfg.keywords) ? cfg.keywords.filter(Boolean) : []
