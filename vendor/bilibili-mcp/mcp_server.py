@@ -16,6 +16,8 @@ B站数据采集 MCP 服务，支持 OpenClaw / Claude Code / Cursor / Cline
 #      ⑤ `bili_reply` 回执带上 `rpid` / `rpid_str` / `root` / `parent`（判重表与评论复核要用）
 #      ⑥ `bili_cover` / `bili_frames`：封面和画面帧**作为图片**返回（上游没有；
 #         图能不能进模型上下文由宿主判断）
+#      ⑦ `duty_seen_append_batch`：整轮的判重行一次写完（2026-11-27 加；一条调用顶十几条）
+#      ⑧ `bili_search_batch`：一轮的全部关键词一次搜完（2026-11-27 加；紧凑行、按 BV 去重；白名单沿用 bili_search）
 import asyncio
 import random
 import json
@@ -56,6 +58,13 @@ mcp = FastMCP("bilibili-mcp")
 #    · 给了 ⇒ 只注册名单里的；不在名单里的工具**连名字都不会出现在 list_tools 里**，
 #      模型那边等于根本不存在 —— 这才是真的闸门（光靠提示词说"别用"不算）✓
 _ALLOWED = {t.strip() for t in os.environ.get("BILI_MCP_TOOLS", "").split(",") if t.strip()}
+
+# ⭐ 2026-11-27：批量记账工具和 duty_seen_append 是同一权限（同一个文件、同一把锁）。
+#    老宿主的内存里还是旧白名单（没有 duty_seen_append_batch），这里自动补齐，
+#    省得为一行白名单去重启宿主；能力没有放大。
+for _implied, _need in {"duty_seen_append_batch": "duty_seen_append", "bili_search_batch": "bili_search", "bili_subtitle_batch": "bili_subtitle", "bili_comments_batch": "bili_comments"}.items():
+    if _implied not in _ALLOWED and _need in _ALLOWED:
+        _ALLOWED.add(_implied)
 
 
 def tool():
@@ -441,6 +450,225 @@ async def bili_search(keyword: str, num: int = 10, order: str = "totalrank", pag
     return json.dumps({"keyword": keyword, "count": len(videos), "videos": videos}, ensure_ascii=False)
 
 
+# ========== Tool 1b: 批量搜索（2026-11-27 加：一轮的关键词一次发完，省 2 个回合） ==========
+
+def _fmt_count(n) -> str:
+    """播放量/弹幕数压成 1.2万 / 3.4亿 这种短格式。"""
+    try:
+        n = int(n or 0)
+    except Exception:
+        return "0"
+    if n >= 100000000:
+        return (f"{n / 100000000:.1f}亿").replace(".0亿", "亿")
+    if n >= 10000:
+        return (f"{n / 10000:.1f}万").replace(".0万", "万")
+    return str(n)
+
+
+def _fmt_pubdate(ts) -> str:
+    """发布时间压成 今天 / 昨天 / 11-27。"""
+    from datetime import date, timedelta
+    try:
+        ts = int(ts or 0)
+    except Exception:
+        return "?"
+    if ts <= 0:
+        return "?"
+    try:
+        d = date.fromtimestamp(ts)
+    except Exception:
+        return "?"
+    today = date.today()
+    if d == today:
+        return "今天"
+    if d == today - timedelta(days=1):
+        return "昨天"
+    return d.strftime("%m-%d")
+
+
+# ⭐ 2026-11-28：标题里带这些词的多半是课程/合集/带课/推广 —— 模型今天 226 行里一条没挑，
+#    铺开写要 25 行 × 78 字符；折叠成「BV + 标题前 28 字」一行 40 字符，标题还能看见，判断不用改。
+#    只匹配标题（简介里"带你/教你"太容易误伤正经技术视频）。
+_FOLD_TITLE_RE = re.compile(
+    r"合集|全套|保姆级|入门到精通|零基础|课程|训练营|包教包会|一对一"
+    r"|变现|副业|赚钱|日入|月入|白嫖|领资料|交流群|加群|速成|手把手|带你|教你"
+)
+
+
+# ⭐ 2026-11-28 调优：一轮的所有关键词**一次搜完**（原来 6~8 个词 = 6~8 个回合、搜索 46k 字符）。
+#    同一趟还顺带做了：剔判重表已看过的、剔今天扫过标题的（scan.md 台账）、折叠疑似课程行、并发抓 3 路。
+#    实测 6 词 x 2 页 = 170 条 / 18.6k 字符（同样内容原来 23.7k）；今天中午那轮 8 次搜索 -> 1 次。
+#    简介默认留 30 字、fold 默认开，都是按「一条没挑」的实测调的。
+@tool()
+async def bili_search_batch(keywords: str, num: int = 15, order: str = "pubdate", pages: int = 2, desc_chars: int = 30, fold: bool = True) -> str:
+    """
+    一次搜多个关键词（一轮的全部词一次发完，省回合）
+
+    Args:
+        keywords: 关键词，用逗号/顿号/空格分隔，如 "AI,编程,网络安全,渗透测试,技术,科普"
+        num: 每个关键词每页取几条，默认 15，最大 30
+        order: 排序 totalrank=综合 click=播放量 pubdate=最新 dm=弹幕
+        pages: 每个关键词翻几页，默认 2
+        desc_chars: 每条简介留多少字（默认 30；0~120，0 = 不输出简介）。实测 120 条结果里简介占 1.6k 字符（30 字）/ 4.2k（不截），标题+播放+UP 通常够判断题材
+        fold: 把标题疑似课程/合集/带课/推广的行折叠成「BV + 标题前 28 字」（默认开；实测今天 226 行里 25 行是这种，
+              实际一条没挑，折叠后省约 2.6k 字符）。传 fold=False 全部铺开
+
+    Returns:
+        紧凑文本列表：每个视频一行，已按 BV 去重、按发布时间倒序
+        `BV号 | 发布时间 | 播放 | 时长 | UP | 标题 | 简介前 60 字`
+    """
+    kws = [k for k in re.split(r"[,，、;；\s]+", str(keywords or "")) if k.strip()]
+    if not kws:
+        return "没给关键词（keywords 用逗号分隔）"
+    kws = kws[:8]
+    num = max(1, min(30, int(num or 15)))
+    pages = max(1, min(5, int(pages or 2)))
+    desc_n = max(0, min(int(desc_chars if desc_chars is not None else 30), 120))
+    order_map = {
+        "totalrank": search.OrderVideo.TOTALRANK,
+        "click": search.OrderVideo.CLICK,
+        "pubdate": search.OrderVideo.PUBDATE,
+        "dm": search.OrderVideo.DM,
+    }
+    order_enum = order_map.get(order, search.OrderVideo.TOTALRANK)
+
+    seen = {}
+    raw = 0
+    limit_rows = 300  # 输出上限：再多模型也读不完，还白烧 token
+    errors = []
+    # ⭐ 2026-11-28：并发抓（默认 3，BILI_FETCH_CONCURRENCY 可调 1~5）。
+    #    原来 6 词 × 2 页 = 12 次串行，每次 throttle 0.6~1.6s ⇒ 实测 18.8 秒；
+    #    并发 3 后同样的活约 6~7 秒，_throttle() 仍在每个任务里，不会把请求打成一片。
+    try:
+        _conc = max(1, min(int(os.environ.get("BILI_FETCH_CONCURRENCY") or 3), 5))
+    except Exception:
+        _conc = 3
+    _sem = asyncio.Semaphore(_conc)
+
+    async def _one_page(kw, page):
+        await _throttle()
+        try:
+            res = await search.search_by_type(
+                keyword=kw,
+                search_type=search.SearchObjectType.VIDEO,
+                page=page,
+                order_type=order_enum,
+            )
+            return kw, page, res, None
+        except Exception as e:
+            return kw, page, None, f"{kw} 第{page}页: {type(e).__name__}: {e}"
+
+    async def _guarded_page(kw, page):
+        async with _sem:
+            return await _one_page(kw, page)
+
+    _tasks = [(kw, p) for kw in kws for p in range(1, pages + 1)]
+    _outs = await asyncio.gather(*[_guarded_page(kw, p) for kw, p in _tasks])
+    for kw, page, result, err in _outs:
+        if err:
+            errors.append(err)
+            continue
+        if len(seen) >= limit_rows:
+            continue
+        for item in (result.get("result") or [])[:num]:
+                bvid = item.get("bvid", "")
+                if not bvid:
+                    continue
+                raw += 1
+                if bvid in seen:
+                    continue
+                title = item.get("title", "").replace('<em class="keyword">', "").replace("</em>", "")
+                seen[bvid] = {
+                    "title": title,
+                    "up": item.get("author", ""),
+                    "play": item.get("play", 0),
+                    "duration": item.get("duration", ""),
+                    "pubdate": item.get("pubdate", 0),
+                    "desc": item.get("description", "").replace("\n", " ")[:desc_n],
+                }
+
+    rows = sorted(seen.items(), key=lambda kv: kv[1]["pubdate"], reverse=True)
+    # ⭐ 2026-11-28：搜到过的 BV→标题/UP 记进缓存（日报里「- 跳过：BV…」只有 BV，靠它补标题）
+    try:
+        _seen_cache_save({bv: [v["title"], v["up"], v["play"], v["duration"]] for bv, v in seen.items()})
+    except Exception:
+        pass
+    # ⭐ 2026-11-28：判重表里已有的 BV 直接不返回 —— 模型看了也只会跳过，
+    #    实测今天 226 条结果里 17 条是看过的（2.5k 字符白读），剔掉还能防"重复挑"。
+    skipped_seen = 0
+    seen_ok = True          # ⭐ 2026-11-28：判重表读不到要在结果里出声（下游据此决定不发评论）
+    try:
+        _sp = DUTY_HOME / "seen.md"
+        if _sp.exists():
+            _seen_bv = set(re.findall(r"BV[0-9A-Za-z]{10}", _sp.read_text(encoding="utf-8", errors="replace")))
+            if _seen_bv:
+                _before = len(rows)
+                rows = [(bv, v) for bv, v in rows if bv not in _seen_bv]
+                skipped_seen = _before - len(rows)
+        else:
+            seen_ok = False
+    except Exception:
+        skipped_seen = 0
+        seen_ok = False
+    # ⭐ 2026-11-28：今天已经扫过标题、当场判掉的视频不再返回（晚上那轮以前要把中午的行重读一遍）。
+    #    剔完不够 60 条时，从"今天扫过的"里按发布时间补回来，免得一轮没东西可挑。
+    scan_skipped = refilled = 0
+    try:
+        _scanned = _scan_today()
+        if _scanned:
+            _keep = [(bv, v) for bv, v in rows if bv not in _scanned]
+            _drop = [(bv, v) for bv, v in rows if bv in _scanned]
+            scan_skipped = len(_drop)
+            rows = _keep
+            if len(rows) < 60 and _drop:
+                refilled = min(60 - len(rows), len(_drop))
+                rows = sorted(rows + _drop[:refilled], key=lambda kv: kv[1]["pubdate"], reverse=True)
+    except Exception:
+        scan_skipped = refilled = 0
+    try:
+        _scan_record([bv for bv, _ in rows])
+    except Exception:
+        pass
+    capped = "（已到 300 条上限，后面的没取）" if len(seen) >= limit_rows else ""
+    skip_note = f" · 已剔掉 {skipped_seen} 条看过的" if skipped_seen else ""
+    if scan_skipped:
+        skip_note += f" · 另有 {scan_skipped} 条今天已经扫过标题（也剔了）"
+    if refilled:
+        skip_note += f"（新的太少，补回 {refilled} 条今天扫过的）"
+    # ⭐ 2026-11-28：疑似课程/合集的行折叠到列表末尾，只留 BV + 标题前 28 字。
+    kept, folded = [], []
+    for bvid, v in rows:
+        if fold and _FOLD_TITLE_RE.search(v["title"] or ""):
+            folded.append((bvid, v))
+        else:
+            kept.append((bvid, v))
+    if folded:
+        skip_note += f" · 折起 {len(folded)} 条疑似课程/合集"
+    lines = [
+        f"关键词 {len(kws)} 个（{' / '.join(kws)}）· 每词 {pages} 页 · 原始 {raw} 条 · 去重后 {len(rows)} 条"
+        f"（按发布时间倒序）{skip_note}{capped}"
+    ]
+    if not rows:
+        lines.append("（全是被判重表 / 扫描台账挡掉的老视频 —— 换个关键词或换个排序再搜）")
+    for bvid, v in kept:
+        desc = v["desc"].strip()
+        row = (f"{bvid} | {_fmt_pubdate(v['pubdate'])} | 播放 {_fmt_count(v['play'])} | {v['duration'] or '?'}"
+               f" | {v['up'] or '?'} | {v['title']}")
+        if desc:
+            row += " | " + desc
+        lines.append(row)
+    if folded:
+        lines.append(f"—— 疑似课程/合集/带课 {len(folded)} 条（折叠成 BV+标题，要展开传 fold=False）：")
+        for bvid, v in folded:
+            lines.append(f"{bvid} {(v['title'] or '')[:28]}")
+    # ⭐ 2026-11-28：判重表读不到必须出声 —— 章程规定这种轮次不发评论（当成"全没看过"会重复打扰人）
+    if not seen_ok:
+        lines.append("⚠️ 判重表读不到（seen.md 不存在或打不开）⇒ 这一轮**不要发评论**，报告里写明「判重表读不到」")
+    if errors:
+        lines.append("⚠️ 部分搜索失败：" + "；".join(errors[:3]))
+    return "\n".join(lines)
+
+
 # ========== Tool 2: 获取评论 ==========
 
 @tool()
@@ -514,6 +742,123 @@ async def bili_comments(bvid: str, num: int = 30) -> str:
     return json.dumps(out, ensure_ascii=False)
 
 
+# ========== Tool 2b: 批量取热评（2026-11-28 加：一轮几条视频的评论一次取完） ==========
+
+def _cmt_line(c: dict, cap: int) -> str:
+    """把一条热评压成一行：赞 · 用户 · 正文(截断) · 回复数。"""
+    txt = re.sub(r"\s+", " ", (c.get("content") or "")).strip()
+    if len(txt) > cap:
+        txt = txt[:cap] + "…"
+    user = (c.get("user") or "").strip()[:16]
+    rc = c.get("reply_count") or 0
+    tail = f"（{rc} 回复）" if rc else ""
+    return f"· 赞{c.get('like', 0)} {user}：{txt}{tail}"
+
+
+async def _fetch_hot(cred, aid, want: int) -> tuple:
+    """取热评（按赞排序，最多一页页翻到 want 条）；返回 (评论列表, 错误文本或 None)。"""
+    got, fetch_error, page = [], None, 1
+    while len(got) < want:
+        try:
+            resp = await comment.get_comments(
+                oid=aid,
+                type_=comment.CommentResourceType.VIDEO,
+                page_index=page,
+                order=comment.OrderType.LIKE,
+                credential=cred,
+            )
+        except Exception as e:
+            fetch_error = f"{type(e).__name__}: {e}"
+            break
+        replies = resp.get("replies") or []
+        if not replies:
+            break
+        for r in replies:
+            got.append({
+                "user": (r.get("member") or {}).get("uname", ""),
+                "content": (r.get("content") or {}).get("message", ""),
+                "like": r.get("like", 0),
+                "reply_count": r.get("rcount", 0),
+            })
+        page += 1
+        await asyncio.sleep(0.4)
+    return got[:want], fetch_error
+
+
+# ⭐ 2026-11-28 调优：多条视频的热评**一次取完**，压成「· 赞N 用户：正文」一行一条。
+#    原来 bili_comments 返回整段 JSON（rpid/时间/uid 全在），3 条 2,816 字符；这里 1,057 字符（-62%）。
+@tool()
+async def bili_comments_batch(bvids: str, num: int = 10, max_chars: int = 120) -> str:
+    """
+    一次取多条视频的热门评论，压成一行一条
+
+    Args:
+        bvids: 逗号/空格分隔的 BV 号，最多 20 条
+        num: 每条视频取几条热评（默认 10；1~30）
+        max_chars: 每条评论正文最多留多少字（默认 120；40~400）
+
+    Returns:
+        紧凑文本：每条视频一段「■ BV · 标题 · N 条热评」+ 每行一条评论；末尾总计
+    """
+    ids = [x for x in re.split(r"[,，、;；\s]+", bvids or "") if x]
+    seen_ids, uniq = set(), []
+    for x in ids:
+        if x not in seen_ids:
+            seen_ids.add(x)
+            uniq.append(x)
+    ids = uniq[:20]
+    if not ids:
+        return "没给 BV 号"
+    want = max(1, min(int(num or 10), 30))
+    cap = max(40, min(int(max_chars or 120), 400))
+
+    # ⭐ 2026-11-28：同字幕批量，逐条串行 → 并发 3（BILI_FETCH_CONCURRENCY 可调）
+    async def _one_bv_cmt(bv):
+        out = {"blocks": [], "ok": 0, "errs": 0}
+        try:
+            await _throttle()
+            cred = get_cred()
+            v = video.Video(bvid=bv, credential=cred)
+            info = await v.get_info()
+            aid = info.get("aid")
+            title = (info.get("title") or "").strip()[:24]
+            if not aid:
+                out["blocks"] = [f"■ {bv} · ⚠️ 拿不到 aid"]
+                out["errs"] = 1
+                return out
+            got, fetch_error = await _fetch_hot(cred, aid, want)
+            head = f"■ {bv} · {title} · {len(got)} 条热评"
+            if fetch_error:
+                head += f" · ⚠️ 抓取中断：{fetch_error}"
+            out["blocks"] = [head] + [_cmt_line(c, cap) for c in got]
+            out["ok"] = 1
+        except Exception as e:
+            out["blocks"] = [f"■ {bv} · ⚠️ 取评论失败：{type(e).__name__}: {e}"]
+            out["errs"] = 1
+        return out
+
+    try:
+        _conc = max(1, min(int(os.environ.get("BILI_FETCH_CONCURRENCY") or 3), 5))
+    except Exception:
+        _conc = 3
+    _sem = asyncio.Semaphore(_conc)
+
+    async def _guarded_cmt(bv):
+        async with _sem:
+            return await _one_bv_cmt(bv)
+
+    blocks = []
+    ok = errs = 0
+    for _r in await asyncio.gather(*[_guarded_cmt(bv) for bv in ids]):
+        blocks.extend(_r["blocks"])
+        ok += _r["ok"]
+        errs += _r["errs"]
+
+    body = "\n".join(blocks)
+    head = f"评论 {len(ids)} 条：{ok} 取到 · {errs} 失败 · 合计 {len(body)} 字"
+    return head + "\n\n" + body
+
+
 # ========== Tool 3: 获取字幕 ==========
 
 @tool()
@@ -574,6 +919,195 @@ async def bili_subtitle(bvid: str) -> str:
         "segments": len(texts),
         "text": full_text,
     }, ensure_ascii=False)
+
+
+# ========== Tool 3b: 批量取字幕（2026-11-28 加：一轮十几条字幕一次取完） ==========
+
+def _sub_flatten(body) -> tuple:
+    """把逐段字幕压成一段连续文本；返回 (文本, 段数)。"""
+    parts = []
+    for item in body or []:
+        s = (item.get("content") or "").strip()
+        if s:
+            parts.append(s)
+    text = "".join(parts)
+    text = re.sub(r"[ \t\u3000]{2,}", " ", text)
+    return text, len(parts)
+
+
+def _sub_clip(text: str, max_chars: int) -> str:
+    """超长时留头 70% + 尾 30%，中间标出省略了多少字。"""
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    head = max(1, int(max_chars * 0.7))
+    tail = max(1, max_chars - head)
+    cut = len(text) - head - tail
+    return text[:head] + f"…（中略 {cut} 字）…" + text[-tail:]
+
+
+# ⭐ 2026-11-28 调优：**批量字幕** —— 一轮 11 次逐条 bili_subtitle（12 个回合、52k 字符）-> 1 次调用。
+#    · max_chars 默认 3000 -> 2000 -> 1600：今天 11 条真实字幕 16,905 -> 13,975 -> 12,376 字符，
+#      被截的仍是同样 4 条，判断「讲的是什么机制」够用；
+#    · comments=N 把热评并进**同一趟**（省 1 个回合，抓取时间 -40%）；
+#    · frames=N 给没字幕的那几条顺带带回画面（以前要等看完字幕再单独调 bili_frames，白多一个回合）；
+#    · 20 条以内一次发完（原 12 条上限，20 条候选时要拆两次）。
+@tool()
+async def bili_subtitle_batch(bvids: str, max_chars: int = 1600, comments: int = 0, comment_chars: int = 120, frames: int = 0) -> list:
+    """
+    一次取多条视频的字幕（AI 字幕），可选把热评一起带上 —— 细看一条视频一次取完
+
+    Args:
+        bvids: 逗号/空格分隔的 BV 号，如 "BV1xx,BV2yy"，最多 20 条
+        max_chars: 每条字幕最多留多少字（默认 1600；200~20000）。实测 11 条真实字幕平均 1.9k 字，2000 砍到 14.0k 字符、1600 砍到 12.4k（被截仍是同样 4 条，只是那 4 条中间多丢 400 字）
+                截到 2000 只动 3 条长的（-19%），判断"讲的是什么机制"足够
+        comments: 每条视频顺带取几条热评（默认 0 = 不取；0~20）
+        comment_chars: 每条热评正文最多留多少字（默认 120；40~400）
+        frames: 无字幕的视频顺带取几张画面（默认 0 = 不取；1~3）。取得到的图附在文本后面，
+                这样"没字幕只能看画面"的判定和字幕是**同一趟**回来的，不用再单独调 bili_frames
+
+    Returns:
+        紧凑文本：每条一段「■ BV · 标题 · 时长 · N 段」+ 字幕正文（可选「  热评 N 条」+ 一行一条）；末尾总计
+    """
+    import aiohttp
+    ids = [x for x in re.split(r"[,，、;；\s]+", bvids or "") if x]
+    seen_ids, uniq = set(), []
+    for x in ids:
+        if x not in seen_ids:
+            seen_ids.add(x)
+            uniq.append(x)
+    ids = uniq[:20]
+    if not ids:
+        return "没给 BV 号"
+    cap = max(200, min(int(max_chars or 2000), 20000))
+    want_c = max(0, min(int(comments or 0), 20))
+    ccap = max(40, min(int(comment_chars or 120), 400))
+    want_f = max(0, min(int(frames or 0), 3))
+
+    # ⭐ 2026-11-28：逐条串行 → 并发 3（BILI_FETCH_CONCURRENCY 可调 1~5）。
+    #    实测 11 条字幕串行 17.5 秒（每条 get_info + 字幕 JSON 两跳），并发 3 约 6~7 秒。
+    #    每条仍各自 _throttle()，请求不会攒成一片；结果按传入顺序拼回去，报告顺序不变。
+    async def _one_bv(bv):
+        r = {"lines": [], "ok": 0, "trunc": 0, "nosub": 0, "failed": 0,
+             "raw": 0, "kept": 0, "cmt": 0, "images": []}
+        try:
+            await _throttle()
+            cred = get_cred()
+            v = video.Video(bvid=bv, credential=cred)
+            info = await v.get_info()
+            cid = info.get("cid", 0)
+            if not cid and info.get("pages"):
+                cid = info["pages"][0].get("cid", 0)
+            title = (info.get("title") or "").strip()[:48]
+            dur = int(info.get("duration") or 0)
+            dur_s = f"{dur // 60}:{dur % 60:02d}" if dur else "?"
+            head_parts = [f"■ {bv} · {title} · {dur_s}"]
+            body_lines = []
+            # ---- 字幕 ----
+            if not cid:
+                head_parts.append("⚠️ cid 拿不到")
+                r["failed"] = 1
+            else:
+                subtitle_list = await v.get_subtitle(cid=cid)
+                subtitles = subtitle_list.get("subtitles") or []
+                if not subtitles:
+                    r["nosub"] = 1
+                    if want_f:
+                        # ⭐ 2026-11-28：无字幕的视频顺手把画面带回来（省掉单独一次 bili_frames 往返）
+                        try:
+                            await _throttle()
+                            f_res = await bili_frames(bv, num=want_f)
+                            f_imgs, f_txt = [], ""
+                            for _blk in (f_res or []):
+                                if isinstance(_blk, ImageContent):
+                                    f_imgs.append(_blk)
+                                elif isinstance(_blk, TextContent):
+                                    f_txt = _blk.text or ""
+                            f_meta = {}
+                            if f_txt:
+                                try:
+                                    f_meta = json.loads(f_txt)
+                                except Exception:
+                                    f_meta = {}
+                            if f_imgs:
+                                r["images"].extend(f_imgs)
+                                head_parts.append(f"⚠️ 没有字幕 · 带回 {len(f_imgs)} 帧画面（480x270，看画面判断）")
+                            else:
+                                head_parts.append("⚠️ 没有字幕 · 抽帧也没取到：" + str(f_meta.get("error") or "未知"))
+                        except Exception as fe:
+                            head_parts.append(f"⚠️ 没有字幕 · 抽帧失败：{type(fe).__name__}")
+                    else:
+                        head_parts.append("⚠️ 没有字幕")
+                else:
+                    target = None
+                    for s in subtitles:
+                        if s.get("lan") in ("ai-zh", "zh-CN", "zh"):
+                            target = s
+                            break
+                    if not target:
+                        target = subtitles[0]
+                    sub_url = target.get("subtitle_url", "") or ""
+                    if sub_url.startswith("//"):
+                        sub_url = "https:" + sub_url
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(sub_url) as resp:
+                            sub_data = await resp.json()
+                    text, segs = _sub_flatten(sub_data.get("body"))
+                    r["raw"] = len(text)
+                    clipped = _sub_clip(text, cap)
+                    if len(clipped) != len(text):
+                        r["trunc"] = 1
+                    r["kept"] = len(clipped)
+                    head_parts.append(f"{segs} 段")
+                    body_lines.append(clipped if clipped else "（字幕是空的）")
+                    r["ok"] = 1
+            # ---- 热评（可选，和字幕同一趟取完）----
+            if want_c:
+                aid = info.get("aid")
+                if not aid:
+                    body_lines.append("  热评：⚠️ 拿不到 aid")
+                else:
+                    got, cerr = await _fetch_hot(cred, aid, want_c)
+                    body_lines.append(f"  热评 {len(got)} 条" + (f" · ⚠️ 抓取中断：{cerr}" if cerr else ""))
+                    body_lines.extend("  " + _cmt_line(c, ccap) for c in got)
+                    r["cmt"] = len(got)
+            r["lines"] = [" · ".join(head_parts)] + body_lines
+        except Exception as e:
+            r["lines"] = [f"■ {bv} · ⚠️ 取字幕失败：{type(e).__name__}: {e}"]
+            r["failed"] = 1
+        return r
+
+    try:
+        _conc = max(1, min(int(os.environ.get("BILI_FETCH_CONCURRENCY") or 3), 5))
+    except Exception:
+        _conc = 3
+    _sem = asyncio.Semaphore(_conc)
+
+    async def _guarded_bv(bv):
+        async with _sem:
+            return await _one_bv(bv)
+
+    _results = await asyncio.gather(*[_guarded_bv(bv) for bv in ids])
+    lines = []
+    ok = truncated = nosub = failed = raw_total = kept_total = got_cmt = 0
+    for _r in _results:
+        ok += _r["ok"]
+        truncated += _r["trunc"]
+        nosub += _r["nosub"]
+        failed += _r["failed"]
+        raw_total += _r["raw"]
+        kept_total += _r["kept"]
+        got_cmt += _r["cmt"]
+        lines.extend(_r["lines"])
+
+    imgs = [im for _r in _results for im in (_r.get("images") or [])]
+    head = (f"细看 {len(ids)} 条：{ok} 有字幕（截断 {truncated}）· {nosub} 无字幕 · {failed} 失败"
+            + (f" · 热评 {got_cmt} 条" if want_c else "")
+            + (f" · 兜底画面 {len(imgs)} 帧" if imgs else "")
+            + f" · 合计 {kept_total} 字（原 {raw_total} 字）")
+    text = head + "\n\n" + "\n".join(lines)
+    if imgs:
+        return [TextContent(type="text", text=text), *imgs]
+    return text
 
 
 # ========== Tool 4: 获取弹幕 ==========
@@ -655,16 +1189,22 @@ def _normalize_mention(text: str) -> str:
 
 # ========== Tool 6: 回复评论 ==========
 
+# ⭐ 2026-11-28 调优：发送成功后自动往判重表记一行「评论」（auto_seen）——
+#    模型收尾不用再手写 rows（实测 1,740 字符 ≈ 1.2k 输出 token），报告里也不用抄 rpid。
 @tool()
-async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0) -> str:
+async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0, auto_seen: bool = True) -> str:
     """
     在B站视频下发表评论或回复某条评论
+
+    ⭐ 2026-11-28：发送成功后**自动**往判重表记一行「评论」（带 rpid）——
+    所以收尾的 duty_seen_append_batch 里**不用再写「评论」那几行**了（写了也会被去重挡掉）。
 
     Args:
         bvid: 视频BV号
         text: 评论/回复的文本内容
         rpid: 要回复的目标评论ID（0表示发表新评论）
         root: 楼层根评论ID（回复一级评论时不用填，回复楼中楼时填根评论ID）
+        auto_seen: 默认 true = 成功后自动往判重表记「评论」行；false = 不记
     
     Returns:
         发表结果
@@ -710,6 +1250,23 @@ async def bili_reply(bvid: str, text: str, rpid: int = 0, root: int = 0) -> str:
         #（2026-10-16 审查修：原实现把上面的 result 丢掉了）
         out = {"success": True, "message": "评论发送成功"}
         _ledger_append(text, bvid, result.get("rpid") if isinstance(result, dict) else None)
+        # ⭐ 2026-11-28：成功即记一行判重（「评论」+ rpid），收尾时模型不用再抄一遍这十几行
+        if auto_seen:
+            try:
+                _rp = result.get("rpid") if isinstance(result, dict) else None
+                _up = ""
+                try:
+                    _up = str(((info.get("owner") or {}).get("name")) or "")
+                except Exception:
+                    _up = ""
+                _seen_append_row(
+                    bvid,
+                    "评论记录 rpid=" + str(_rp or 0) + " · " + " ".join(str(text).split())[:20],
+                    _up,
+                    "评论",
+                )
+            except Exception:
+                pass
         if isinstance(result, dict):
             for key in ("rpid", "rpid_str", "root", "parent"):
                 val = result.get(key)
@@ -1334,6 +1891,162 @@ def _append(path: Path, text: str) -> str:
     return str(path)
 
 
+# ⭐ 2026-11-28：日报 / 归档 / 判重表三件套的公共小工具。
+#    起因：每天收尾时模型要把同一批视频写两遍 —— 一遍进日报（~4,000 字符），一遍进 digest 归档（~2,000 字符），
+#    digest 那一遍纯粹是格式转换（日期·BV·标题·UP·一句话·链接），白花约 1.5k 输出 token。
+#    现在改成 duty_report_append 顺手从日报的 `### BV…` 段里抠出来写进 digest，模型不用再写第二遍。
+def _digest_path() -> Path:
+    return DUTY_HOME / "digest" / (_dt.datetime.now().strftime("%Y-%m") + ".md")
+
+
+def _digest_seen(day: str = "") -> set:
+    """本月归档里已有的 (日期, BV)；day 非空只看那一天。"""
+    have = set()
+    p = _digest_path()
+    if not p.exists():
+        return have
+    try:
+        for ln in p.read_text(encoding="utf-8", errors="replace").splitlines():
+            md = re.match(r"\s*-\s*(\d{4}-\d{2}-\d{2})", ln)
+            mb = re.search(r"·\s*(BV[0-9A-Za-z]{10})\s*·", ln)
+            if md and mb and (not day or md.group(1) == day):
+                have.add((md.group(1), mb.group(1)))
+    except Exception:
+        return have
+    return have
+
+
+_REPORT_HEAD_RE = re.compile(r"^#{2,4}\s*(BV[0-9A-Za-z]{10})")
+
+
+def _digest_lines_from_report(body: str) -> list:
+    """把日报里每个 `### BV…` 段压成一行归档行 → [(BV, 行)]。"""
+    lines = str(body or "").replace("\r\n", "\n").split("\n")
+    day = _duty_today()
+    out, i = [], 0
+    while i < len(lines):
+        m = _REPORT_HEAD_RE.match(lines[i].strip())
+        i += 1
+        if not m:
+            continue
+        bv = m.group(1)
+        block = []
+        while i < len(lines) and not re.match(r"^#{1,4}\s", lines[i].strip()):
+            block.append(lines[i])
+            i += 1
+        title = up = gear = one = ""
+        para = []
+        for ln in block:
+            s = ln.strip()
+            if not s:
+                continue
+            g = re.match(r"^\*\*档位\*\*\s*[：:]\s*(.+)", s)
+            if g:
+                gear = " ".join(g.group(1).split())[:8]
+                continue
+            if s.startswith("我的一句话"):
+                one = re.sub(r"^我的一句话\s*[：:]\s*", "", s)
+                continue
+            if not title and "**" in s:
+                parts = [x.strip() for x in re.split(r"\s*·\s*", s)]
+                title = parts[0].strip("*").strip()
+                if len(parts) > 1:
+                    up = parts[1].strip()
+                continue
+            if not s.startswith("**"):
+                para.append(s)
+        if not title:
+            continue
+        take = " ".join((one or (para[0] if para else "")).split())
+        if not one and take:
+            take = re.split(r"(?<=。)", take)[0]
+        take = take[:90].rstrip("，,、 ")
+        out.append((bv, "- " + day + " · " + bv + " · " + title[:60] + " · " + up[:30]
+                    + " · " + (gear or "挑中") + "：" + take
+                    + " · https://www.bilibili.com/video/" + bv))
+    return out
+
+
+def _seen_existing() -> set:
+    """判重表里已有的 (日期, BV, 状态) —— 重复行不再写（模型和自动记录撞车时挡住）。"""
+    have = set()
+    p = DUTY_HOME / "seen.md"
+    if not p.exists():
+        return have
+    try:
+        for ln in p.read_text(encoding="utf-8", errors="replace").splitlines():
+            if not ln.strip().startswith("|") or "---" in ln:
+                continue
+            cols = [c.strip().replace("\\|", "|") for c in re.split(r"(?<!\\)\|", ln)]
+            if len(cols) < 6:
+                continue
+            have.add((cols[1], cols[2], cols[5]))
+    except Exception:
+        return have
+    return have
+
+
+# ⭐ 2026-11-28：扫描台账（scan.md）。
+#    问题：晚上那轮按 pubdate 搜，返回的大半是中午已经**扫过标题、当场判掉**的视频 ——
+#    它们没进 seen.md（只有细看过的才记），于是晚上又原样读一遍（实测一轮 226 行 ≈ 17.6k 字符）。
+#    这里把每次 search_batch 返回的 BV 记一笔，同一天内再搜到就直接剔掉，等于"扫过就不再扫"。
+def _scan_path() -> Path:
+    return DUTY_HOME / "scan.md"
+
+
+def _scan_today(day: str = "") -> set:
+    """今天（或指定日）已经扫过的 BV 集合。"""
+    d = day or _duty_today()
+    out = set()
+    p = _scan_path()
+    if not p.exists():
+        return out
+    try:
+        for ln in p.read_text(encoding="utf-8", errors="replace").splitlines():
+            parts = ln.split()
+            if len(parts) >= 3 and parts[0] == d:
+                out.add(parts[2])
+    except Exception:
+        return out
+    return out
+
+
+def _scan_record(bvids: list) -> None:
+    """记下这一轮扫到的 BV；超过 3000 行就只留最近两天（自己截断，不留给用户清理）。"""
+    p = _scan_path()
+    now = _dt.datetime.now()
+    stamp = now.strftime("%Y-%m-%d %H:%M")
+    lines = [stamp + " " + bv for bv in bvids if bv]
+    if not lines:
+        return
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "a", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(lines) + "\n")
+        if p.stat().st_size > 60000:
+            keep_from = (now - _dt.timedelta(days=2)).strftime("%Y-%m-%d")
+            old = p.read_text(encoding="utf-8", errors="replace").splitlines()
+            kept = [ln for ln in old if ln[:10] >= keep_from]
+            with open(p, "w", encoding="utf-8", newline="\n") as f:
+                f.write("\n".join(kept) + "\n")
+    except Exception:
+        pass
+
+
+def _seen_append_row(bvid: str, title: str, up: str, status: str, date: str = "") -> bool:
+    """追加一行判重（重复则跳过）；返回是否真写了。"""
+    bv = str(bvid or "").strip()
+    if not bv:
+        return False
+    d = _duty_norm_date(date)
+    st = str(status or "挑了").strip() or "挑了"
+    if (d, bv, st) in _seen_existing():
+        return False
+    row = f"| {_cell(d, 10)} | {_cell(bv, 16)} | {_cell(title)} | {_cell(up, 30)} | {_cell(st, 8)} |\n"
+    _append(DUTY_HOME / "seen.md", row)
+    return True
+
+
 @tool()
 def duty_paths() -> str:
     """
@@ -1351,26 +2064,225 @@ def duty_paths() -> str:
     return json.dumps(out, ensure_ascii=False)
 
 
+# ⭐ 2026-11-28：判重表也从日报里长出来 —— 收尾只剩一个调用。
+#    以前收尾要模型再输出一遍 duty_seen_append_batch(rows)（实测 1,740 字符 ≈ 1.2k 输出 token），
+#    可标题 / UP / 档位 / 跳过原因在日报段落里全都有；工具自己抠出来记进 seen.md 就行。
+_REPORT_SKIP_RE = re.compile(r"^[-*]\s*跳过\s*[：:]\s*(BV[0-9A-Za-z]{10})\s*(.*)$")
+
+
+def _seen_title_cache() -> dict:
+    """搜索时顺手记下的 BV → [标题, UP, 播放, 时长]（2026-11-28 扩成 4 项：日报标题行也用它拼）。"""
+    try:
+        data = json.loads((DUTY_HOME / "search-cache.json").read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+# ⭐ 2026-11-28：缓存从 [标题, UP] 扩成 [标题, UP, 播放, 时长] —— 日报标题行靠它补，不再让模型写。
+def _seen_cache_save(new: dict) -> None:
+    """把这一轮搜到的 BV/[标题,UP,播放,时长] 并进缓存（最多留 800 条，老的先丢）。"""
+    if not new:
+        return
+    try:
+        cur = _seen_title_cache()
+        cur.update(new)
+        if len(cur) > 800:
+            cur = dict(list(cur.items())[-800:])
+        p = DUTY_HOME / "search-cache.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(cur, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _report_seen_rows(body: str) -> list:
+    """
+    从日报正文抠出要记判重表的行 → [(bv, 标题, UP, 状态, 跳过原因)]。
+
+    状态：跟着档位走（值得看 / 可以看）；跳过写成固定行 `- 跳过：BV… · 原因` 时记「跳过」。
+    """
+    lines = str(body or "").replace("\r\n", "\n").split("\n")
+    cache = _seen_title_cache()
+    order, out = [], {}
+    i = 0
+    while i < len(lines):
+        m = _REPORT_HEAD_RE.match(lines[i].strip())
+        if not m:
+            i += 1
+            continue
+        bv = m.group(1)
+        i += 1
+        block = []
+        while i < len(lines) and not re.match(r"^#{1,4}\s", lines[i].strip()):
+            block.append(lines[i])
+            i += 1
+        title = up = gear = ""
+        for ln in block:
+            s = ln.strip()
+            if not s:
+                continue
+            g = re.match(r"^\*\*档位\*\*\s*[：:]\s*(.+)", s)
+            if g and not gear:
+                gear = " ".join(g.group(1).split())[:8]
+                continue
+            if not title and "**" in s:
+                parts = [x.strip() for x in re.split(r"\s*·\s*", s)]
+                title = parts[0].strip("*").strip()
+                if len(parts) > 1:
+                    up = parts[1].strip()
+                continue
+        if bv and bv not in out:
+            out[bv] = (bv, title, up, gear or "挑了", "")
+            order.append(bv)
+    for ln in lines:
+        m = _REPORT_SKIP_RE.match(ln.strip())
+        if not m or m.group(1) in out:
+            continue
+        bv = m.group(1)
+        hit = cache.get(bv) or ["", ""]
+        note = re.sub(r"^[·\-：:\s]+", "", m.group(2)).strip()
+        out[bv] = (bv, str(hit[0] or ""), str(hit[1] or ""), "跳过", note[:60])
+        order.append(bv)
+    return [out[bv] for bv in order]
+
+
+def _bvid_of_head(ln: str) -> str:
+    """就是 ### BVxxxxxxxxxx 这一行时返回 BV 号，否则返回空串。"""
+    s = ln.strip()
+    if not s.startswith("###"):
+        return ""
+    rest = s[3:].strip()
+    if len(rest) == 12 and rest.startswith("BV") and rest[2:].isalnum():
+        return rest
+    return ""
+
+
+def _entry_head_line(bvid: str) -> str:
+    """用搜索缓存拼一条「标题 · UP · 链接 · 播放 · 时长」（缓存里没有就返回空串）。"""
+    try:
+        v = _seen_title_cache().get(bvid) or []
+        if not v or not v[0]:
+            return ""
+        title = " ".join(str(v[0]).split())
+        up = " ".join(str(v[1]).split()) if len(v) > 1 and v[1] else ""
+        play = v[2] if len(v) > 2 else None
+        dur = v[3] if len(v) > 3 else ""
+        line = "**" + title + "**"
+        if up:
+            line += " · " + up
+        line += " · [链接](https://www.bilibili.com/video/" + bvid + ")"
+        if play:
+            line += " · 播放 " + _fmt_count(play)
+        if dur:
+            line += " · " + str(dur)
+        return line
+    except Exception:
+        return ""
+
+
+# ⭐ 2026-11-28 调优：日报每条的标题行由这里补（标题/UP/链接/播放/时长 从 search-cache.json 取）。
+#    上一轮 9 条标题行合计 834 字符，模型不用再抄一遍；缓存里没有的 BV 原样放过，不硬编。
+def _ensure_entry_heads(body: str) -> tuple:
+    """给每个 ### BV… 段补标题行：模型只写档位/正文/一句话，标题/UP/链接/播放/时长由这里补。"""
+    lines = str(body or "").splitlines()
+    out, added = [], 0
+    for idx, ln in enumerate(lines):
+        out.append(ln)
+        bv = _bvid_of_head(ln)
+        if not bv:
+            continue
+        j = idx + 1
+        while j < len(lines) and not lines[j].strip():
+            j += 1
+        nxt = lines[j] if j < len(lines) else ""
+        if "bilibili.com/video/" in nxt:
+            continue
+        head = _entry_head_line(bv)
+        if head:
+            out.append(head)
+            added += 1
+    return chr(10).join(out), added
+
+
+# ⭐ 2026-11-28 调优：收尾从「日报 + digest + 判重表」三个调用变**一个**。
+#    写日报时顺手做三件事：① 按 ### BV 段归档进本月 digest（不再让模型写第二遍，约 2,000 字符/轮）
+#    ② 每条按档位记进判重表（值得看/可以看/跳过）③ 缺标题行的段用搜索缓存补上（约 93 字符/条）。
 @tool()
-def duty_report_append(text: str) -> str:
+def duty_report_append(text: str, mirror_digest: bool = True) -> str:
     """
     往**今天的日报**末尾追加一段（文件不存在会自动建）。
 
+    ⭐ 2026-11-28：写完会顺手把里面每个 `### BV…` 段压成一行归档进本月 digest（digest 已有的跳过）。
+    所以**收尾时只调这一个工具就行，不要再单独写一遍 duty_digest_append** —— 那是把同样的内容
+    第二次输出（每天约 2,000 字符 / 1.5k 输出 token），归档行格式固定，工具从日报里抠就够了。
+
+    ⭐ 2026-11-28：同时把判重表也记上 —— 日报里每个 `### BV…` 段（档位当状态）、
+    以及 `- 跳过：BV… · 一句原因` 这种行，会自动写成 seen.md 的行；所以**不用再调
+    duty_seen_append_batch**（那又是一遍同类内容，实测 1,740 字符 ≈ 1.2k 输出 token）。
+
     Args:
-        text: 要追加的内容（markdown 纯文本）
+        text: 要追加的内容（markdown 纯文本，条目用 `### BV号` + `**标题** · UP · 链接` + `**档位**：值得看` 的格式）
+        mirror_digest: 默认 true = 顺带归档进 digest；false = 只写日报
 
     Returns:
-        写到了哪个文件
+        写到了哪个文件、顺带归档了几条
     """
     body = str(text or "").replace("\r\n", "\n").strip()
     if not body:
         return "没写：内容是空的"
+    # 2026-11-28：标题行（标题 · UP · 链接 · 播放 · 时长）由工具从搜索缓存补，
+    #    模型只写 BV 标题行 + 档位 + 正文 + 我的一句话 —— 每条省约 100 字符输出。
+    head_added = 0
+    try:
+        body, head_added = _ensure_entry_heads(body)
+    except Exception:
+        head_added = 0
     p = DUTY_HOME / "out" / (_duty_today() + ".md")
     fresh = not p.exists()
     payload = body + "\n"
     if fresh:
         payload = "# 刷B站日报 " + _duty_today() + "\n\n" + payload
-    return "已追加到 " + _append(p, payload)
+    msg = "已追加到 " + _append(p, payload)
+    if head_added:
+        msg += "（补了 " + str(head_added) + " 条标题行）"
+    # ⭐ 2026-11-28：顺手把判重表记上 —— 模型收尾不用再单独输出一遍 rows
+    srows = []
+    try:
+        srows = _report_seen_rows(body)
+        wrote = 0
+        for bv, title, up, status, _note in srows:
+            if _seen_append_row(bv, title, up, status):
+                wrote += 1
+        if srows:
+            msg += "（判重表记了 " + str(wrote) + " 行" + ("，重复的没记" if wrote < len(srows) else "") + "）"
+    except Exception as e:
+        msg += "（判重表没记上：" + str(e) + "）"
+    if not mirror_digest:
+        return msg
+    try:
+        today = _duty_today()
+        have = _digest_seen(today)
+        lines, seen_now = [], set()
+        for bv, ln in _digest_lines_from_report(body):
+            if (today, bv) in have or bv in seen_now:
+                continue
+            seen_now.add(bv)
+            lines.append(ln)
+        # ⭐ 2026-11-28：跳过的也归一行档（以前靠 duty_seen_append_batch 的 note）
+        for bv, title, up, status, note in srows:
+            if status != "跳过" or (today, bv) in have or bv in seen_now:
+                continue
+            seen_now.add(bv)
+            lines.append("- " + today + " · " + bv + " · " + " ".join(title.split())[:60] + " · "
+                         + " ".join(up.split())[:30] + " · 跳过：" + (note or "跳过")[:60]
+                         + " · https://www.bilibili.com/video/" + bv)
+        if not lines:
+            return msg + "（digest 这几条已经归档过，没重复写）"
+        _append(_digest_path(), "\n".join(lines) + "\n")
+        return msg + "（顺带归档 " + str(len(lines)) + " 条到 digest）"
+    except Exception as e:
+        return msg + "（归档没写成：" + str(e) + "）"
 
 
 @tool()
@@ -1396,17 +2308,100 @@ def duty_seen_append(bvid: str, title: str, up: str, status: str, date: str = ""
     return "已追加到 " + _append(DUTY_HOME / "seen.md", row)
 
 
+# ⭐ 2026-11-28 调优：**一般不用调**（日报里有的条目由 duty_report_append 自动记）。
+#    留着只给「日报之外单独补记」的场合；按 (日期, BV, 状态) 去重，重复调用不会写两遍。
 @tool()
-def duty_seen_recent(limit: int = 40, bvid: str = "") -> str:
+def duty_seen_append_batch(rows: str) -> str:
+    """
+    一次把**整轮**的判重行写完（一条调用顶十几条 duty_seen_append，省模型往返）。
+
+    ⚠️ 2026-11-28 起**一般不用调**：日报里有的条目由 duty_report_append 自动记进判重表，
+    这里只留给「日报之外单独补记」的场合。
+
+    ⭐ 2026-11-28：status=跳过 的行走带 `"note":"一句跳过理由"` 时，会**顺带把这条归档进本月 digest**
+    （挑中的由 duty_report_append 从日报里自动归档）—— 所以收尾时不用再单独写一遍 duty_digest_append。
+
+    Args:
+        rows: JSON 数组字符串，每项 {"bvid": "BV…", "title": "…", "up": "…", "status": "挑了|跳过|评论", "note": "跳过理由（可选）", "date": "可选"}
+
+    Returns:
+        写了几行、写到了哪个文件；格式不对的条目会跳过并说明
+    """
+    guard = _guard("duty_seen_append_batch")
+    if guard:
+        return guard
+    try:
+        items = json.loads(rows) if isinstance(rows, str) else rows
+    except Exception as e:
+        return "没写：rows 不是合法 JSON（" + str(e) + "）"
+    if isinstance(items, dict):
+        items = [items]
+    if not isinstance(items, list):
+        return "没写：rows 要传 JSON 数组（每项一个对象）"
+    have = _seen_existing()
+    lines, skipped, dup = [], [], 0
+    digest_lines, digest_have = [], _digest_seen()
+    for i, it in enumerate(items[:60], 1):
+        if not isinstance(it, dict):
+            skipped.append("第 " + str(i) + " 条不是对象")
+            continue
+        bv = str(it.get("bvid") or "").strip()
+        if not bv:
+            skipped.append("第 " + str(i) + " 条缺 bvid")
+            continue
+        d = _duty_norm_date(str(it.get("date") or ""))
+        title = str(it.get("title") or "")
+        up = str(it.get("up") or "")
+        status = str(it.get("status") or "挑了")
+        key = (d, bv, status.strip() or "挑了")
+        # ⭐ 2026-11-28：bili_reply 成功后会自动记一行「评论」，模型再写一遍就会重复。
+        #    重复的（日期+BV+状态都一样）直接跳过，不写第二行。
+        if key in have:
+            dup += 1
+            continue
+        have.add(key)
+        lines.append(f"| {_cell(d, 10)} | {_cell(bv, 16)} | {_cell(title)} | {_cell(up, 30)} | {_cell(status, 8)} |\n")
+        note = " ".join(str(it.get("note") or "").split())
+        if note and str(status).strip() == "跳过" and (d, bv) not in digest_have:
+            digest_have.add((d, bv))
+            digest_lines.append("- " + d + " · " + bv + " · " + " ".join(title.split())[:60] + " · "
+                               + " ".join(up.split())[:30] + " · 跳过：" + note[:60]
+                               + " · https://www.bilibili.com/video/" + bv + "\n")
+    if not lines:
+        if dup:
+            return "没写：" + str(dup) + " 行判重表里已经有了（不用重复写）"
+        return "没写：" + ("；".join(skipped) if skipped else "rows 是空数组")
+    path = _append(DUTY_HOME / "seen.md", "".join(lines))
+    if digest_lines:
+        try:
+            _append(_digest_path(), "".join(digest_lines))
+        except Exception:
+            pass
+    msg = "已一次追加 " + str(len(lines)) + " 行到 " + path
+    if digest_lines:
+        msg += "（顺带归档 " + str(len(digest_lines)) + " 条跳过的进 digest）"
+    if dup:
+        msg += "（已跳过 " + str(dup) + " 行重复的）"
+    if len(items) > 60:
+        msg += "（超过 60 条，多出来的没写）"
+    if skipped:
+        msg += "（跳过：" + "；".join(skipped) + "）"
+    return msg
+
+
+@tool()
+def duty_seen_recent(limit: int = 40, bvid: str = "", compact: bool = True) -> str:
     """
     读判重表的最近若干行（只读，只读插件自己那份 seen.md）。
 
     Args:
-        limit: 取最近多少行（默认 40，上限 200）
+        limit: 取最近多少个**视频**（默认 40，上限 200；同一条视频的多行会合并成一行，留最新状态）
         bvid: 只查某个 BV（留空=看全部）
+        compact: 默认 true = 一条一行「日期 BV 状态 标题前 14 字」（判重够用，字符省 ~3/4）；
+                 false = 原样表格行（日期 | BV | 标题 | UP | 状态）
 
     Returns:
-        表格行（日期 | BV | 标题 | UP | 状态）；空 = 这份表还没内容
+        表格行；空 = 这份表还没内容
     """
     f = DUTY_HOME / "seen.md"
     if not f.exists():
@@ -1420,10 +2415,53 @@ def duty_seen_recent(limit: int = 40, bvid: str = "") -> str:
         bv = str(bvid).strip()
         rows = [ln for ln in rows if bv in ln]
     n = max(1, min(int(limit or 40), 200))
-    tail = rows[-n:]
+    # ⭐ 2026-11-27：按 BV 去重再截窗口。同一条视频通常有「挑了」和「评论」两行，
+    #    按行截窗口等于把一半名额浪费在看过的视频上（实测 80 行只覆盖 60 个视频）。
+    #    这里每个 BV 只保留它最后一次出现的行（最新状态），不同视频的先后顺序不变。
+    kept = []
+    seen_bv = set()
+    for ln in reversed(rows):
+        m = re.search(r"BV[0-9A-Za-z]{10}", ln)
+        key = m.group(0) if m else ln
+        if key in seen_bv:
+            continue
+        seen_bv.add(key)
+        kept.append(ln)
+    kept.reverse()
+    tail = kept[-n:]
     if not tail:
         return "（最近没有记录）"
-    return "共 " + str(len(rows)) + " 行，最近 " + str(len(tail)) + " 行：\n" + "\n".join(tail)
+    head = ("共 " + str(len(rows)) + " 行 / " + str(len(kept)) + " 个视频，最近 "
+            + str(len(tail)) + " 个视频")
+    if not compact:
+        return head + "：\n" + "\n".join(tail)
+    # ⭐ 2026-11-28：判重只需要「这个 BV 看过没有 / 什么状态」，原样表格行带上长标题和 UP，
+    #    40 行 ≈ 7.7k 字符，占一轮工具字符的 14%。压成一行一条后 ≈ 2k（-75%），
+    #    标题只留前 14 字，够判断"这期是不是同一个话题"。
+    agg = {}
+    order = []
+    for ln in rows:
+        # _cell() 会把标题里的竖线转义成 \| ⇒ 按「未转义的竖线」切，再还原
+        cols = [c.strip().replace("\\|", "|") for c in re.split(r"(?<!\\)\|", ln.strip().strip("|"))]
+        while len(cols) < 5:
+            cols.append("")
+        d, bv, title, _up, status = cols[:5]
+        cur = agg.get(bv)
+        if cur is None:
+            cur = {"date": d, "status": status, "title": ""}
+            agg[bv] = cur
+            order.append(bv)
+        cur["date"], cur["status"] = d, status
+        # 「评论」行把 title 写成了「评论记录 rpid=…」⇒ 别让它盖掉真正的标题
+        if title and not cur["title"] and not title.startswith("评论记录"):
+            cur["title"] = re.sub(r"\s+", " ", title)[:14]
+    out = []
+    for bv in order[-n:]:
+        cur = agg[bv]
+        d = cur["date"]
+        out.append((d[5:] if len(d) >= 10 else d) + " " + bv + " " + (cur["status"] or "?")
+                   + (" " + cur["title"] if cur["title"] else ""))
+    return head + "（日期 BV 状态 标题前 14 字）：\n" + "\n".join(out)
 
 
 @tool()
@@ -1431,17 +2469,35 @@ def duty_digest_append(text: str) -> str:
     """
     往**本月归档**末尾追加一段（「digest/<年-月>.md」，给"后来翻旧账"用的）。
 
+    一般**不用**调它：duty_report_append 会自动把日报里的条目归档进 digest。
+    这里只用于「日报之外、单独想往归档里记一条」的场合；同一天同一个 BV 已经有的会跳过。
+
     Args:
         text: 要追加的内容
 
     Returns:
-        写到了哪个文件
+        写到了哪个文件、跳过了几条
     """
     body = str(text or "").replace("\r\n", "\n").strip()
     if not body:
         return "没写：内容是空的"
-    p = DUTY_HOME / "digest" / (_dt.datetime.now().strftime("%Y-%m") + ".md")
-    return "已追加到 " + _append(p, body + "\n")
+    p = _digest_path()
+    have = _digest_seen()
+    keep, dup = [], 0
+    for ln in body.split("\n"):
+        s = ln.rstrip()
+        md = re.match(r"\s*-\s*(\d{4}-\d{2}-\d{2})", s)
+        mb = re.search(r"·\s*(BV[0-9A-Za-z]{10})\s*·", s)
+        if md and mb and (md.group(1), mb.group(1)) in have:
+            dup += 1
+            continue
+        keep.append(s)
+    if not "".join(keep).strip():
+        return "没写：这些条目本月归档里已经有了（日报追加时会自动归档，这里一般不用写）"
+    msg = "已追加到 " + _append(p, "\n".join(keep).rstrip() + "\n")
+    if dup:
+        msg += "（跳过 " + str(dup) + " 条已归档的）"
+    return msg
 
 
 # ========== 转写：非阻塞 + 单条排队 + 可取回的结果 ==========
