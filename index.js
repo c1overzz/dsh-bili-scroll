@@ -28,7 +28,10 @@ import { join, dirname } from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { McpClient } from './lib/mcp.mjs'
-import { verifyRecent, appendVerifyToReport } from './lib/verify.mjs'
+import { verifyRecent, pendingVerifyRecent, appendVerifyToReport } from './lib/verify.mjs'
+import { trimCharterForConfig } from './lib/charter.mjs'
+// 效率账（轮结束自动记一行）
+import { readRoundMetrics, formatRoundMetrics } from './lib/metrics.mjs'
 import { trimCharterForConfig } from './lib/charter.mjs'
 // 效率账（轮结束自动记一行）
 import { readRoundMetrics, formatRoundMetrics } from './lib/metrics.mjs'
@@ -310,6 +313,8 @@ function reportMeta() {
   const clampPatch = (patch) => {
     const p = { ...patch }
     if ('perDay' in p) p.perDay = Math.max(0, Math.min(Number(p.perDay) || 0, 50))
+    // ⭐ 2026-11-28：报告每条正文字数上限 0~600（0 = 不限），非数字回落 180
+    if ('reportEntryChars' in p) { const n = Number(p.reportEntryChars); p.reportEntryChars = Number.isFinite(n) ? Math.max(0, Math.min(Math.round(n), 600)) : 180 }
     if ('reportLevel' in p) p.reportLevel = ['full', 'brief', 'off'].includes(String(p.reportLevel)) ? String(p.reportLevel) : 'full'
     // ⭐ 2.0.5（issue #89）：人设上限 8000 → 60000；**截断时要出声**（以前静默砍，用户以为写进去了 ✗）
     if ('personaPrompt' in p) {
@@ -1306,9 +1311,10 @@ function reportMeta() {
       + `⭐ 不管哪种情况，**报告里都要写一行「因无字幕跳过 N 条」**（N=0 也写）—— 别让它悄悄少几条。`
       + `判重表 = ${join(stateDir, 'seen.md')}（**就是这个绝对路径**，别写到家目录 ~、也别写到别处）；`
       + `⚠️ 它读不出来或写不进去，**必须在报告里明说** —— 那一轮宁可不发评论，也别当成"没有记录"重发一遍。`
-      + `⭐ 另外把这一轮**看过的每一条视频（挑中的和跳过的都算）**追加进归档：${join(digestDir, `${dayKey().slice(0, 7)}.md`)}`
-      + ` —— 一行一条：日期 · BV 号 · 标题 · UP · 一句话结论 · 链接（跳过的那条在后面注明理由）；`
-      + `这是**给以后检索用**的（报告是给人看的，归档是给"回头翻"用的），别省略、也别只写挑中的。`
+      + `⭐ 归档（${join(digestDir, `${dayKey().slice(0, 7)}.md`)}，给"回头翻"用）**不用你写、也别调 duty_digest_append**：`
+      + `挑中的由 duty_report_append 从日报的 \`### BV…\` 段自动归档，跳过的从 \`- 跳过：BV… · 一句原因\` 那一行自动归档。`
+      + `⭐ **判重表也不用你写**（2026-11-28 起）：duty_report_append 会把日报里每个 \`### BV…\` 段（档位当状态）和 \`- 跳过：BV… · 一句原因\` 行顺手记进判重表。⚠️ 所以跳过的视频**必须单独写成一行 \`- 跳过：BVxxx · 一句原因\`**，别混进散文里（散文里的 BV 抠不出来）。`
+      + `所以整轮就三个回合：① 只调搜索（搜到的已按判重表剔过看过的，不用先读判重表） ② 字幕一批取完 ③ 收尾一发（bili_reply × N + duty_report_append 同一个回合一起调；评论行 bili_reply 自己记、判重行由日报顺手记，报告里 rpid 写「见判重表」）。`
       // ⭐ 2026-11 语感：把"它自己以前发过的评论"喂进去 —— 没有这段，它每轮都从零开始，
       //    自然每条都往"平均腔调"上靠（那就是鱼八股）。有这段它才会长出自己的口癖、并避开重复开头。
       + (() => {
@@ -1376,7 +1382,9 @@ function reportMeta() {
    *    要读全就手工改这个列表（或者直接跑 mcp_server.py，不设这个变量 = 全放）。
    */
   const mcpWhitelist = () => {
-    const list = ['bili_search', 'bili_subtitle', 'bili_comments', 'bili_video_info',
+    // ⭐ 2026-11-28 加 *_batch 三个（搜索/字幕/评论）：只读、一次取多条；
+    //    真正的成本闸是 fetchPerRound 与「只读白名单」，不是调用次数。
+    const list = ['bili_search', 'bili_search_batch', 'bili_subtitle', 'bili_subtitle_batch', 'bili_comments', 'bili_comments_batch', 'bili_video_info',
       'bili_cover', 'bili_frames', 'bili_danmaku', 'bili_recommend']  // 看封面 / 画面帧 / 弹幕：只读，不需要额外的闸
     // ⭐⭐ 2.0.5（issue #96 安全加固）：值班轮改成最小权限 profile（没有 fs / shell / web）⇒
     //    写日报 / 判重表 / 归档、以及无字幕转写，全走这几只**固定路径的窄口工具** ✓
@@ -1579,12 +1587,12 @@ function reportMeta() {
     // ⭐ #155：roundNotes 只管这一轮（runDuty 开跑前清空）；startupNotes 是启动时的告警，要重启才变，每轮都还算数
     const roundNotes = []
     const startupNotes = []
-  const runVerify = async (why = 'manual') => {
+  const runVerify = async (why = 'manual', opts = {}) => {
     if (verifying) return { ok: false, error: '上一次复核还没跑完，等它完事' }
     verifying = true
     try {
       log(`评论复核开始（${why}）`)
-      const r = await verifyRecent(stateDir, { log })
+      const r = await verifyRecent(stateDir, { log, ...opts })
       // ⭐ #135：没有结果时 r.text 只是一句没标题的提示，写进去每轮多一行，还会把已有的真结果冲掉
       const f = r.checked.length ? appendVerifyToReport(stateDir, r.text) : null
       // ⭐ 2026-10-19：没有可核的记录时**别往 duty.log 里刷**（用户截图里看到同一句连了 4 行，
@@ -1700,7 +1708,6 @@ function reportMeta() {
       return want.length
     } catch (e) { log('报告补正文失败（不影响使用）：' + String(e?.message ?? e)); return 0 }
   }
-
 
   /* ── 值班会话的「隐形」处理 ──
    * 🔴 2026-10-25（本人反馈）：每点一次「现在跑一轮」，左侧「未分组」就多一个对话。
