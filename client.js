@@ -155,7 +155,8 @@ select[data-bd-input] option,select[data-bd-input] optgroup{
     // ⚠️ 与 lib/state.mjs 的 WINDOWS 保持一致（官方口径：工作日 9–12、14–18 是高峰，其余都是谷时）
     const DEFAULT_WINDOWS = {
       noon: { label: '中午谷时', start: '12:00', end: '14:00' },
-      night: { label: '晚上/夜间谷时', start: '18:00', end: '09:00' },
+      // ⭐ 2026-11-22 本机改，与 lib/state.mjs 同步：夜档 18:00–23:59（不跨零点，0 点不再多跑一轮）
+      night: { label: '晚上/夜间谷时', start: '18:00', end: '23:59' },
     }
 
     /* ────────────── 小组件 ────────────── */
